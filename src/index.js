@@ -250,6 +250,20 @@ async function registerAll(ctx) {
    * 沿用旧循环就会把话投到别的会话里（"我在这个窗口说话，另一个窗口回答"）。
    */
   const ensureLoop = () => {
+    /**
+     * **非实时的文件回放不起常驻循环。**
+     *
+     * 循环的意义是"实时源一直在产帧，攒够一张就叫你"。而 `source:"file"` 是调试用的：
+     * 有限、放完就停，模型自己调 `watch` 就能一段段取完。给它起循环的后果是
+     * 24 秒解出 1955 帧、刷出几十张图、把模型反复叫醒（社区实报）。
+     */
+    const st0 = runner.status();
+    const finiteFile = st0?.lastSource?.kind === 'file' && st0?.lastSource?.realtime !== true;
+    if (finiteFile) {
+      if (loop) stopLoop('文件回放（有限，不需要循环）');
+      loopScene = null;
+      return null;
+    }
     const sid = lastSessionId;
     // 模式和节奏都影响唤醒间隔，任一个变了都得重建循环
     const key = sceneMode ? 'scene' : paceMode;
@@ -272,6 +286,10 @@ async function registerAll(ctx) {
           // 不能写 chat.jsonl：窗已经关了，那条流没人看，模型也拿不到 ——
           // 实测会连写两条，而模型还在说"我还在看"。
           try { runner.note(HANGUP_NOTE); } catch { /* 记不住也要停 */ }
+          // **必须用 hangUp 而不是 stop**：stop 只是停采集，下一条 watch 会立刻
+          // 重启并把窗重新开起来 —— 用户体感是"关掉又弹出来，只能卸载插件"。
+          try { runner.hangUp(); } catch { /* 已经停了 */ }
+          return;
         }
         try { runner.stop(); } catch { /* 已经停了 */ }
       },
@@ -392,6 +410,24 @@ async function registerAll(ctx) {
           signal: run?.signal ?? null,
         });
         if (!r.ok) {
+          // 用户关过窗：**只有他重新要求看，才允许再开**。这一条以前只靠工具描述
+          // 里的一句"别再调了"，模型不照做就会把窗重新弹出来。
+          if (r.reason === 'hung-up') {
+            return {
+              text: '用户已经关掉了悬浮窗，这一轮看屏幕结束了。\n'
+                + '**不要再调 `see_now`**。等用户明确说要看（或者重新打开窗口）再开始。',
+              meta: { ok: false, reason: 'hung-up' },
+            };
+          }
+          // 文件回放放完了：不能自动从头重播，必须显式再传一次来源。
+          if (r.reason === 'file-ended') {
+            return {
+              text: `这个文件已经放完了（${r.path ?? ''}）。\n`
+                + '**不会自动重播**。要再看一遍就显式传 `source:"file"` + `path`，'
+                + '要接着看屏幕就传 `source:"screen"`。',
+              meta: { ok: false, reason: 'file-ended', path: r.path ?? null },
+            };
+          }
           if (r.reason === 'cancelled') {
             return {
               text: '这一轮被取消了（用户按了停止，或者调用超时），等待已经结束。\n'
@@ -421,8 +457,8 @@ async function registerAll(ctx) {
           waited: r.waited, partial: r.partial, quality: r.quality,
           userText: r.userText ?? null,
           say: said,
-          looping: !lp.stopped(),
-          loopWakes: lp.state().wakes,
+          looping: Boolean(lp) && !lp.stopped(),
+          loopWakes: lp ? lp.state().wakes : 0,
         });
       }
 

@@ -72,6 +72,21 @@ function optsSig(o) {
   return Object.keys(o ?? {}).sort().map((k) => `${k}=${JSON.stringify(o[k])}`).join('|');
 }
 
+/**
+ * 「这一条 watch 该不该被硬闸拦下」的**纯函数**（好测，也好读）。
+ *
+ * 三条规矩：
+ * - 用户关过窗（`hungUp`）→ 除非他显式说了要看什么，否则不重开。
+ * - 文件放完了（`fileEnded`）→ 同上，文件回放是一次性的，不能自动重播。
+ * - 显式传了来源 = 用户明确要求 → 一律放行。
+ */
+export function guardReason({ hungUp = false, fileEnded = false, explicitSrc = false } = {}) {
+  if (explicitSrc) return null;
+  if (hungUp) return 'hung-up';
+  if (fileEnded) return 'file-ended';
+  return null;
+}
+
 export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec = 60 } = {}) {
   let pipeline = null;   // 当前（或刚停的）引擎 —— 停采集后仍留着，好把队列里剩的图发完
   let running = false;
@@ -118,6 +133,24 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
    * 正确的路子和陪看一样：落在这里，下一次工具结果把它带走。
    */
   let pendingNote = null;
+  /**
+   * 用户"关窗挂断"过没有。
+   *
+   * 关窗之后再被叫醒一次，`watch` 会**重新把窗开起来**、把采集重启 ——
+   * 用户看到的是"关不掉，只能卸载插件"（社区实报）。所以这里是个硬闸：
+   * 挂断之后只有**显式指定来源**（用户说了要看什么）才允许重新开始。
+   */
+  let hungUp = false;
+  /** 最近一次的采集源（teardown 会把 `source` 清空，但事后判断还需要它） */
+  let lastSource = null;
+  /**
+   * 已经放完的文件源。**文件回放是一次性的**：放完就结束，不能自动重播。
+   *
+   * 以前 `watch` 会在 `stopped` 时用 `prevSrc` 自动重启，而文件源重启就是
+   * "从头再放一遍"，于是 24 秒解 1955 帧、出一堆图、把模型反复叫醒，
+   * 关窗也停不下来（社区实报的那条）。
+   */
+  let endedSource = null;
 
   function teardown(why) {
     if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
@@ -154,6 +187,9 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
 
   async function start({ src = { kind: 'screen' }, opts = {}, quality: q = null } = {}) {
     if (running) return { already: true, source };
+    // 走到这里就是"明确要开始看"（watch 的自动重启已经在前面被硬闸挡住了）。
+    hungUp = false;
+    endedSource = null;
     // **窗被用户关掉之后，这里必须复位**：`windowState` 缓存着 `{ok:true}`，
     // `windowOpened` 也还是 true —— 不复位的话下一次 watch 会（a）不再开窗，
     // （b）循环立刻又把"窗没了"判成用户关窗，落第二条挂断说明。
@@ -173,6 +209,7 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
     pipeline = p;
     running = true;
     source = s;
+    lastSource = s;
     startedAt = Date.now();
     run = spawnFrames({
       source: s,
@@ -189,7 +226,12 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
       onStderr: (s2) => { if (process.env.DSH_SEE_NOW_DEBUG) log(s2.trim()); },
     });
     run.done.then((r) => {
-      if (pipeline === p) { lastError ??= `ffmpeg 退出（${r.frames} 帧 / ${Math.round(r.ms / 1000)}s）`; teardown('ffmpeg-exit'); }
+      if (pipeline === p) {
+        lastError ??= `ffmpeg 退出（${r.frames} 帧 / ${Math.round(r.ms / 1000)}s）`;
+        // 文件源放完 = 这一次看完了。记下来，别让下一条 watch 又从头放一遍。
+        if (s.kind === 'file') endedSource = s;
+        teardown('ffmpeg-exit');
+      }
     }).catch((e) => {
       lastError = `ffmpeg: ${e?.message ?? e}`;
       if (pipeline === p) teardown('ffmpeg-error');
@@ -226,6 +268,18 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
   return {
     start,
     stop() { teardown('手动'); return { stopped: true }; },
+    /**
+     * 用户关掉了悬浮窗 = 明确表示"不看了"。
+     *
+     * 只 `stop()` 不够：下一条 `watch` 看到 `stopped` 会立刻重启采集并把窗**重新开起来**，
+     * 用户体感就是"关掉又弹出来，除非卸载插件"（社区实报）。这里立一个硬闸，
+     * 直到有人显式指定来源为止。
+     */
+    hangUp() { hungUp = true; teardown('用户关窗'); return { hungUp: true }; },
+    /** 挂断状态（测试和状态页用） */
+    isHungUp() { return hungUp; },
+    /** 有没有一个"已经放完、不能自动重播"的文件源 */
+    endedFile() { return endedSource ? { ...endedSource } : null; },
     /** 这一轮开过窗没有（循环判"用户关窗"用） */
     windowWasOpen() { return windowOpened; },
 
@@ -248,11 +302,27 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
       // 冷启动时"先给此刻"的宽限：等第一帧最多这么久，等到就立刻出图。
       eagerMs = 3000,
     } = {}) {
+      /**
+       * 三个"不许自动重开"的硬闸。都来自社区实报：
+       * 「回放会解 1955 帧、攒一堆唤醒、一直弹有新画面，关窗也停不干净，得卸载才行」。
+       *
+       * 共同原因是 `watch` 在 `stopped` 时会**自动重启采集**，而重启对文件源意味着
+       * 从头再放一遍，对关过窗的用户意味着"我刚关掉它又弹出来了"。
+       * 所以：只有**显式传了来源**（用户明确说要看什么）才允许清闸重开。
+       */
+      const explicitSrc = Boolean(src && src.kind);
+      const blocked = guardReason({ hungUp, fileEnded: Boolean(endedSource), explicitSrc });
+      if (blocked === 'hung-up') return { ok: false, reason: 'hung-up', waited: 0 };
+      if (blocked === 'file-ended') {
+        return { ok: false, reason: 'file-ended', waited: 0, path: endedSource?.path };
+      }
+      if (explicitSrc) { hungUp = false; endedSource = null; }
+
       if (busy) return { ok: false, reason: 'busy', waited: 0 };
       busy = true;
       const t0 = Date.now();
       try {
-        const prevSrc = source;
+        const prevSrc = source ?? lastSource;
         const switching = Boolean(pipeline) && q && SIZES[q] && q !== quality;
         // 管线参数变了（常规 ↔ 逐帧）：这两套口径建管线时就定死了，只能重开。
         const modeChanged = Boolean(pipeline) && optsSig(runOpts) !== optsSig(opts);
@@ -416,6 +486,9 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
       return {
         running,
         source,
+        lastSource,
+        hungUp,
+        endedFile: endedSource?.path ?? null,
         quality,
         size: SIZES[quality],
         frames,

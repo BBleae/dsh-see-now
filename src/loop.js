@@ -88,6 +88,8 @@ export function startLoop({
   /** pending 0→1 的脉冲计数：拿不到出图序号时靠它认"新的一张" */
   let pendingPulse = 0;
   let lastPending = 0;
+  /** 采集停掉之后已经过了几拍 —— 用来给"队列里剩下的图"一个播报窗口，然后收工 */
+  let deadTicks = 0;
   let lastWakeOk = null;
 
   /**
@@ -159,7 +161,17 @@ export function startLoop({
       //    那时 `!running` 是"没人来取"而不是"坏了"，不能当成停。
       const st = runner.status();
       const alive = runner.touch?.() ?? st.running;
-      if (!alive && !st.pending) { stop('capture-stopped'); return; }
+      /**
+       * 采集已经停了：**最多再给两拍**把队列里剩下的图报出来，然后收工。
+       *
+       * 以前这里是 `!alive && !st.pending` —— 只要还有没取走的图就永远不自杀。
+       * 文件回放一次能塞几十张进去，循环就被这些"永远取不完"的 pending 吊住，
+       * 模型每拍被叫醒一次，用户看到的就是"一直弹有新画面、关窗都停不干净"。
+       */
+      if (!alive) {
+        deadTicks += 1;
+        if (!st.pending || deadTicks > 2) { stop('capture-stopped'); return; }
+      } else if (deadTicks) deadTicks = 0;
 
       // ③ 有人在阻塞等的时候，整条叫醒路径都让开 —— 那一轮本来就还没结束，
       //    `followup` 投进去只会排队到这一轮之后，纯属插队无效还容易串话。
