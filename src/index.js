@@ -254,8 +254,12 @@ async function registerAll(ctx) {
    *
    * **换会话要换循环**：`lastSessionId` 会被任何一个会话的 `session/event` 顶掉，
    * 沿用旧循环就会把话投到别的会话里（"我在这个窗口说话，另一个窗口回答"）。
+   *
+   * **owner 由调用方传入的优先**：`watch` 是阻塞的（15~40 秒），等它返回时
+   * `lastSessionId` 可能已经被另一个会话的事件顶掉了。所以 `watch` 会在**开始等待前**
+   * 把当时的会话 id 记下来传进来，而不是让这里现取（issue #1 的归属竞争）。
    */
-  const ensureLoop = () => {
+  const ensureLoop = (owner = null) => {
     /**
      * **非实时的文件回放不起常驻循环。**
      *
@@ -270,7 +274,7 @@ async function registerAll(ctx) {
       loopScene = null;
       return null;
     }
-    const sid = lastSessionId;
+    const sid = owner ?? lastSessionId;
     // 模式和节奏都影响唤醒间隔，任一个变了都得重建循环
     const key = sceneMode ? 'scene' : paceMode;
     if (loop && !loop.stopped() && loop.state().session === sid && loopScene === key) return loop;
@@ -397,6 +401,11 @@ async function registerAll(ctx) {
       }
 
       if (action === 'watch') {
+        // **循环的 owner 必须在等待开始前锁定**。`runner.watch()` 会阻塞 15~40 秒，
+        // 这期间任何会话的 `session/event` 都会改写 `lastSessionId`；等它返回再
+        // `ensureLoop()` 现取，就会把后续唤醒投到"等待期间最后说话的那个会话"去
+        // （issue #1 的复现：watch 在 A 会话发起，结束后循环绑到了 B）。
+        const ownerAtStart = lastSessionId;
         const src = args.source ? {
           kind: String(args.source).toLowerCase(), path: args.path, realtime: args.realtime === true,
         } : null;
@@ -406,9 +415,21 @@ async function registerAll(ctx) {
           Number(args.seconds) > 0 ? Number(args.seconds) : DEFAULT_BLOCK_SEC,
           MAX_BLOCK_SEC,
         );
+        const requestedMinFrames = Number(args.minFrames) > 0 ? Number(args.minFrames) : 1;
+        // **逐帧模式和 minFrames 互斥**：逐帧一张图就 1 帧，`minFrames > 1` 永远等不满，
+        // 会一路等到超时再报"画面没变"——那是假故障。让 minFrames 让路（它只是
+        // "别给我太碎的图"，而逐帧本来就要碎），并把这句说出去，别让人以为设了 5 就真有 5。
+        const minFrames = sceneMode ? 1 : requestedMinFrames;
+        if (sceneMode && requestedMinFrames > 1) {
+          pendingModeNote = [
+            `逐帧模式下每张图只有 1 帧，\`minFrames: ${requestedMinFrames}\` 这条路上不生效（已按 1 处理）。`
+            + '要按帧数攒图，先 `see_now({scene:false})`。',
+            pendingModeNote,
+          ].filter(Boolean).join('\n\n');
+        }
         const r = await runner.watch({
           seconds,
-          minFrames: Number(args.minFrames) > 0 ? Number(args.minFrames) : 1,
+          minFrames,
           src,
           quality: args.quality ? String(args.quality).toLowerCase() : null,
           // 逐帧模式：一张图一帧 + 档位固定 1（铺满）；常规按节奏定切点门槛。
@@ -454,7 +475,7 @@ async function registerAll(ctx) {
           }
           return {
             text: r.reason === 'no-change'
-              ? `看了 ${r.waited.toFixed(0)} 秒，画面基本没变（不够 ${args.minFrames ?? 1} 帧就不发）。`
+              ? `看了 ${r.waited.toFixed(0)} 秒，画面基本没变（不够 ${minFrames} 帧就不发）。`
                 + '\n再等一会儿，或者直接问用户想让你看什么。'
               : `没看成（${r.reason}）${r.error ? `：${r.error}` : ''}。`,
             meta: { ok: false, reason: r.reason, waited: +r.waited.toFixed(1) },
@@ -462,7 +483,7 @@ async function registerAll(ctx) {
         }
         // **拿到第一张图之后就把钟起起来** —— 这是"看一眼就完"和"一直看下去"的分界线。
         // 之后每攒够一张，循环会自己叫醒你，不用你再调。
-        const lp = ensureLoop();
+        const lp = ensureLoop(ownerAtStart);
         return await attachAndReturn(ctx, r.sheet, {
           waited: r.waited, partial: r.partial, quality: r.quality,
           userText: r.userText ?? null,

@@ -432,7 +432,15 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
             const said = pollUser();
             if (said) return await interjectNow(said);
             const s = pipeline?.take();
-            if (s) return { ok: true, sheet: s, waited: (Date.now() - t0) / 1000, quality, windowOpen: win.ok };
+            if (s) {
+              // **正常返回也要过 minFrames**。以前只有超时分支检查，于是
+              // `minFrames: 5` 在队列先到的路径上会被无视，照样交一张 1 帧的图
+              // （issue #1 的复现：`{ ok: true, frames: 1 }`）。
+              // 不够就丢掉这一张接着等 —— 到点还没攒够，会走下面的 no-change 提示。
+              if (s.frames.length >= minFrames) {
+                return { ok: true, sheet: s, waited: (Date.now() - t0) / 1000, quality, windowOpen: win.ok };
+              }
+            }
             if (!running && !pipeline?.pending) break;   // 采集停了，队列也空了
             await sleep(120);
           }
@@ -457,16 +465,25 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
     },
 
     /**
-     * 立刻截断出图（用户插话走这条）：不等判据、不排队。
+     * 取走**已经拼好的那一张**（后台唤醒走这条）。
+     *
+     * 语义是 "grab the sheet that already piled up" —— 模型被"有新画面了"叫醒时，
+     * 要的就是那张攒好的图，不该再等、也不该换一张。
+     *
+     * **不能走 `flushNow()`**：那是插话用的，会把 `sheets` 整个清空、再把"此刻那一帧"
+     * 塞成一张新图。结果是队列里攒好的多帧摘要被一张单帧替换掉 —— 复现见 issue #1：
+     * `queued [0,2,4]` → 调完 peek 变成 `[5.92]`、`pending 0`。
+     * 队列空就老实返回 null（调用方会提示"下一张还在攒"），
+     * 想看"此刻"请走 `watch`。
      *
      * 顺便支窗（**不等它**）：走 peek 路线的会话没有 watch 的阻塞点，
      * 不在这里开窗的话，用户永远没有可以打字的入口，也就没有"关窗 = 不看了"。
      */
     peek() {
-      const s = pipeline?.flushNow();
+      const queued = pipeline?.take() ?? null;
       if (running) armGrace();
       if (!windowState?.ok && !windowPending) void ensureWindow();
-      return s ?? null;
+      return queued;
     },
 
     /** 常驻循环每拍续命（见 touch 的注释） */
