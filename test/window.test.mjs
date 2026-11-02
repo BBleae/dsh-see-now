@@ -113,3 +113,37 @@ test('不存在的解释器一定过不了 tkinter 验证', () => {
   assert.equal(hasTkinter(join(home, 'not-python-1.exe')), false);
   assert.equal(hasTkinter(join(home, 'not-python-2.exe')), false);
 });
+
+test('心跳过期时 windowAlive 判死 —— 进程还在也不行', async () => {
+  // 场景就是 issue #2 第 3 条：进程活着、pid 文件也在，但窗口其实已经卡死/是张空窗。
+  // 老逻辑只看 pid，于是永远"还活着"，用户点 × 之后再叫也开不出来。
+  const { chatDir } = await import('../src/chat.js');
+  const { utimesSync, mkdirSync } = await import('node:fs');
+  mkdirSync(chatDir(), { recursive: true });
+  const hb = join(chatDir(), 'window-heartbeat');
+
+  // pid 指向当前进程（一定活着）
+  writeFileSync(pidPath(), String(process.pid), 'utf8');
+  writeFileSync(hb, '');
+  assert.equal(windowAlive(), true, '心跳新鲜时应判定为活着');
+
+  // 把心跳改到 30 秒前
+  const old = new Date(Date.now() - 30_000);
+  utimesSync(hb, old, old);
+  assert.equal(windowAlive(), false, '心跳过期必须判死，否则永远不会重开窗');
+
+  rmSync(hb, { force: true });
+  rmSync(pidPath(), { force: true });
+});
+
+test('没有心跳文件时不误杀（兼容不写心跳的老窗口）', async () => {
+  const { chatDir } = await import('../src/chat.js');
+  const { mkdirSync, utimesSync } = await import('node:fs');
+  mkdirSync(chatDir(), { recursive: true });
+  const hb = join(chatDir(), 'window-heartbeat');
+  rmSync(hb, { force: true });          // 老窗口：压根不写心跳
+
+  writeFileSync(pidPath(), String(process.pid), 'utf8');
+  assert.equal(windowAlive(), true, '没有心跳文件时应继续信任 pid，别把老窗口误杀');
+  rmSync(pidPath(), { force: true });
+});

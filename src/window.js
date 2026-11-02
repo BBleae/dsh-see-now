@@ -23,7 +23,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -45,6 +45,14 @@ function seeConfig() {
 export function pidPath() {
   return join(dshHome(), 'see-now-window.pid');
 }
+
+/** 心跳文件：窗口每秒 touch 一次，用来区分"进程还在"和"窗口真的在画"。 */
+function heartbeatPath() {
+  return join(chatDir(), 'window-heartbeat');
+}
+
+/** 心跳多久算过期。窗口 1 秒写一次，6 秒足够容忍一次 GC 或短暂卡顿。 */
+export const HEARTBEAT_STALE_SEC = 6;
 
 function logPath() {
   return join(dshHome(), 'see-now-window.log');
@@ -169,13 +177,26 @@ function pythonCandidates() {
   return [...new Set(list.filter(Boolean))];
 }
 
-/** 上次开的那个还活着吗？（pid 复用会误判，代价只是"少开一次"） */
+/**
+ * 上次开的那个还活着吗？
+ *
+ * **不能只看 pid**：pid 会被系统复用，进程也可能活着但界面卡死、或者是一张全透明的空窗。
+ * 那种情况下这里一直返回 true，于是**再也不重开**，用户体感是"点了没反应"
+ * （issue #2 第 3 条）。所以加一层心跳：窗口每秒 touch 一个文件，过期就当它死了。
+ *
+ * 没有心跳文件时**不判死**：老版本窗口不写心跳，误杀会让它每次都被重开。
+ */
 export function windowAlive() {
   if (process.env.DSH_SEE_NO_WINDOW === '1') return false;
   let pid = 0;
   try { pid = Number(readFileSync(pidPath(), 'utf8').trim()); } catch { return false; }
   if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  try { process.kill(pid, 0); } catch { return false; }
+  try {
+    const hb = statSync(heartbeatPath());
+    if ((Date.now() - hb.mtimeMs) / 1000 > HEARTBEAT_STALE_SEC) return false;
+  } catch { /* 没有心跳文件：兼容老窗口，继续信任 pid */ }
+  return true;
 }
 
 /**
@@ -194,6 +215,15 @@ export function windowAlive() {
 export async function openWindow({ force = false, log = () => {}, settleMs = 700, script: forced = null } = {}) {
   if (process.env.DSH_SEE_NO_WINDOW === '1') return { ok: false, reason: 'disabled' };
   if (!force && windowAlive()) return { ok: true, already: true };
+
+  // force、或者 pid 还在但心跳过期（进程卡死/是空窗）才会走到这儿：
+  // 先把上一次那个进程收掉，否则会叠出两个窗口，而用户只看得见一个。
+  try {
+    const old = Number(readFileSync(pidPath(), 'utf8').trim());
+    if (Number.isInteger(old) && old > 0 && old !== process.pid) {
+      try { process.kill(old); } catch { /* 已经没了 */ }
+    }
+  } catch { /* 没有 pid 文件，正常首次启动 */ }
 
   const { script, from } = forced
     ? { script: forced, from: '调用方指定' }

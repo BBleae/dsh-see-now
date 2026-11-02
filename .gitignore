@@ -19,3 +19,7 @@ Thumbs.db
 
 # 内部交接记录（引用本机路径与兄弟仓库），不公开
 overview.md
+
+# Python 字节码（悬浮窗跑一次就会生成；别让它进 git，更别进 npm 包）
+__pycache__/
+*.pyc

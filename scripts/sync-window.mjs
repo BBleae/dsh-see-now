@@ -22,7 +22,7 @@
  * 两边都没有 → **报错退出 1**（发一个开不了窗的包出去比报错更糟）。
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -131,9 +131,35 @@ if (checkOnly) {
 
 if (same) {
   say(`[sync-window] 上游没变，跳过（${upstream.from}，${src.length} 字节）`);
-  process.exit(0);
+} else {
+  mkdirSync(dirname(DEST), { recursive: true });
+  writeFileSync(DEST, want, 'utf8');
+  say(`[sync-window] 已同步 ${src.length} 字节 ← ${upstream.from}`);
+  say(`              ${DEST}`);
 }
 
-mkdirSync(dirname(DEST), { recursive: true });
-writeFileSync(DEST, want, 'utf8');say(`[sync-window] 已同步 ${src.length} 字节 ← ${upstream.from}`);
-say(`              ${DEST}`);
+/**
+ * **window.py 不是单独一个文件**：它 `import window_protocol`、跑 `mic.py`、
+ * 贴同目录的 `mic-dsh.png`。只同步 .py 会得到一个"能装、装完起不来"的包 ——
+ * 用户看到的是 `FileNotFoundError: .../mic-dsh.png`，然后以为插件坏了。
+ *
+ * 这是 issue #2 第 3 条（spawn 失败静默）的一个真根因：包内那份 window.py
+ * 在只装了 see-now、没装 watch-together 的机器上必崩。
+ */
+const ASSETS = ['mic-dsh.png', 'mic.py', 'window_protocol.py'];
+const srcDir = dirname(upstream.p);
+const destDir = dirname(DEST);
+for (const name of ASSETS) {
+  const from = join(srcDir, name);
+  const to = join(destDir, name);
+  if (!existsSync(from)) continue;
+  let unchanged = false;
+  try {
+    const a = readFileSync(from);
+    const b = existsSync(to) ? readFileSync(to) : null;
+    unchanged = b !== null && a.equals(b);
+  } catch { /* 读不出来就当它变了，重写一次 */ }
+  if (unchanged) continue;
+  copyFileSync(from, to);
+  say(`[sync-window] 资源已同步 ${name}`);
+}
