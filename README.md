@@ -8,19 +8,19 @@
 
 ---
 
-## 授权说明 / License Notice
+## 授权说明 / License
 
-- **👨‍💻 个人 / 学习 / 非商业用途**：**完全免费**。随便用、随便 Fork、随便改、随便提 PR。
-- **🏢 商业用途**（公司里用它干活、嵌进你卖的产品、靠它赚钱）：
-  需要一份商用授权，**¥9.9 / 人 / 年**。就这一个价，没有团队档、没有企业档、不涨价。
+**Apache License 2.0** —— 随便用。个人、公司内部、闭源产品、SaaS、二次分发都可以，
+**不需要问我要授权，也不收费**。只要保留 [LICENSE](./LICENSE) 和 [NOTICE](./NOTICE) 这两份文件。
 
-商业授权 / 任何疑问：**1043740270@qq.com**（48 小时内回复）。详见 [COMMERCIAL.md](./COMMERCIAL.md)。
+如果你觉得它替你省了时间，欢迎扫码打赏 —— 纯自愿，**不影响上面任何一个字**：
 
-**9.9 不是门槛，是"把事情说清楚"的费用。** 功能人人可用，我不靠它赚钱 ——
-你付这 9.9 买的是「我可以正大光明用」这句话。学生、公益、开源项目、以及给本项目贡献过代码的人，**免费**。
+<p align="center">
+  <img src="./docs/images/reward-qr.png" alt="赞赏码（微信 / 支付宝）" width="240">
+</p>
 
-协议正文见 [LICENSE](./LICENSE)（PolyForm Noncommercial License 1.0.0）。
-提交 PR 前请先读 [CONTRIBUTING.md](./CONTRIBUTING.md) —— **本项目的贡献需要签 [CLA](./CLA.md)**（PR 里勾一行即可）。
+提交 PR 前读一下 [CONTRIBUTING.md](./CONTRIBUTING.md) —— 现在**不需要签 CLA** 了，
+按 Apache-2.0 的规矩来就行。
 
 ---
 
@@ -235,7 +235,7 @@ src/
   index.js      工具注册与路由
 examples/floating-chat/   悬浮窗（Tk，无边框圆角，置顶）
 debug/                    调试窗（不在 npm 包里）
-test/                     79 条测试
+test/                     85 条测试
 ```
 
 ---
@@ -251,13 +251,12 @@ test/                     79 条测试
 
 ## 协议
 
-**PolyForm Noncommercial License 1.0.0** —— 个人、学习、非商业用途免费；商业用途需书面授权。
+**Apache License 2.0** —— 商用、闭源、再分发、改完再卖都可以，保留 [LICENSE](./LICENSE) 与
+[NOTICE](./NOTICE) 即可。
 
-商业授权：**1043740270@qq.com**
+`examples/floating-chat/` 来自同作者的另一个项目 `dsh-watch-together`，两边现在是**同一个协议**，
+不再有"这个目录 Apache、其余非商业"的分裂。
 
-> **一个目录例外**：`examples/floating-chat/` 源自同作者的另一个项目 `dsh-watch-together`，
-> 那个项目用的是 **Apache-2.0**，所以这个目录**沿用 Apache-2.0** 分发。
-> 仓库其余部分（`src/`、`debug/`、`test/`、文档）才是 PolyForm Noncommercial。
-> 两种情况都不影响你把它当个人工具用。
+愿意打赏就扫上面那个码 —— 不打赏一样能用全部功能，**没有任何东西锁在付费后面**。
 
 Copyright © 2026 SAOS-3624
