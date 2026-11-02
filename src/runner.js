@@ -17,7 +17,7 @@
  *    （时间顺序不能乱），新图挤掉旧图由 pipeline 的 queueDepth 负责。
  */
 
-import { spawnFrames, pickScreenEngine } from './capture.js';
+import { spawnFrames, pickScreenEngine, screenEngineWarning } from './capture.js';
 import { createPipeline } from './pipeline.js';
 import { chatWatcherShared, enterChatWait } from './chat.js';
 import { noteInterjected } from './interject.js';
@@ -237,7 +237,11 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
       if (pipeline === p) teardown('ffmpeg-error');
     });
     log(`开始看 ${s.kind}${engine && engine !== 'auto' ? `/${engine}` : ''} @${size[0]}×${size[1]}`);
-    return { started: true, source: s, engine, quality, params: p.constants };
+    // macOS 没给屏幕录制权限时，采集本身是"成功"的，只是画面全黑 ——
+    // 探针已经试出来了，这里把它带回去，让模型（和用户）知道该去系统设置，而不是以为插件坏了。
+    const warning = s.kind === 'screen' ? screenEngineWarning() : null;
+    if (warning) log(`⚠️ ${warning}`);
+    return { started: true, source: s, engine, quality, params: p.constants, warning };
   }
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

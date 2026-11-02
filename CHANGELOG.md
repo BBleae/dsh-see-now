@@ -2,6 +2,73 @@
 
 本文件从 `0.0.4` 起记录；更早的版本见 GitHub Releases。
 
+## [0.0.7] - 2026-11-02
+
+> 主题：**改声音配置不用重启**。
+
+### Added — 声音适配器（macOS / `say`）
+
+`examples/voice-say-mac.mjs`：把「该念了」翻译成一次 `say`，音色语速读 `~/.dsh/tts.json`
+（和 `dsh-watch-together` 共用）。核心仍然不内置引擎，只认 `~/.dsh/voice.json` 里的
+`adapter` 路径。
+
+三条实现上的决定：**不排队**（正在念时新句子直接 `skipped` —— 等它念完，画面早就过去了）、
+**`spoken` 在进程起来那一刻发**（展示层"字跟着声音走"）、**detach 要杀进程**
+（关窗时正在念的那句必须立刻停）。
+
+### Added — `ensureConfiguredVoice()`：每次调用前检查一次
+
+原来只在插件启动时读一次 `~/.dsh/voice.json`，于是「配置文件是插件启动之后才写的」这种情况
+必须重启整个 DSH。现在工具入口每次都过一遍：
+
+- 没配 → 什么都不做；
+- 配了指纹没变 → 一次读文件的代价就返回；
+- 指纹变了（换了适配器，或改了 `tts.json` 内容）→ 卸载重挂。
+
+指纹用 `tts.json` 的**内容摘要**而不是 mtime：mtime 只到毫秒，同一毫秒内两次等长写入会被判成
+"没变"—— 写这个的单测里当场踩到，改成 sha256 前 16 位。代价是这个几十字节的文件每轮读一次。
+
+## [0.0.6] - 2026-11-02
+
+> 主题：**macOS 能用**。之前 `ENGINES` 只有 `ddagrab` / `gdigrab`，在 Mac 上直接退。
+
+### Added — `avfoundation` 屏幕/摄像头源
+
+- 屏幕：`-f avfoundation -framerate 12 -pixel_format nv12 -capture_cursor 0 -i "Capture screen 0:none"`。
+  音频写 `none`，否则某些系统会去开麦克风、多弹一次权限。
+- 摄像头 / OBS 虚拟摄像头：同样走 avfoundation，`-i "<设备名或索引>:none"`。
+- 局部裁剪：avfoundation 没有 gdigrab 的 `-video_size`，改在滤镜里 `crop`（坐标按采集分辨率算）。
+- `pickScreenEngine()` 按平台分派：macOS 探 avfoundation、Windows 探 ddagrab、其它平台**明确报错**，
+  不再假装能用。
+
+### Added — 像素格式探针
+
+屏幕输入**不支持** ffmpeg 默认的 `yuv420p`，每个进程都会刷一行 "not supported" 到 stderr
+（真出错时被截断的 300 字里全是它）。现在探针按 CPU 从省到费试
+`nv12` → `uyvy422` → `bgr0` → 设备默认，挑第一个真能出帧的并缓存。
+
+### Added — `binaries.js`：自己找 ffmpeg
+
+DSH 桌面版把 ffmpeg 放在 `~/.dsh/tools/ffmpeg/bin`，**不进 PATH**。原来写死裸 `'ffmpeg'`，
+在 macOS 上就是 ENOENT，而且看起来像"插件坏了"。现在按
+`DSH_FFMPEG_PATH` → `FFMPEG_PATH` → `DSH_FFMPEG_DIR` → `$DSH_HOME/tools/ffmpeg/bin` → `$DSH_HOME/bin` → PATH 找。
+
+### Added — 屏幕录制权限提示
+
+macOS 没给「屏幕录制」权限时 ffmpeg **不报错**：exit 0、帧数正常、画面全黑。
+探针算平均像素，全黑就在 `start` 的返回里带一句去系统设置的提示。
+
+### Fixed — 每次 `stop` 都往 `lastError` 里写一条假错误
+
+`stop()` 是 SIGKILL，子进程 `code` 是 `null`。原来的判断 `err.trim() && code !== 0`
+把"我们主动杀的"也算成失败 —— 只要 stderr 有过任何一行输出（macOS 上就有），
+每次收工都会盖一条 `ffmpeg exit null`。现在 `code === null` 一律按正常收尾处理。
+
+### Fixed — 测试改成了平台无关
+
+原来的采集参数断言全是 Windows 引擎行为，在 Mac 上跑会走 avfoundation 分支。
+现在显式传 `platform`，并补了 macOS 屏幕/摄像头/裁剪三条和"其它平台明确报错"一条。
+
 ## [0.0.5] - 2026-11-02
 
 `examples/floating-chat/window.py` 同步上游 `dsh-watch-together` **0.2.4**（生成产物，

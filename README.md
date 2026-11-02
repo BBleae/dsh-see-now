@@ -87,6 +87,17 @@ node scripts/install-dev.mjs      # 拷进本机 DSH 的 desktop profile
 
 > `install-dev` 是**复制**不是软链（Node 解析裸包名要走真实路径，软链会找不到宿主的 `@deepseek-ai/dsh-tools`）。装完**重启 DSH** 生效。
 
+#### 平台
+
+| 平台 | 屏幕引擎 | 要额外做的 |
+|---|---|---|
+| Windows | `ddagrab`，不行退 `gdigrab`（自动探测） | 无 |
+| macOS | `avfoundation` | 系统设置 → 隐私与安全性 → **屏幕录制**，勾上跑 DSH 的 App |
+| Linux | — | 还没接（要补 `x11grab` / PipeWire） |
+
+ffmpeg 不用进 PATH：插件会按 `DSH_FFMPEG_PATH` / `FFMPEG_PATH` / `DSH_FFMPEG_DIR` /
+`~/.dsh/tools/ffmpeg/bin` / `~/.dsh/bin` 的顺序自己找（DSH 桌面版把 ffmpeg 装在第四个位置）。
+
 然后让模型调：
 
 ```js
@@ -116,6 +127,34 @@ setInterval(() => {
   if (sheet) require('fs').writeFileSync(`sheet-${sheet.at}.png`, sheet.png);
 }, 200);
 ```
+
+---
+
+## 声音
+
+核心**不内置任何 TTS 引擎**，只 dynamic import 一个你指定的模块。配好之后，
+`say` 会进悬浮窗**并且被念出来**；普通回复永远只有字。
+
+```json
+// ~/.dsh/voice.json
+{ "adapter": "/绝对路径/examples/voice-say-mac.mjs" }
+```
+
+macOS 自带一个：`examples/voice-say-mac.mjs`，走系统的 `say`，音色和语速从
+`~/.dsh/tts.json` 读（和 `dsh-watch-together` 共用同一份）：
+
+```json
+// ~/.dsh/tts.json
+{ "voice": "Tingting", "rate": 185 }
+```
+
+`say -v '?' | grep zh_` 可以列出本机所有中文音色（`Tingting` / `Meijia` / `Sinji` / `Reed` / `Rocko`…）。
+
+**改完不用重启**：每次调用工具前都会比对一次配置指纹（适配器路径 + `tts.json` 内容摘要），
+变了就自动卸载重挂，没变就一次读文件的开销。所以改音色、换适配器，**下一句就生效**。
+
+> 适配器要自己处理两件事：**串行**（两个 `say` 抢音频设备会像结巴）和 **`spoken` 上报**
+> （在出声的那一瞬发，不能等念完 —— 展示层是"字跟着声音走"的）。
 
 ---
 
@@ -196,7 +235,7 @@ Windows 上可以直接双击 `debug/调试窗.cmd`，跟着菜单走。
 
 ---
 
-## 实测（本机 i9-12900HX / RTX 4060 Laptop / 2560×1600）
+## 实测（Windows：i9-12900HX / RTX 4060 Laptop / 2560×1600）
 
 采集开销（12fps → 800×450）：
 
@@ -205,6 +244,23 @@ Windows 上可以直接双击 `debug/调试窗.cmd`，跟着菜单走。
 | `ddagrab`（桌面复制 API） | 370ms | **0.28 核** |
 | `gdigrab`（GDI 抓屏） | 310ms | 0.45 核 |
 | OBS 虚拟摄像头 | 575ms | 0.13 核 |
+
+## 实测（macOS：M 系列 / Retina）
+
+| 源 | 首帧 | CPU |
+|---|---|---|
+| `avfoundation` 屏幕 | **~700ms** | **~0.16 核** |
+
+首帧慢在 `AVCaptureSession` 冷启动（ffmpeg 进程本身 ~300ms），但稳态比 Windows 两种引擎都省。
+
+像素格式是**探针试出来的**，不是写死的：屏幕输入不支持默认的 `yuv420p`，探针按 CPU 从省到费
+（`nv12` → `uyvy422` → `bgr0` → 设备默认）试到第一个真能出帧的，然后整个进程记住。
+
+> macOS 上有两个坑会伪装成"插件坏了"，都写在 `src/capture.js` 里：
+> **① `-framerate` 在 avfoundation 屏幕源上不压速**（实测 30 帧只用 0.73 秒，≈40fps），
+> 必须靠输出侧 `-r 12` 把速度压回来 —— 开发时少了这一条，管道被灌出过 240GB 的 raw 文件。
+> **② 没有「屏幕录制」权限时它不报错**，exit 0、帧数正常，只是全黑。
+> 探针会算平均像素，发现全黑就在 `start` 的返回里带一句提示，告诉你去系统设置里勾。
 
 变化分刻度（0–255，同一套代码）：
 
@@ -225,6 +281,7 @@ Windows 上可以直接双击 `debug/调试窗.cmd`，跟着菜单走。
 ```
 src/
   capture.js    唯一 spawn ffmpeg 的地方，一根 rawvideo 管道
+  binaries.js   找 ffmpeg（DSH 桌面版不进 PATH，所以不能写裸命令）
   cuts.js       逐帧变化分（64×36 HSV 网格）
   pipeline.js   唯一有状态的地方：帧 → 打分 → 切点/积分 → 留帧 → 档位 → pack → 出图
   tiers.js      档位（格子边长 1/k）与策略
@@ -235,7 +292,7 @@ src/
   index.js      工具注册与路由
 examples/floating-chat/   悬浮窗（Tk，无边框圆角，置顶）
 debug/                    调试窗（不在 npm 包里）
-test/                     85 条测试
+test/                     87 条测试
 ```
 
 ---
@@ -245,7 +302,10 @@ test/                     85 条测试
 - **只认"画面变了"，不认"语义变了"**。同一句话的两个排版版本算变化，两段内容不同但长得很像的页面可能算没变。
 - **没有跨帧去重**（除了 `dupMin` 那道粗筛）。它不保证给你的每一帧都"有新信息"。
 - **唤醒有节流**：再密也不会超过 `pace` 里的间隔 —— 语音播报是串行的，更快只会排队。
-- **Windows 优先**。`ddagrab` / `gdigrab` 是 Windows 的引擎，Linux/macOS 需要自己补采集源。
+- **平台**：Windows（`ddagrab` / `gdigrab`）和 macOS（`avfoundation`）都实测过；
+  **Linux 还没接**（要补 `x11grab` 或 PipeWire，现在会直接报错，不假装能用）。
+- **macOS 要多给一次权限**：系统设置 → 隐私与安全性 → **屏幕录制**，勾上跑 DSH 的那个 App。
+  没给的时候不会报错，只会全黑 —— 插件会提示，但权限本身只能你去点。
 
 ---
 

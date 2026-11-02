@@ -7,10 +7,11 @@
  */
 
 import { createRunner, SCENE_OPTS, PACES, DEFAULT_PACE } from './runner.js';
+import { resolveFfmpeg } from './binaries.js';
 import { seeNowToolSpec, TOOL_TIMEOUT_MS, DEFAULT_BLOCK_SEC } from './tool-spec.js';
 import { interjectNote, replyReminder, clearInterjected, noteInterjected, pendingInterjected } from './interject.js';
 import { appendSpoken, lastSaidNote } from './chat.js';
-import { attachConfiguredVoice, detachAdapters, attachedAdapters, configuredVoiceAdapter, lastVoiceError } from './voice.js';
+import { ensureConfiguredVoice, detachAdapters, attachedAdapters, configuredVoiceAdapter, lastVoiceError } from './voice.js';
 import { speechSubscribers } from './speech.js';
 import { startLoop, HANGUP_NOTE } from './loop.js';
 
@@ -173,8 +174,12 @@ async function registerAll(ctx) {
   const disposers = [];
   const log = (m) => { try { ctx?.logger?.info?.(`[dsh-see-now] ${m}`); } catch { /* ignore */ } };
 
+  // DSH 桌面版把 ffmpeg 放在 `~/.dsh/tools/ffmpeg/bin`，**不进 PATH**。
+  // 写裸 'ffmpeg' 在 macOS 上就是 ENOENT，而且会伪装成"插件坏了"。
+  const ffmpeg = resolveFfmpeg();
+  log(`ffmpeg: ${ffmpeg.path}（${ffmpeg.source}）`);
   const runner = createRunner({
-    ffmpegPath: process.env.DSH_FFMPEG_PATH || 'ffmpeg',
+    ffmpegPath: ffmpeg.path,
     log,
   });
   disposers.push(() => runner.stop());
@@ -182,7 +187,8 @@ async function registerAll(ctx) {
   // 声音：和陪看共用同一份 `~/.dsh/voice.json`。**失败一律不抛** ——
   // 声音是可选能力，装坏了最多没声音，不能让看屏幕起不来。
   // 不 await 到阻塞启动：适配器要 import 模块、探测引擎，可能几百毫秒。
-  attachConfiguredVoice({ log })
+  // 启动时挂一次只是热身；真正保证"改完配置就生效"的是每次调用前的 ensureConfiguredVoice。
+  ensureConfiguredVoice({ log })
     .then((r) => { if (!r.ok && r.reason !== 'not-configured') log(`声音没挂上：${r.reason}`); })
     .catch(() => { /* 已经在里面兜过了 */ });
   disposers.push(() => { detachAdapters().catch(() => {}); });
@@ -329,6 +335,10 @@ async function registerAll(ctx) {
 
     async route(args = {}, run = {}) {
       const action = String(args.action ?? 'watch').toLowerCase();
+
+      // **每次调用都检查一遍声音**：改了 voice.json / tts.json，下一句就生效，不用重启宿主。
+      // 代价是一次 stat —— 挂载状态没变时 ensure 立刻返回，不会重复 import。
+      await ensureConfiguredVoice({ log }).catch(() => { /* 声音永远不该挡住看屏幕 */ });
 
       // **`say` 的唯一入口**，在**任何采集动作之前**处理。
       //
@@ -482,7 +492,8 @@ async function registerAll(ctx) {
         const src = args.source ? { kind: String(args.source).toLowerCase() } : { kind: 'screen' };
         const r = await runner.start({ src });
         return {
-          text: r.already ? '已经在看了。' : `开始看 ${r.source.kind}（引擎 ${r.engine}）。`,
+          text: r.already ? '已经在看了。'
+            : `开始看 ${r.source.kind}（引擎 ${r.engine}）${r.warning ? `。⚠️ ${r.warning}` : '。'}`,
           meta: r,
         };
       }

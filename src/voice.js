@@ -17,6 +17,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -163,6 +164,53 @@ export async function attachConfiguredVoice({ env = process.env, log = () => {} 
   const spec = configuredVoiceAdapter(env);
   if (!spec) return { ok: false, reason: 'not-configured' };
   return loadVoiceAdapter(spec, { log });
+}
+
+/**
+ * 当前配置的**指纹**：适配器路径 + `tts.json` 的**内容摘要**。
+ *
+ * 为什么需要指纹：适配器在 `attach` 那一刻把 `tts.json` 读进闭包，之后改文件它**看不见**。
+ * 有了指纹，每次调用就能自己判断"配置变没变"，变了就重挂 —— 不用重启 DSH。
+ * 核心在这里只看"变没变"，不解释内容：音色、语速都是适配器自己的事。
+ *
+ * 为什么用内容摘要而不是 mtime：mtime 的分辨率只到毫秒，同一毫秒内两次同长度的写入
+ * 会被判成没变 —— 这个坑单测里当场踩到过。这个文件只有几十字节，读一遍比 stat 贵不了多少。
+ */
+export function voiceSignature(env = process.env) {
+  const spec = configuredVoiceAdapter(env);
+  if (!spec) return '';
+  const home = env.DSH_HOME || join(env.USERPROFILE || env.HOME || homedir(), '.dsh');
+  let stamp = 'none';
+  try {
+    const buf = readFileSync(join(home, 'tts.json'));
+    stamp = createHash('sha256').update(buf).digest('hex').slice(0, 16);
+  } catch { /* 没有 tts.json：用适配器自己的默认值 */ }
+  return `${spec}|${stamp}`;
+}
+
+/** 上一次成功挂载时的指纹。 */
+let attachedSig = null;
+
+/**
+ * **每次调用都过一遍**的挂载检查。
+ *
+ * - 没配 → 什么都不做（声音是可选能力）；
+ * - 已挂且指纹没变 → 一次 stat 的代价，立刻返回；
+ * - 配置变了（换了适配器，或者改了 `tts.json`）→ 卸掉重挂。
+ *
+ * 放在工具入口而不是启动时，是为了"改完配置下一句就生效"。
+ */
+export async function ensureConfiguredVoice({ env = process.env, log = () => {} } = {}) {
+  const sig = voiceSignature(env);
+  if (!sig) return { ok: false, reason: 'not-configured' };
+  if (attachedSig === sig && attached.size > 0) return { ok: true, cached: true };
+  if (attached.size > 0) {
+    log('[voice] 配置变了，重挂适配器');
+    await detachAdapters();
+  }
+  const r = await attachConfiguredVoice({ env, log });
+  if (r.ok) attachedSig = sig;
+  return r;
 }
 
 /** 已挂载的适配器列表（排查用） */
