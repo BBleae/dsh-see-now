@@ -177,21 +177,31 @@ function pythonCandidates() {
   return [...new Set(list.filter(Boolean))];
 }
 
+/** pid 文件指向的那个进程还在不在。**不看心跳**，见 `windowPidAlive` 的注释。 */
+export function windowPidAlive() {
+  if (process.env.DSH_SEE_NO_WINDOW === '1') return false;
+  let pid = 0;
+  try { pid = Number(readFileSync(pidPath(), 'utf8').trim()); } catch { return false; }
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); } catch { return false; }
+  return true;
+}
+
 /**
- * 上次开的那个还活着吗？
+ * 上次开的那个还活着吗？（**"这窗还能用吗"**，决定要不要重开）
  *
  * **不能只看 pid**：pid 会被系统复用，进程也可能活着但界面卡死、或者是一张全透明的空窗。
  * 那种情况下这里一直返回 true，于是**再也不重开**，用户体感是"点了没反应"
  * （issue #2 第 3 条）。所以加一层心跳：窗口每秒 touch 一个文件，过期就当它死了。
  *
  * 没有心跳文件时**不判死**：老版本窗口不写心跳，误杀会让它每次都被重开。
+ *
+ * **别拿它回答"用户是不是不想看了"**：心跳 6 秒过期太容易了（机器睡一觉、
+ * 主线程卡一下都算），而那个判断的代价是单向的。那个问题用 `windowPidAlive()` + 拍数，
+ * 见 `loop.js` 的 `windowVerdict()`。
  */
 export function windowAlive() {
-  if (process.env.DSH_SEE_NO_WINDOW === '1') return false;
-  let pid = 0;
-  try { pid = Number(readFileSync(pidPath(), 'utf8').trim()); } catch { return false; }
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); } catch { return false; }
+  if (!windowPidAlive()) return false;
   try {
     const hb = statSync(heartbeatPath());
     if ((Date.now() - hb.mtimeMs) / 1000 > HEARTBEAT_STALE_SEC) return false;

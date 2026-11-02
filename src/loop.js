@@ -29,7 +29,7 @@
  */
 
 import { startTicker, wakeWithRetry } from './timer.js';
-import { windowAlive } from './window.js';
+import { windowAlive, windowPidAlive } from './window.js';
 import { appendSpoken, chatWatcherShared, chatWaiterCount, lastSaidNote } from './chat.js';
 import { noteInterjected } from './interject.js';
 
@@ -63,6 +63,38 @@ export function shouldGoIdle({ wakesSinceUser = 0, now = Date.now(), lastUserAt 
   // 悬浮窗开着 = 有人在陪看，中途不说话是正常的，只靠"叫太多次"兜底
   if (!windowOpen && now - lastUserAt > IDLE_STOP_MS) return true;
   return false;
+}
+
+/**
+ * 窗"看起来没了"要连续这么多拍才认（一拍 2 秒）。
+ *
+ * 心跳本来是 6 秒算过期，用来决定"要不要重开窗"是合适的；但机器睡一觉醒来、
+ * 或者窗口主线程被 DWM/抓屏拖住几秒，心跳一样会过期，而用户什么都没做。
+ */
+export const WINDOW_GONE_TICKS = 3;
+
+/**
+ * 窗"没了"该怎么判 —— 抽成纯函数，好测也好读。
+ *
+ * **为什么不能直接 `!windowAlive()` 就挂断**：`windowAlive()` 回答的是
+ * "这窗还能用吗"（心跳 6 秒过期就算不能用，宁可重开一个），而这里要回答的是
+ * **"用户是不是不看了"**。两个问题共用一个判据的后果是单向的：
+ *   - `index.js` 的 `onStop` 看到 `window-closed` 会落一条挂断说明，内容是
+ *     "用户关掉了悬浮窗 —— 用户关它就是在说「不看了」……不要再调 see_now"；
+ *   - 还会 `runner.hangUp()`，之后 `watch` 一律被硬闸拦（`guardReason`）。
+ * 也就是说：**一次心跳抖动 = 这个会话再也回不来**，用户看到的就是"它自己结束了"。
+ * 实测复现：pid 指向活着的进程、只把心跳文件的 mtime 往前拨 8 秒，
+ * 循环第一拍就 `window-closed`。
+ *
+ * @returns {'closed'|'stalled'|null}
+ *   - `closed`：进程真没了（用户关的，或它崩了）→ 照旧停 + 挂断
+ *   - `stalled`：进程还在、只是心跳断了 → 连续够多拍才停，**且不挂断**，
+ *     下一条 `watch` 能自己把窗重开起来
+ */
+export function windowVerdict({ wasOpen = false, alive = false, pidAlive = false, goneTicks = 0 } = {}) {
+  if (!wasOpen || alive) return null;
+  if (!pidAlive) return 'closed';
+  return goneTicks >= WINDOW_GONE_TICKS ? 'stalled' : null;
 }
 
 /**
@@ -125,6 +157,8 @@ export function startLoop({
    */
   let lastUserAt = Date.now();
   let wakesSinceUser = 0;
+  /** 窗"看起来没了"连续几拍（判据见 `windowVerdict`） */
+  let windowGoneTicks = 0;
 
   /**
    * 自己盯 chat.jsonl 里的新用户消息。
@@ -196,7 +230,20 @@ export function startLoop({
 
       // ① 窗被关掉 = 用户不想看了。**先判这个**：窗都没了，出图也没人在看。
       //    只在"窗确实开过"之后才判 —— 窗开不起来（没有 python）时不该被当成用户关窗。
-      if (runner.windowWasOpen() && !windowAlive()) { stop('window-closed'); return; }
+      //    **进程没了才算关**；只是心跳过期（睡醒、主线程卡住）只累加拍数，
+      //    够数才当成没了，而且不挂断（理由见 `windowVerdict`）。
+      const wasOpen = runner.windowWasOpen();
+      const winAlive = wasOpen ? windowAlive() : false;
+      if (!wasOpen || winAlive) {
+        windowGoneTicks = 0;
+      } else {
+        windowGoneTicks += 1;
+        const verdict = windowVerdict({
+          wasOpen, alive: winAlive, pidAlive: windowPidAlive(), goneTicks: windowGoneTicks,
+        });
+        if (verdict === 'closed') { stop('window-closed'); return; }
+        if (verdict === 'stalled') { stop('window-stalled'); return; }
+      }
 
       // ② 采集自己停了（源断了、ffmpeg 挂了）。
       //    **续命放在这之前**：静态画面下 60 秒不出图，宽限期会把采集收走，
