@@ -2,35 +2,10 @@
 
 本文件从 `0.0.4` 起记录；更早的版本见 GitHub Releases。
 
-## [0.0.7] - 2026-11-02
-
-> 主题：**改声音配置不用重启**。
-
-### Added — 声音适配器（macOS / `say`）
-
-`examples/voice-say-mac.mjs`：把「该念了」翻译成一次 `say`，音色语速读 `~/.dsh/tts.json`
-（和 `dsh-watch-together` 共用）。核心仍然不内置引擎，只认 `~/.dsh/voice.json` 里的
-`adapter` 路径。
-
-三条实现上的决定：**不排队**（正在念时新句子直接 `skipped` —— 等它念完，画面早就过去了）、
-**`spoken` 在进程起来那一刻发**（展示层"字跟着声音走"）、**detach 要杀进程**
-（关窗时正在念的那句必须立刻停）。
-
-### Added — `ensureConfiguredVoice()`：每次调用前检查一次
-
-原来只在插件启动时读一次 `~/.dsh/voice.json`，于是「配置文件是插件启动之后才写的」这种情况
-必须重启整个 DSH。现在工具入口每次都过一遍：
-
-- 没配 → 什么都不做；
-- 配了指纹没变 → 一次读文件的代价就返回；
-- 指纹变了（换了适配器，或改了 `tts.json` 内容）→ 卸载重挂。
-
-指纹用 `tts.json` 的**内容摘要**而不是 mtime：mtime 只到毫秒，同一毫秒内两次等长写入会被判成
-"没变"—— 写这个的单测里当场踩到，改成 sha256 前 16 位。代价是这个几十字节的文件每轮读一次。
-
 ## [0.0.6] - 2026-11-02
 
-> 主题：**macOS 能用**。之前 `ENGINES` 只有 `ddagrab` / `gdigrab`，在 Mac 上直接退。
+> 主题：**macOS 能用**（avfoundation 移植），外加 issue #1 / #2 / #3 一起收掉。
+> macOS 与声音适配器那两块来自 **布丁** 的补丁（`macos-port.patch`，13 文件 / +735−35）。
 
 ### Added — `avfoundation` 屏幕/摄像头源
 
@@ -68,6 +43,58 @@ macOS 没给「屏幕录制」权限时 ffmpeg **不报错**：exit 0、帧数�
 
 原来的采集参数断言全是 Windows 引擎行为，在 Mac 上跑会走 avfoundation 分支。
 现在显式传 `platform`，并补了 macOS 屏幕/摄像头/裁剪三条和"其它平台明确报错"一条。
+#### Added — 声音适配器（macOS / `say`）
+
+`examples/voice-say-mac.mjs`：把「该念了」翻译成一次 `say`，音色语速读 `~/.dsh/tts.json`
+（和 `dsh-watch-together` 共用）。核心仍然不内置引擎，只认 `~/.dsh/voice.json` 里的
+`adapter` 路径。
+
+三条实现上的决定：**不排队**（正在念时新句子直接 `skipped` —— 等它念完，画面早就过去了）、
+**`spoken` 在进程起来那一刻发**（展示层"字跟着声音走"）、**detach 要杀进程**
+（关窗时正在念的那句必须立刻停）。
+
+#### Added — `ensureConfiguredVoice()`：每次调用前检查一次
+
+原来只在插件启动时读一次 `~/.dsh/voice.json`，于是「配置文件是插件启动之后才写的」这种情况
+必须重启整个 DSH。现在工具入口每次都过一遍：
+
+- 没配 → 什么都不做；
+- 配了指纹没变 → 一次读文件的代价就返回；
+- 指纹变了（换了适配器，或改了 `tts.json` 内容）→ 卸载重挂。
+
+指纹用 `tts.json` 的**内容摘要**而不是 mtime：mtime 只到毫秒，同一毫秒内两次等长写入会被判成
+"没变"—— 写这个的单测里当场踩到，改成 sha256 前 16 位。代价是这个几十字节的文件每轮读一次。
+
+
+### Fixed — 持续陪看链路（#1）
+
+- **`peek` 不再丢弃已拼好的图**：它原来走 `flushNow()`（插话专用），会把 `sheets` 清空、
+  再把"此刻那一帧"塞成一张新图 —— 后台喊"有新画面了"、模型调 peek，拿到的是当场截的一张，
+  攒好的多帧摘要反而没了（复现：`queued [0,2,4]` → `[5.92]`、`pending 0`）。现在走 `take()`，
+  取一张少一张；队列空就返回 `null`，不再凭空造图。
+- **循环 owner 在 watch 开始前锁定**：`watch` 阻塞 15~40 秒，期间任何会话的 `session/event`
+  都会改写 `lastSessionId`；循环是等它返回才建的，现取就会绑到"等待期间最后说话的那个会话"
+  （复现：A 发起 watch，结束后 `loop.session === B`）。
+- **`minFrames` 在正常返回路径也生效**：以前只有超时分支检查，队列先到的路会交一张 1 帧的图
+  还报 `ok: true`。现在不够就丢掉接着等。顺带理清"逐帧模式 × minFrames"：逐帧一张图只有 1 帧，
+  `minFrames > 1` 永远等不满，会让路并说明。
+
+### Fixed — 悬浮窗可用性（#2）
+
+- **关窗后能自己重开**：新增 `bin/see-window.mjs`（`npx dsh-see-window`，支持 `--status` /
+  `--force` / `--close`）。原来只有模型调 `watch` 才能拉起来，点了 × 就只能重启 DSH。
+- **高 DPI 下窗口不再变小**：进程声明了 per-monitor v2 DPI 感知，Tk 坐标因此全是物理像素 ——
+  150% 屏上摆 760×560 观感只有 506×373。现在默认尺寸按 `GetDpiForSystem()/96` 放大，
+  字号同步走 `tk scaling`。用户已有的 `geometry` 配置仍然优先，不会被强行改大。
+- **spawn 失败不再"假成功"**：窗口每秒写一个心跳文件，`windowAlive()` 除了 pid 还会看它 ——
+  pid 被复用、进程活着但界面卡死、或是一张全透明的空窗，都会判死，于是下次能重开。
+  `--force` 现在真的会先收掉旧进程（原来会叠两个窗）。没有心跳文件的旧窗口不误杀。
+
+### Changed — 安装方式规范化（#3）
+
+README 的主路径改成 `dsh plugin --profile web add dsh-see-now`（DSH 自带的 profile 级 pnpm
+包装器，装前预检 engines/peer、装后自动登记 `dsh.bundle`），`install-dev.mjs` 收进
+"从源码装（改代码时用）"折叠块。
 
 ## [0.0.5] - 2026-11-02
 

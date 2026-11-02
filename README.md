@@ -79,13 +79,40 @@ See Now 换了个思路：**先判断这一帧值不值得看，再决定传不�
 
 ### 在 DSH 里用
 
+已经发布到 npm，用 DSH 自带的 `dsh plugin` 装（它本质是 profile 维度的 pnpm 包装器 +
+插件登记器，会在装前预检 engines/peer、装后自动把 `dsh.bundle` 写进 profile）：
+
+```bash
+dsh plugin --profile web add dsh-see-now
+```
+
+- **`web`** 是浏览器里用的那个 profile；桌面版换成 `--profile desktop`（那个 profile 需要先开过一次桌面端才会被初始化）。
+- 装完**重启 DSH** 生效（插件树在进程启动时组合）。
+- 卸载：`dsh plugin --profile web remove dsh-see-now`
+- 升级：`dsh plugin --profile web update dsh-see-now`
+
+**关掉悬浮窗之后想再打开**：点 × 只是这一次不看，插件不会自己弹回来。手动叫：
+
+```bash
+npx dsh-see-window            # 开窗（已经开着就什么都不做）
+npx dsh-see-window --status   # 只看它在不在
+npx dsh-see-window --force    # 杀掉重开
+npx dsh-see-window --close    # 关掉
+```
+
+<details>
+<summary>从源码装（改代码时用）</summary>
+
 ```bash
 git clone https://github.com/SAOS-3624/dsh-see-now.git
 cd dsh-see-now
 node scripts/install-dev.mjs      # 拷进本机 DSH 的 desktop profile
 ```
 
-> `install-dev` 是**复制**不是软链（Node 解析裸包名要走真实路径，软链会找不到宿主的 `@deepseek-ai/dsh-tools`）。装完**重启 DSH** 生效。
+> `install-dev` 是**复制**不是软链（Node 解析裸包名要走真实路径，软链会找不到宿主的
+> `@deepseek-ai/dsh-tools`）。装完同样要重启 DSH。
+
+</details>
 
 #### 平台
 
