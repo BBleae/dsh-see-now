@@ -56,14 +56,43 @@ export const SCENE_OPTS = Object.freeze({ maxFrames: 1, strategy: 'single' });
  * | calm | 20 | 30s | 日常挂着看，只想知道"大场面变了没" |
  * | normal | 12 | 15s | 默认。滚网页/切窗口不会每下都留帧 |
  * | dense | 7 | 8s | 幻灯片、逐帧播报这种"每一刀都要"的 |
+ * | action | 80 | 20s | 全屏游戏 / 高速运动。靠 `pipeline` 把积分阈值也一起抬高 |
  *
  * 7 是能给的最低值（再低只有"只改亮度"那种肉眼都看不出的变化），
  * 但它对日常屏幕太敏感 —— 光标一停、窗口一换都能过线，所以不做默认。
+ *
+ * 80 看着离谱，其实是被内容逼的：动作游戏里每帧都有大位移，正常切点淹没在运动里。
+ * 这一档同时把积分阈值从 144 抬到 1440（`integralSeconds` 3 → 30），
+ * 否则"改画面"的门槛抬了、出帧密度却没降，还是会被叫到贴限速。
  */
 export const PACES = Object.freeze({
   calm: { cutAbs: 20, wakeGapSec: 30 },
   normal: { cutAbs: 12, wakeGapSec: 15 },
   dense: { cutAbs: 7, wakeGapSec: 8 },
+  /**
+   * 全屏动作游戏 / 高速运动画面。
+   *
+   * 为什么需要单独一档：这类画面**每一帧都在动**，分数基线被抬高，切点门槛 12 等于"全是切点"，
+   * 尖峰判据也救不回来（左右邻居同样高）。实测反馈（B 站用户「总在冬眠的熊」，打了一两个小时
+   * 全屏动作游戏后自己调出来的值）：cutAbs 80、积分阈值约 1800、每张 6 帧、maxWait 120s，
+   * 才从"顶着限速发请求 + 40 帧一张巨糊"变成"舒适"。
+   *
+   * 这里取比他**略保守**的一组（积分 1440 而不是 1800，每张 8 帧而不是 6），
+   * 因为他的 40 帧/张是在 normal 档下被 maxWait 逼出来的，不是他真想要 6 帧。
+   * `pipeline` 里的键会原样覆盖 `pipeline.js::DEFAULTS` 的同名项。
+   */
+  action: {
+    cutAbs: 80,
+    wakeGapSec: 20,
+    pipeline: {
+      integralSeconds: 30,
+      maxFrames: 8,
+      maxWaitSec: 60,
+      silentFloorSec: 40,
+      cutSpike: 1.5,
+      cutSpikeAbs: 30,
+    },
+  },
 });
 export const DEFAULT_PACE = 'normal';
 

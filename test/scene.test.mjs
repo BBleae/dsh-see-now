@@ -69,7 +69,8 @@ test('常规模式不受影响：同一段素材仍然多帧拼一张', () => {
 });
 
 test('三档节奏：越省门槛越高、叫醒越稀，逐帧用的是最密那档', () => {
-  assert.deepEqual(Object.keys(PACES).sort(), ['calm', 'dense', 'normal']);
+  // action 是"内容类型"那条轴，不参与灵敏度排序 —— 它在下一个测试里单独验
+  assert.deepEqual(Object.keys(PACES).sort(), ['action', 'calm', 'dense', 'normal']);
   // 门槛：calm 最高（最不敏感）→ dense 最低
   assert.ok(PACES.calm.cutAbs > PACES.normal.cutAbs, 'calm 的门槛必须比 normal 高');
   assert.ok(PACES.normal.cutAbs > PACES.dense.cutAbs, 'normal 的门槛必须比 dense 高');
@@ -80,4 +81,22 @@ test('三档节奏：越省门槛越高、叫醒越稀，逐帧用的是最密�
   assert.equal(DEFAULT_PACE, 'normal');
   // 逐帧模式用的是 dense 的门槛（7），且默认常量已经退到 12
   assert.equal(createPipeline({}).constants.cutAbs, PACES[DEFAULT_PACE].cutAbs);
+});
+
+test('action 档：门槛比 calm 还高，并且靠 pipeline 把出帧密度一起压下来', () => {
+  // 实测反馈（全屏动作游戏）：正常切点淹没在运动里，门槛 12 等于"全是切点"
+  assert.ok(PACES.action.cutAbs > PACES.calm.cutAbs, 'action 的门槛必须高于 calm');
+  // 不能比最灵敏那档更吵
+  assert.ok(PACES.action.wakeGapSec >= PACES.dense.wakeGapSec, 'action 不能比 dense 更吵');
+  const p = PACES.action.pipeline;
+  assert.ok(p && typeof p === 'object', 'action 必须带 pipeline 覆盖');
+  // 这两条是关键：只抬 cutAbs 不抬积分，出帧密度不变，照样贴限速
+  assert.ok(p.integralSeconds > 3, '积分阈值必须抬高');
+  assert.ok(p.maxFrames < 40, '一张图的帧数要压下来，否则 40 格糊到看不清');
+  assert.ok(p.cutSpike < 2.5 && p.cutSpikeAbs > 0, '动作画面凑不出 2.5 倍，必须降倍率 + 补绝对地板');
+  // 覆盖要真的落进管线
+  const c = createPipeline(p).constants;
+  assert.equal(c.integralSeconds, p.integralSeconds);
+  assert.equal(c.maxFrames, p.maxFrames);
+  assert.equal(c.cutSpikeAbs, p.cutSpikeAbs);
 });

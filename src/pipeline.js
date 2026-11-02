@@ -74,6 +74,14 @@ export const DEFAULTS = Object.freeze({
    */
   cutAbs: 12,
   cutSpike: 2.5,
+  /**
+   * 尖峰判据的**绝对地板**：`s` 除了要比前后两帧高 2.5 倍，还得够到这个数。
+   *
+   * 默认 0 = 不额外要求（行为和以前完全一致）。给 action 档用：那一档把倍率降到 1.5
+   * （动作游戏里"前后两帧"本身就很高，2.5 倍根本凑不出来），倍率一松就必须靠绝对地板
+   * 兜住噪声，否则满屏都是切点。
+   */
+  cutSpikeAbs: 0,
   cutMinGap: 0.4,
 
   /**
@@ -391,7 +399,8 @@ export function createPipeline(opts = {}) {
 
     const px = entry.prev ?? 0;
     const nx = nextScore ?? 0;
-    const spike = nextScore === null || s > o.cutSpike * Math.max(1, px, nx);
+    const spike = nextScore === null
+      || (s > o.cutSpike * Math.max(1, px, nx) && s >= o.cutSpikeAbs);
     if (s >= o.cutAbs && spike && entry.t - lastCut >= o.cutMinGap) {
       lastCut = entry.t;
       acc = 0;                      // 切点之后重新攒（那一帧的分属于跨刀，不算运动）
