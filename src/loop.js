@@ -35,6 +35,7 @@ import { noteInterjected } from './interject.js';
 
 /** 两次叫醒之间至少隔这么久（叫醒一次 = 模型跑一轮，很贵） */
 const WAKE_COOLDOWN_MS = 3000;
+
 /**
  * 两张图之间至少隔这么久才叫醒模型。
  *
@@ -45,6 +46,24 @@ const WAKE_MIN_GAP_MS = 8000;
 const TICK_MS = 2000;
 /** 连续这么多次叫不醒就停：会话没了还每 8 秒烧一次模型，是最贵的失败模式 */
 const WAKE_FAILS_MAX = 2;
+
+/** 没开悬浮窗、用户又这么久没说话 → 认为没人看，收工 */
+export const IDLE_STOP_MS = 3 * 60 * 1000;
+/** 连续这么多次自动唤醒都没有用户搭理 → 收工（防"窗开着但人走了"/模型自己读图循环） */
+export const MAX_AUTONOMOUS_WAKES = 8;
+
+/**
+ * 该不该因为「没人在看」收工 —— 抽成纯函数，好测也好读。
+ *
+ * 社区实报「装上后卡读图循环」：常驻循环原来**只有"采集停了"一个退出条件**，
+ * 屏幕一直动（放视频、刷网页）就会每 15 秒叫醒模型一次，永远不停。
+ */
+export function shouldGoIdle({ wakesSinceUser = 0, now = Date.now(), lastUserAt = now, windowOpen = false } = {}) {
+  if (wakesSinceUser >= MAX_AUTONOMOUS_WAKES) return true;
+  // 悬浮窗开着 = 有人在陪看，中途不说话是正常的，只靠"叫太多次"兜底
+  if (!windowOpen && now - lastUserAt > IDLE_STOP_MS) return true;
+  return false;
+}
 
 /**
  * 关窗说明。**不投 followup**（那会进排队消息区），由 `runner.note()` 挂着，
@@ -91,6 +110,21 @@ export function startLoop({
   /** 采集停掉之后已经过了几拍 —— 用来给"队列里剩下的图"一个播报窗口，然后收工 */
   let deadTicks = 0;
   let lastWakeOk = null;
+  /**
+   * 「没人在看」的收工线（判据见 `shouldGoIdle`）。
+   *
+   * 社区实报「装上后会卡读图循环」—— 因为常驻循环**只有"采集停了"一个退出条件**。
+   * 只要屏幕一直在动（放视频、刷网页），它就会每 `wakeMinGapSec` 叫一次模型、
+   * 模型看一眼图回一句、下一张再叫一次，**永远不停**。用户什么都没问，会话却在
+   * 一轮一轮读图。
+   *
+   * 两条收工线，互为兜底：
+   *   - `IDLE_STOP_MS`：**没开悬浮窗**（没人看那个小窗）且用户超过 3 分钟没说话 → 停。
+   *     悬浮窗开着就不判 —— 那是陪看场景，2 小时的电影中途不说话是正常的。
+   *   - `MAX_AUTONOMOUS_WAKES`：连续叫了这么多次都没人搭理 → 停。
+   */
+  let lastUserAt = Date.now();
+  let wakesSinceUser = 0;
 
   /**
    * 自己盯 chat.jsonl 里的新用户消息。
@@ -107,6 +141,10 @@ export function startLoop({
     if (stopReason) return;
     stopReason = reason;
     log(`循环停了：${reason}`);
+    // 自动收工要在窗口里留一行灰字，不然用户只会觉得"它突然哑了"
+    if (reason === 'idle') {
+      try { appendSpoken('meta', '（有一阵没人说话了，我先停一停；要看再说一声。）', { speak: false }); } catch { /* 写不进不影响停 */ }
+    }
     try { onStop(reason); } catch { /* 停不下来也要停 */ }
     dispose();
   };
@@ -149,7 +187,11 @@ export function startLoop({
       const waiting = chatWaiterCount() > 0;
       const fresh = waiting ? [] : pollChat();
       for (const e of fresh) {
-        if (e?.role === 'user' && String(e.text ?? '').trim()) queue.push(String(e.text).trim());
+        if (e?.role === 'user' && String(e.text ?? '').trim()) {
+          queue.push(String(e.text).trim());
+          lastUserAt = Date.now();
+          wakesSinceUser = 0;
+        }
       }
 
       // ① 窗被关掉 = 用户不想看了。**先判这个**：窗都没了，出图也没人在看。
@@ -189,8 +231,13 @@ export function startLoop({
         return;
       }
 
+      // ④.5 没人在看就收工（社区实报「卡读图循环」的止血线，判据见 shouldGoIdle）
+      if (shouldGoIdle({ wakesSinceUser, lastUserAt, windowOpen: windowAlive() })) {
+        stop('idle');
+        return;
+      }
+
       // ⑤ 攒够一张**新的**图了 —— 这才是常态唤醒。
-      //
       // **必须按出图序号判重**：以前只看 `pending > 0`，而模型要是没调 `peek`
       // （比如它直接回了一句话），pending 一直是 1 —— 于是每 3 秒叫一次，
       // 一路叫到用户把它关掉。`pending` 只说明"队列里有一张"，不说明"是新的"。
@@ -215,7 +262,7 @@ export function startLoop({
           + '不值得说就什么都别做（沉默是允许的，别为了刷存在感而说话）。'
           + lastSaidHint();
       const ok = await wake(text);
-      if (ok) lastKey = key;
+      if (ok) { lastKey = key; wakesSinceUser += 1; }
     },
   });
 
