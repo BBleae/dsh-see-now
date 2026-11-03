@@ -2,6 +2,38 @@
 
 本文件从 `0.0.4` 起记录；更早的版本见 GitHub Releases。
 
+## [0.0.8] - 2026-11-03
+
+> 跟上上游的悬浮窗重构：窗口从一个 1931 行的单文件拆成五层。
+
+### Changed — 同步 `dsh-watch-together` 0.2.11 的窗口
+
+`examples/floating-chat/` 是 `scripts/sync-window.mjs` 从上游生成的产物，这次跟着更新：
+
+- `window.py` 1931 → 1218 行，玻璃拆成 `glass_geometry`（不可变 `Geometry`）/
+  `glass_capture`（抓屏 + 运动判定，CPU/GPU 共用）/ `glass_cpu` / `glass_gpu` /
+  `window_widgets`；
+- GPU 路径修了三个真 bug：OpenGL context 建在主线程（每帧 `cannot create texture`）、
+  录屏模式没挖掉自己（永不跳帧）、`DSH_GLASS_NATIVE=1` 是假开关。
+  这台机器上实测 87.9% → 32.1% 单核；
+- `capturable` 模式下桌面图标被沿上下 / 左右拉成条的问题修掉了（填充只用窗口外
+  四角的中位色，不再沿边缘插值）。
+
+细节见 `dsh-watch-together` 的 CHANGELOG 0.2.11。
+
+### Fixed — 同步脚本会漏掉拆分后的玻璃模块
+
+`scripts/sync-window.mjs` 原来只拷 `window.py` + `mic.py` + `window_protocol.py` +
+`mic-dsh.png`。上游拆包之后，只装了 see-now 的机器会直接崩在
+`ModuleNotFoundError: glass_geometry` —— 而且开发机上永远复现不了（兄弟仓库里
+那几个文件一直都在）。ASSETS 补上 `glass_*.py` / `window_widgets.py`。
+
+### Fixed — 包内窗口的守卫用「单文件大小」当代理，拆包后变成假失败
+
+`test/packaged-window.test.mjs` 原来断言 `window.py` 大于 50000 字符。拆包后它从
+78KB 掉到 43KB，这条直接红。而且它本来就没守住真正的问题（漏一个模块照样发得出去）。
+改成逐文件存在性 + 单文件非空 + 总量 > 90k。
+
 ## [0.0.7] - 2026-11-03
 
 ### Fixed — 心跳抖一下就被当成"用户关窗"，会话再也回不来
