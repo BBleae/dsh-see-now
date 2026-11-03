@@ -119,6 +119,19 @@ export const DEFAULTS = Object.freeze({
   /** 和上一张留下的帧差小于这个分就不留（0–255 刻度，见 cuts.js）。 */
   dupMin: 8,
 
+  /**
+   * 打分口径：'abs' = 逐格 HSV 差均值（历史行为）；'mc' = 运动补偿后的"变了多少格"占比（×255）。
+   *
+   * mc 的用处是**把"整屏在动"和"换画面"分开**：游戏/高速画面里前者会把 abs 分数顶满，
+   * 而 mc 只统计"邻域里找不到对应"的格子，运动被吸收掉。实测（storyboard 侧，同一判定）
+   * 短视频 69.8→74.4、纪录片 86.1→89.4。
+   *
+   * 默认 'abs'：阈值（cutAbs / 积分 / 下限）都是按 abs 刻度标定的，切到 mc 需要重新标定。
+   */
+  scoreMode: 'abs',
+  mcTau: 15,
+  mcRadius: 2,
+
   // 档位
   dtFrames: 12,
   smoothFrames: 6,
@@ -186,7 +199,9 @@ export function createPipeline(opts = {}) {
   const o = { ...DEFAULTS, ...opts };
   const { width, height, fps } = o;
 
-  const scorer = createScorer({ width, height });
+  const scorer = createScorer({
+    width, height, scoreMode: o.scoreMode, mcTau: o.mcTau, mcRadius: o.mcRadius,
+  });
   const tiers = createTiers({
     fps, dtFrames: o.dtFrames, smoothFrames: o.smoothFrames,
   });

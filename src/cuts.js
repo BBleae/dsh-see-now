@@ -77,7 +77,41 @@ export function scorePair(prev, cur) {
  * 返回 `{ score, hsv }`，score 为 null 表示这是第一帧（没有前帧可比）。
  * **hsv 是复用的缓冲**，要用就自己拷走。
  */
-export function createScorer({ width, height }) {
+/**
+ * 运动补偿打分（可选口径）：每个格子在下一帧 ±radius 邻域里找最像的，连最像的都超 tau 才算"变了"，
+ * 返回 0–255 的占比刻度（×255 与旧口径同量级，便于复用现有阈值经验）。
+ * 出处：Nagasaka & Tanaka 1992（像素变化计数）、Shahraray 1995（邻域匹配）；独立实现，未取代码。
+ */
+export function mcRatioScore(prev, cur, { tau = 15, radius = 2 } = {}) {
+  const n = SCAN_W * SCAN_H;
+  let changed = 0;
+  for (let y = 0; y < SCAN_H; y += 1) {
+    for (let x = 0; x < SCAN_W; x += 1) {
+      const p3 = (y * SCAN_W + x) * 3;
+      let matched = false;
+      for (let dy = -radius; dy <= radius && !matched; dy += 1) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= SCAN_H) continue;
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= SCAN_W) continue;
+          const q3 = (yy * SCAN_W + xx) * 3;
+          const dh = Math.abs(cur[q3] - prev[p3]);
+          const hueDiff = Math.min(dh, 255 - dh);
+          const hueWeight = Math.min(cur[q3 + 1], prev[p3 + 1]) / 255;
+          const d = (hueDiff * hueWeight
+            + Math.abs(cur[q3 + 1] - prev[p3 + 1])
+            + Math.abs(cur[q3 + 2] - prev[p3 + 2])) / 3;
+          if (d <= tau) { matched = true; break; }
+        }
+      }
+      if (!matched) changed += 1;
+    }
+  }
+  return (changed / n) * 255;
+}
+
+export function createScorer({ width, height, scoreMode = 'abs', mcTau = 15, mcRadius = 2 }) {
   const n = SCAN_W * SCAN_H;
   const rgb = new Float32Array(n * 3);
   let prev = null;
@@ -87,7 +121,11 @@ export function createScorer({ width, height }) {
     gridRgb(frame, width, height, rgb);
     rgbToHsv(rgb, cur);
     let s = null;
-    if (prev) s = scorePair(prev, cur);
+    if (prev) {
+      s = scoreMode === 'mc'
+        ? mcRatioScore(prev, cur, { tau: mcTau, radius: mcRadius })
+        : scorePair(prev, cur);
+    }
     const tmp = prev ?? new Float32Array(n * 3);
     tmp.set(cur);
     prev = tmp;
