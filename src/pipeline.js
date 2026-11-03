@@ -272,7 +272,7 @@ export function createPipeline(opts = {}) {
     // 用不带加成（更大）的档位是保守的：判装不下而实际装得下，顶多多开一张，不会丢帧。
     const tier = applyStrategy([lv], o.strategy)[0];
     if (frames.length === 0) sheetStart = entry.t;
-    frames.push({ t: entry.t, buf: entry.buf, tier, via, level: lv });
+    frames.push({ t: entry.t, buf: entry.buf, tier, via, level: lv, wall: entry.wall });
     if (entry.hsv) {
       lastKeptHsv ??= new Float32Array(entry.hsv.length);
       lastKeptHsv.set(entry.hsv);
@@ -413,7 +413,11 @@ export function createPipeline(opts = {}) {
       area: 1,
       bins: 1,
       why,
-      frames: batch.map((f) => ({ t: +f.t.toFixed(2), tier: 1, level: f.level, via: f.via })),
+      wallFrom: batch[0].wall ?? null,
+      wallTo: batch[n - 1].wall ?? null,
+      frames: batch.map((f) => ({
+        t: +f.t.toFixed(2), tier: 1, level: f.level, via: f.via, wall: f.wall ?? null,
+      })),
       cells: g.rects.map((r) => ({ px: r.px, py: r.py, pw: r.pw, ph: r.ph, tier: 1 })),
     };
     sheets.push(sheet);
@@ -469,8 +473,11 @@ export function createPipeline(opts = {}) {
       area,
       bins: 1,
       why,
+      // 台词对齐用的墙上时间窗（epoch ms）。`from/to` 是相对秒，掉帧会漂；这两个不会。
+      wallFrom: used[0].wall ?? null,
+      wallTo: used[used.length - 1].wall ?? null,
       frames: used.map((f, i) => ({
-        t: +f.t.toFixed(2), tier: seq[i], level: f.level, via: f.via,
+        t: +f.t.toFixed(2), tier: seq[i], level: f.level, via: f.via, wall: f.wall ?? null,
       })),
       cells: rects.map((r) => ({ px: r.px, py: r.py, pw: r.pw, ph: r.ph, tier: r.t })),
     });
@@ -538,7 +545,11 @@ export function createPipeline(opts = {}) {
       const r = scorer(buf);
       const s = r.score;
       if (s !== null) { stats.scoreSum += s; stats.scoreN += 1; if (s > stats.scoreMax) stats.scoreMax = s; }
-      const entry = { t, buf, score: s, prev: lastScore, hsv: Float32Array.from(r.hsv) };
+      // `wall` 是这一帧被处理时的墙上时间（epoch ms）。台词（ASR）只有时间码没有帧号，
+      // 对齐只能靠同一个时钟 —— `t` 是"第几秒"，掉帧就漂，不能拿来对字幕。
+      const entry = {
+        t, buf, score: s, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
+      };
       lastSeen = entry;
       lastScore = s;
       q.push(entry);
@@ -589,6 +600,9 @@ export function createPipeline(opts = {}) {
         frames.push({
           t: lastSeen.t, buf: lastSeen.buf, via: why === 'user' ? 'user' : 'now', level: lv,
           tier: applyStrategy([lv], o.strategy)[0],
+          // 「此刻那一帧」也要带 wall —— 漏了它，`sheet.wallTo` 会是 null，
+          // 台词就按 `Date.now()` 兜底，时间窗对不上（实测最后一张的台词取不到）
+          wall: lastSeen.wall ?? Date.now(),
         });
       }
       // 装不下就从**最老的**开始丢：插话要的是最新画面，老的让位

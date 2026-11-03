@@ -23,6 +23,7 @@ import { cellSize } from './layout.js';
 import { chatWatcherShared, enterChatWait } from './chat.js';
 import { noteInterjected } from './interject.js';
 import { openWindow, pidStamp, windowAlive, setWindowHidden } from './window.js';
+import { createListener } from './listen.js';
 
 /** 三档清晰度。数字是画布像素，token 约等于 像素÷1650（见调参报告）。 */
 export const SIZES = Object.freeze({
@@ -148,7 +149,7 @@ export function guardReason({ hungUp = false, fileEnded = false, explicitSrc = f
   return null;
 }
 
-export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec = 60 } = {}) {
+export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec = 60, ctx = null } = {}) {
   let pipeline = null;   // 当前（或刚停的）引擎 —— 停采集后仍留着，好把队列里剩的图发完
   let running = false;
   let run = null;
@@ -160,6 +161,39 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
   let graceTimer = null;
   let busy = false;
   let quality = DEFAULT_QUALITY;
+
+  /**
+   * 听声音（视频里在说什么）。**可选能力**：装不上（没有 pyaudiowpatch、没有转写服务、
+   * 这台机器没有回环设备）就只是没字幕，看图一切照旧 —— 绝不能让"看屏幕"起不来。
+   *
+   * 为什么在 runner 里而不是在工具层：它的生命周期和采集是同一个 ——
+   * 开始看就开听，收工就停，中途换清晰度/换 region 也不用重启（音频跟画面无关）。
+   */
+  const listener = createListener({ ctx, log });
+  /**
+   * 上一张图的时间窗末尾（epoch ms）。台词按"上一张到现在"取，
+   * 不能按这一张自己的 from/to —— 静止屏幕上两张之间隔 60 秒，中间说的话会整段漏掉。
+   */
+  let lastSheetWallTo = 0;
+
+  /**
+   * 把这段时间窗里的台词挂到 sheet 上。**没有台词就什么都不加** ——
+   * 模型看到空的"台词："标题只会以为转写坏了。
+   */
+  function attachLines(sheet) {
+    if (!sheet) return sheet;
+    const to = sheet.wallTo ?? Date.now();
+    /**
+     * 第一张图是"此刻"（往往只有 1 帧），时间窗只有一个点 —— 直接照它取，
+     * 用户第一眼永远看不到任何台词（那句话还没说完/还没转写）。
+     * 所以首次往回多看 20 秒：反正缓冲里本来就只有这么久的东西。
+     */
+    const from = lastSheetWallTo || Math.min(sheet.wallFrom ?? to, to - 20_000);
+    const got = listener.between(from - 400, to + 800);
+    if (to > lastSheetWallTo) lastSheetWallTo = to;
+    if (got.length) sheet.lines = got;
+    return sheet;
+  }
   /**
    * 建当前管线时用的**调用方参数**（不含 oneShot）。
    *
@@ -222,6 +256,8 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
     running = false;
     source = null;
     stoppedAt = Date.now();
+    // 采集收工，声音也一起停：一个抓回环的进程常驻在后台，用户是看不见的
+    listener.stop('采集收工');
     if (why) log(`收工：${why}`);
   }
 
@@ -319,6 +355,14 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
       if (pipeline === p) teardown('ffmpeg-error');
     });
     log(`开始看 ${s.kind}${engine && engine !== 'auto' ? `/${engine}` : ''} @${w}×${h}${s.region ? ` region=${s.region.x},${s.region.y},${s.region.w},${s.region.h}` : ''}`);
+    /**
+     * 声音并行起，**不 await**：它要等 Python 起来 + 打开回环设备（1~4 秒），
+     * 挡在前面会让"开始看"从 0.4 秒变成一个明显能感觉到的卡顿。
+     * 起不来只是没字幕 —— 记一条日志，看画面照旧。
+     */
+    listener.start()
+      .then((r) => { if (!r.ok) log(`听声音没开：${r.reason}`); })
+      .catch((e) => log(`听声音没开：${e?.message ?? e}`));
     // macOS 没给屏幕录制权限时，采集本身是"成功"的，只是画面全黑 ——
     // 探针已经试出来了，这里把它带回去，让模型（和用户）知道该去系统设置，而不是以为插件坏了。
     const warning = s.kind === 'screen' ? screenEngineWarning() : null;
@@ -537,7 +581,7 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
           const now = pipeline?.flushNow(null, 'user');
           const waited = (Date.now() - t0) / 1000;
           return now
-            ? { ok: true, sheet: now, waited, quality, userText: text }
+            ? { ok: true, sheet: attachLines(now), waited, quality, userText: text }
             : { ok: false, reason: 'user-no-frame', waited, userText: text };
         };
 
@@ -569,7 +613,7 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
                 const first = pipeline.flushNow(null, 'first');
                 if (first) {
                   return {
-                    ok: true, sheet: first, waited: (Date.now() - t0) / 1000,
+                    ok: true, sheet: attachLines(first), waited: (Date.now() - t0) / 1000,
                     quality, windowOpen: win.ok, first: true,
                   };
                 }
@@ -593,7 +637,9 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
               // （issue #1 的复现：`{ ok: true, frames: 1 }`）。
               // 不够就丢掉这一张接着等 —— 到点还没攒够，会走下面的 no-change 提示。
               if (s.frames.length >= minFrames) {
-                return { ok: true, sheet: s, waited: (Date.now() - t0) / 1000, quality, windowOpen: win.ok };
+                return {
+                  ok: true, sheet: attachLines(s), waited: (Date.now() - t0) / 1000, quality, windowOpen: win.ok,
+                };
               }
             }
             if (!running && !pipeline?.pending) break;   // 采集停了，队列也空了
@@ -605,7 +651,7 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
         // 到点了：手上攒的半张也算数（用户已经在等），但不够 minFrames 就不给
         const last = pipeline?.flushNow(null, 'timeout');
         if (last && last.frames.length >= minFrames) {
-          return { ok: true, sheet: last, waited: (Date.now() - t0) / 1000, partial: true, quality };
+          return { ok: true, sheet: attachLines(last), waited: (Date.now() - t0) / 1000, partial: true, quality };
         }
         return {
           ok: false,
@@ -638,7 +684,7 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
       const queued = pipeline?.take() ?? null;
       if (running) armGrace();
       if (!windowState?.ok && !windowPending) void ensureWindow();
-      return queued;
+      return attachLines(queued);
     },
 
     /** 常驻循环每拍续命（见 touch 的注释） */
@@ -685,6 +731,9 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
         window: { ok: windowState?.ok ?? null, reason: windowState?.reason ?? null, script: windowState?.from ?? null },
         // 有没有待领的说明（挂断那条）—— status 里看得见，才不会"明明写了没人读"
         notePending: Boolean(pendingNote),
+        // 听声音的状态。"它好像没听见台词"时第一个要看的就是它：
+        // enabled=false 的 reason 会直接说是缺服务、缺 Python、还是抓不到回环设备
+        listen: listener.state(),
       };
     },
   };

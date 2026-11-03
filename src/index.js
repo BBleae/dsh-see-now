@@ -317,6 +317,13 @@ async function registerAll(ctx) {
   let sceneMode = false;
   /** 节奏：calm / normal / dense（粘性）。**这是"省点钱"唯一能真的生效的旋钮。** */
   let paceMode = DEFAULT_PACE;
+  /**
+   * **上一次真正生效的 source 类型**。`cutAbs` 的自动选择要靠它，不能看本次请求的 `src`：
+   * 第二次 `watch` 通常不带 path（接着看同一段），那时 `src` 是 undefined，判定就会从
+   * "文件回放"翻回默认档 —— 参数一变 runner 就重启采集，画面从 0 秒重来。
+   * 实测 e2e「连看两次，第二张不会重复第一张」就是这么挂的。
+   */
+  let lastSrcKind = null;
   /** 循环是按哪个模式起的 —— 模式变了要重建，不然唤醒节奏还是旧的 */
   let loopScene = null;
   /** 切模式时那一句说明：下一次工具结果里带给模型，然后清掉 */
@@ -598,6 +605,7 @@ async function registerAll(ctx) {
             pendingModeNote,
           ].filter(Boolean).join('\n\n');
         }
+        if (src?.kind) lastSrcKind = src.kind;
         const r = await runner.watch({
           seconds,
           minFrames,
@@ -617,7 +625,7 @@ async function registerAll(ctx) {
             // 用户显式传了 pace 就尊重用户。
             cutAbs: (sceneMode
               ? PACES.dense
-              : (src?.kind === 'file' && !wantPace && paceMode === 'normal' ? PACES.dense : PACES[paceMode])).cutAbs,
+              : (lastSrcKind === 'file' && !wantPace && paceMode === 'normal' ? PACES.dense : PACES[paceMode])).cutAbs,
           },
           signal: run?.signal ?? null,
         });
