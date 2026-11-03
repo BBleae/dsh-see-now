@@ -32,12 +32,37 @@ delete process.env.DSH_SEE_WINDOW;
 
 const { resolveScript, PACKAGED: EXPORTED } = await import('../src/window.js');
 
-test('包里必须自带 window.py（发版兜底，不能只靠兄弟仓库）', () => {
+// window.py 0.2.11 起把玻璃拆成了几个模块（`import glass_geometry` 等）。
+// 只查 window.py 一个文件不再够：少了任何一个，装上去就是
+// `ModuleNotFoundError: glass_geometry`，而开发机上永远复现不了
+// （兄弟仓库里那几个文件一直都在）。
+const BUDGET = 90_000;
+const REQUIRED = [
+  'window.py',
+  'glass_geometry.py',
+  'glass_capture.py',
+  'glass_cpu.py',
+  'glass_gpu.py',
+  'window_widgets.py',
+  'window_protocol.py',
+  'mic.py',
+];
+
+test('包里必须自带整套窗口文件（发版兜底，不能只靠兄弟仓库）', () => {
   assert.ok(existsSync(PACKAGED), `缺了 ${PACKAGED}；跑 npm run sync:window`);
   assert.equal(EXPORTED, PACKAGED, '导出的路径要和实际文件对上');
 
+  let total = 0;
+  for (const name of REQUIRED) {
+    const p = join(dirname(PACKAGED), name);
+    assert.ok(existsSync(p), `缺了 ${name}；跑 npm run sync:window`);
+    const len = readFileSync(p, 'utf8').length;
+    assert.ok(len > 300, `${name} 只有 ${len} 字符，像是同步坏了`);
+    total += len;
+  }
+  assert.ok(total > BUDGET, `窗口这套文件加起来才 ${total} 字符，像是同步缺了几个`);
+
   const text = readFileSync(PACKAGED, 'utf8');
-  assert.ok(text.length > 50_000, `文件太小了（${text.length} 字符），像是同步坏了`);
   assert.match(text, /^#!.*python/, '得保留 shebang');
   assert.match(text, /生成的|sync-window\.mjs/, '要带 GENERATED 标记，防止有人手改这份');
 });
