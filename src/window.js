@@ -23,7 +23,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -53,6 +53,91 @@ function heartbeatPath() {
 
 /** 心跳多久算过期。窗口 1 秒写一次，6 秒足够容忍一次 GC 或短暂卡顿。 */
 export const HEARTBEAT_STALE_SEC = 6;
+
+/**
+ * 窗口的**可见性**配置（`~/.dsh/watch-window.json` 的 `hidden`）。
+ *
+ * 这个文件是**两个窗共用**的（陪看和 see-now 读到同一份 geometry / name / hidden），
+ * 由 Python 侧的 `_sync_visible()` 每 250ms 读一次 mtime，变了就 withdraw / deiconify。
+ *
+ * **踩过的坑**：插件以前从不碰它。用户在窗上点了「藏起来」（或者陪看那边藏过），
+ * `hidden` 就一直是 `true` —— 之后 `watch` 一切正常、进程在、心跳在跳，**屏幕上什么都没有**。
+ * 模型没有"显示"这条指令，只能读文件猜，于是它答"我这边只有读权限，发不了显示指令"
+ * （2026-11-03 社区反馈，原话）。
+ */
+export function windowConfigPath(env = process.env) {
+  return join(dshHome(env), 'watch-window.json');
+}
+
+/** 窗是不是被藏起来了。读不到就当没藏（不能因为一个坏文件把窗判成看不见）。 */
+export function windowHidden(env = process.env) {
+  return readJson(windowConfigPath(env)).hidden === true;
+}
+
+/**
+ * 改可见性。**读-改-写整份文件**，不能只写 `{hidden:false}` ——
+ * 那样会把 `script` / `geometry` / `name` 一起抹掉，下一次开窗就得重新找解释器。
+ * 写法跟窗口那边（`write_config`）逐字节一致：`indent=2`、无尾随换行、`.json.tmp` 再 rename。
+ *
+ * @returns {{changed:boolean, hidden:boolean, error?:string}}
+ */
+export function setWindowHidden(hidden, { log = () => {}, env = process.env } = {}) {
+  const path = windowConfigPath(env);
+  const cfg = readJson(path);
+  const want = Boolean(hidden);
+  // 已经是目标状态就**不写**：多写一次会让 Python 侧多醒一轮，还会把 mtime 刷成"刚刚改过"
+  if (Boolean(cfg.hidden) === want) return { changed: false, hidden: want };
+  cfg.hidden = want;
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(cfg, null, 2), 'utf8');
+    renameSync(tmp, path);
+  } catch (e) {
+    const error = String(e?.message ?? e);
+    log(`写 ${path} 失败：${error}`);
+    return { changed: false, hidden: !want, error };
+  }
+  return { changed: true, hidden: want };
+}
+
+/**
+ * 窗口的完整状态，一句话能说清"为什么我看不见它"。
+ *
+ * `status` / `watch` 都把它带给模型 —— 以前模型只能去读 pid 和心跳文件自己猜，
+ * 猜错就说"只有读权限"。
+ */
+export function windowReport({ env = process.env } = {}) {
+  let pid = null;
+  try {
+    const n = Number(readFileSync(pidPath(), 'utf8').trim());
+    if (Number.isInteger(n) && n > 0) pid = n;
+  } catch { /* 没开过 */ }
+  let heartbeatAgeSec = null;
+  try {
+    heartbeatAgeSec = Math.max(0, Math.round((Date.now() - statSync(heartbeatPath()).mtimeMs) / 1000));
+  } catch { /* 老窗口不写心跳 */ }
+  const hidden = windowHidden(env);
+  return {
+    pid,
+    alive: windowPidAlive(),
+    heartbeatAgeSec,
+    heartbeatStale: heartbeatAgeSec === null ? null : heartbeatAgeSec > HEARTBEAT_STALE_SEC,
+    hidden,
+    disabled: env.DSH_SEE_NO_WINDOW === '1',
+  };
+}
+
+/** `windowReport()` → 一行中文。 */
+export function windowLine(r = windowReport()) {
+  if (r.disabled) return '窗口：被 DSH_SEE_NO_WINDOW=1 关掉了';
+  const proc = r.alive ? `进程 ${r.pid} 活着` : r.pid ? `进程 ${r.pid} 已经不在了` : '没开过';
+  const hb = r.heartbeatAgeSec === null ? '没心跳'
+    : r.heartbeatStale ? `心跳 ${r.heartbeatAgeSec}s 前（过期）`
+      : `心跳 ${r.heartbeatAgeSec}s 前`;
+  const vis = r.hidden ? '**藏起来的（用户看不见）**' : '显示中';
+  return `窗口：${proc} · ${hb} · ${vis}`;
+}
 
 function logPath() {
   return join(dshHome(), 'see-now-window.log');

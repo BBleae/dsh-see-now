@@ -8,12 +8,15 @@
 
 import { createRunner, SCENE_OPTS, PACES, DEFAULT_PACE } from './runner.js';
 import { resolveFfmpeg } from './binaries.js';
-import { seeNowToolSpec, TOOL_TIMEOUT_MS, DEFAULT_BLOCK_SEC } from './tool-spec.js';
+import { seeNowToolSpec, TOOL_TIMEOUT_MS, DEFAULT_BLOCK_SEC, TOOL_NAME } from './tool-spec.js';
 import { interjectNote, replyReminder, clearInterjected, noteInterjected, pendingInterjected } from './interject.js';
-import { appendSpoken, lastSaidNote } from './chat.js';
+import { appendSpoken, lastSaidNote, chatDir } from './chat.js';
 import { ensureConfiguredVoice, detachAdapters, attachedAdapters, configuredVoiceAdapter, lastVoiceError } from './voice.js';
 import { speechSubscribers } from './speech.js';
 import { startLoop, HANGUP_NOTE } from './loop.js';
+import { windowHidden, setWindowHidden, windowReport, windowLine } from './window.js';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 export const name = 'dsh-see-now';
 
@@ -25,6 +28,11 @@ export const name = 'dsh-see-now';
  * 留 40 秒给建图/交附件/模型想一想。
  */
 const MAX_BLOCK_SEC = Math.max(30, Math.floor(TOOL_TIMEOUT_MS / 1000) - 40);
+
+/** 版本号：从 package.json 读，只为日志里能分清"跑的是哪一版"。读不到就 `?`。 */
+const VERSION = (() => {
+  try { return JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version; } catch { return '?'; }
+})();
 
 // 三个都在 inject 里声明：cordis 的属性访问只沿 fiber 父链找**已注册**的服务，
 // 不声明时 `ctx.attachments` 是 undefined，而且 `?.` 挡不住（get 陷阱直接 throw）。
@@ -164,9 +172,28 @@ export async function apply(ctx) {
   } catch (e) {
     // 最坏的情况是插件不能用，不是应用起不来
     try { ctx?.logger?.error?.(`[dsh-see-now] failed to load: ${e?.stack ?? e}`); } catch { /* ignore */ }
+    /**
+     * **失败必须留痕。** 以前只打 logger.error —— 那玩意儿只在开发者工具里，
+     * 用户看到的现象是"这个会话根本没有 see_now 这个工具"，模型只能靠读文件猜，
+     * 还把猜出来的调用当正文吐出来（2026-11-03 实报）。
+     * 现在写到 `~/.dsh/see-now/plugin-error.log`，出问题直接看这个文件。
+     */
+    writeLoadError(e);
     if (process.env.DSH_SEE_DEBUG) throw e;
     return () => {};
   }
+}
+
+/** 加载失败落盘（追加，超过 64KB 就重开一份；不抛）。 */
+function writeLoadError(e) {
+  try {
+    const path = join(chatDir(), 'plugin-error.log');
+    mkdirSync(dirname(path), { recursive: true });
+    let old = '';
+    try { old = readFileSync(path, 'utf8'); } catch { /* 第一次 */ }
+    if (old.length > 64 * 1024) old = old.slice(-32 * 1024);
+    writeFileSync(path, `${old}${new Date().toISOString()} ${e?.stack ?? e}\n`, 'utf8');
+  } catch { /* 记不住也不能再炸一次 */ }
 }
 
 async function registerAll(ctx) {
@@ -489,13 +516,36 @@ async function registerAll(ctx) {
         // **拿到第一张图之后就把钟起起来** —— 这是"看一眼就完"和"一直看下去"的分界线。
         // 之后每攒够一张，循环会自己叫醒你，不用你再调。
         const lp = ensureLoop(ownerAtStart);
-        return await attachAndReturn(ctx, r.sheet, {
+        const out = await attachAndReturn(ctx, r.sheet, {
           waited: r.waited, partial: r.partial, quality: r.quality,
           userText: r.userText ?? null,
           say: said,
           looping: Boolean(lp) && !lp.stopped(),
           loopWakes: lp ? lp.state().wakes : 0,
         });
+        /**
+         * **窗被藏起来时必须当面说清**，否则就是"你说'眼睛开上了'，屏幕上什么都没有"。
+         * 只在藏着的时候加这一句（正常情况不加噪音），并给出唯一能用的那条指令。
+         */
+        if (r.windowOpen === false) {
+          // 窗压根没开起来（最常见：没有带 tkinter 的 python）。这时候 `say` 同样是石沉大海，
+          // 但**不能**叫模型去 show —— show 改的是配置，解决不了"进程起不来"。
+          const why = runner.status().window?.reason;
+          return {
+            ...out,
+            text: `${out.text}\n\n**悬浮窗没开起来${why ? `（${why}）` : ''}** —— 用户看不到也听不到你的 \`say\`。`
+              + '\n别说"我在看着你"这类话；先在正文里告诉他这个情况（正文能到，`say` 到不了）。',
+            meta: { ...out.meta, windowOpen: false },
+          };
+        }
+        if (!windowHidden()) return out;
+        return {
+          ...out,
+          text: `${out.text}\n\n${windowLine()}\n`
+            + '**用户看不到你的 `say`** —— 窗是藏起来的。'
+            + '要他看见就调 `see_now({action:"window", show:true})`。',
+          meta: { ...out.meta, windowHidden: true },
+        };
       }
 
       if (action === 'peek') {
@@ -530,6 +580,39 @@ async function registerAll(ctx) {
         return { text: '停了。窗口还开着，想再看得重新调 watch。', meta: { ok: true } };
       }
 
+      /**
+       * 悬浮窗的显示 / 隐藏 / 状态。
+       *
+       * **这是"窗在但看不见"的唯一出口。** 以前没有它：模型发现窗被藏起来了，
+       * 只能去读 `~/.dsh/watch-window.json`，又没有写权限，于是答
+       * "我这边只有读权限，发不了「显示」指令"（2026-11-03 社区反馈）。
+       *
+       * 改的是窗口进程每 250ms 轮询的那份文件，所以**不用重启窗口**，一拍就生效。
+       */
+      if (action === 'window') {
+        const wants = typeof args.show === 'boolean' ? args.show : null;
+        let changed = null;
+        if (wants !== null) {
+          changed = setWindowHidden(wants, { log });
+          log(`悬浮窗${wants ? '显示' : '隐藏'}${changed.changed ? '' : '（本来就是）'}`);
+        }
+        const r = windowReport();
+        const head = wants === null
+          ? '悬浮窗现在是这样：'
+          : wants
+            ? (changed?.error ? `没改成显示（${changed.error}），现状：` : '已让悬浮窗显示出来。')
+            : (changed?.error ? `没改成隐藏（${changed.error}），现状：` : '已把悬浮窗藏起来（采集照常，只是看不见）。');
+        return {
+          text: `${head}\n${windowLine(r)}`
+            + (r.alive ? '' : '\n窗没开着 —— 下一次 `watch` 会重新开一个。')
+            + (r.alive && r.hidden && wants !== false
+              ? '\n**用户现在看不到任何东西**：要么 `see_now({action:"window", show:true})`，'
+                + '要么就别再用 `say` 说话，等他主动问。'
+              : ''),
+          meta: { ok: changed ? !changed.error : true, window: r, changed: changed?.changed ?? false },
+        };
+      }
+
       if (action === 'status') {
         const s = runner.status();
         const voice = voiceState();
@@ -545,8 +628,11 @@ async function registerAll(ctx) {
                 + `${lp.lastWakeAt ? `，上一次 ${Math.round((Date.now() - lp.lastWakeAt) / 1000)}s 前${lp.lastWakeOk === false ? '（失败）' : ''}` : ''}`
                 + `，会话 ${lp.session ?? '未知'}）`
               : lp?.reason ? `已停（${lp.reason}）` : '没起（还没调过 watch）'}`
-            // 手上有没有攒着没取走的图 —— `pending` 一直是 1 时模型不会收到新图，只会一直被叫
+            // 队列：手上有没有攒着没取走的图 —— `pending` 一直是 1 时模型不会收到新图，只会一直被叫
             + `\n队列：${s.pending ? `有 ${s.pending} 张没取走（出图序号 ${s.sheets}）` : '空'}`
+            // 窗口：**"它在看但我什么都没看到"时第一个要看的就是这一行**
+            + `\n${windowLine()}`
+            + (s.window?.ok === false && s.window?.reason ? `\n  ↳ 开窗失败：${s.window.reason}` : '')
             // 模式：逐帧时一张图只有一帧、铺满；常规是多帧拼格
             + `\n模式：${sceneMode ? '逐帧（一张图 = 一个场景，铺满）' : '常规（多帧拼一张）'}`
             + ` · 节奏：${sceneMode ? 'dense（跟逐帧走）' : paceMode}`
@@ -558,7 +644,7 @@ async function registerAll(ctx) {
               : voice.configured
                 ? `配了 ${voice.configured} 但没挂上（${voice.reason ?? '原因未知'}）`
                 : '没配 —— 写 ~/.dsh/voice.json 的 {"adapter":"…"} 才有声音'}`,
-          meta: { ...s, voice, loop: lp },
+          meta: { ...s, voice, loop: lp, window: windowReport() },
         };
       }
 
@@ -566,7 +652,28 @@ async function registerAll(ctx) {
     },
   };
 
-  disposers.push(ctx.tools.register(defineTool(toolObj)));
+  /**
+   * 注册工具。**单独兜住"已经被别人注册过"**：装了两次（profile 的 bundles 里有一份、
+   * 又在 patch 里插了一份）时这里会抛 `tool "see_now" is already registered`。
+   * 以前这句会一路冒到 `apply()` 的兜底里，把整个插件判死 —— 连窗和循环都不起。
+   * 现在只记一行，让已经注册的那一份继续工作。
+   */
+  try {
+    disposers.push(ctx.tools.register(defineTool(toolObj)));
+    // 注册成功要留一行：出问题时"加载失败"（有 plugin-error.log）和"装了两份、被去重"
+    // 是两回事，没有这行只能靠猜。
+    log(`已注册工具 ${TOOL_NAME}（v${VERSION}）`);
+  } catch (e) {
+    const msg = String(e?.message ?? e);
+    if (!/already registered/i.test(msg)) throw e;
+    /**
+     * 装了两份：另一份已经在供货。**这一份必须整个退掉** —— 只是"不注册工具"的话，
+     * 它的 runner / 常驻循环 / 窗口照样起来，于是同一个模型被两套循环各叫一次。
+     */
+    log(`工具 ${TOOL_NAME} 已经注册过了（${msg}）—— 这一份直接退出，避免两套循环同时叫醒模型`);
+    for (const d of disposers.reverse()) { try { d?.(); } catch { /* 收不干净也不能再炸 */ } }
+    return () => {};
+  }
 
   return () => { for (const d of disposers.reverse()) d?.(); };
 }

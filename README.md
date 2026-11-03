@@ -192,7 +192,8 @@ macOS 自带一个：`examples/voice-say-mac.mjs`，走系统的 `say`，音色�
 
 | 参数 | 说明 |
 |---|---|
-| `action` | `watch`（默认，阻塞取图）/ `peek` / `start` / `stop` / `status` |
+| `action` | `watch`（默认，阻塞取图）/ `peek` / `start` / `stop` / `status` / `window` |
+| `show` | 配 `action:"window"`：`true` 把悬浮窗叫回来，`false` 藏起来，不传只报状态 |
 | `say` | **唯一能进悬浮窗、能被念出来的通道**。普通回复用户看不到 |
 | `quality` | `low`(800×450) / `standard` / `high` / `ultra`。改它会重启采集（~0.6s），并立刻返回当前这一帧 |
 | `pace` | 节奏：`calm` / `normal`（默认）/ `dense`。见下 |

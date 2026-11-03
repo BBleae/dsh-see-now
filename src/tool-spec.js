@@ -25,9 +25,12 @@ export const TOOL_TIMEOUT_MS = 900_000;
 /** `seconds` 的默认值：只是**上限**，攒够一张就提前返回。 */
 export const DEFAULT_BLOCK_SEC = 300;
 
+/** 工具名。注册日志、报错文案、测试都从这里取，别各处再写一遍字符串。 */
+export const TOOL_NAME = 'see_now';
+
 export function seeNowToolSpec() {
   return {
-    name: 'see_now',
+    name: TOOL_NAME,
     description:
       'Watch what is on the user\'s screen **live** and get back one image made of several frames. '
       + 'Frames are picked by how much the picture changes, so a static screen costs almost nothing '
@@ -41,7 +44,12 @@ export function seeNowToolSpec() {
       + 'still watching.\n'
       + '- `see_now({action:"peek"})` — grab the sheet that already piled up, without waiting. Use this '
       + 'when the plugin wakes you ("有新画面了"), because then you are not inside a `watch` any more.\n'
-      + '- `see_now({action:"status"})` — is it still watching, is the loop alive, is sound attached.\n'
+      + '- `see_now({action:"status"})` — is it still watching, is the loop alive, is sound attached, '
+      + 'and is the floating window actually visible.\n'
+      + '- `see_now({action:"window", show:true})` — bring the floating window back when the user cannot see '
+      + 'it (it can be left hidden from an earlier run). `show:false` hides it again. **Whenever a result '
+      + 'or `status` says the window is hidden, the user is seeing nothing you say** — fix it with this '
+      + 'before you say anything else.\n'
       + '- `see_now({action:"stop"})`.\n\n'
       + 'Safety net: if you ever stop calling `watch`, the plugin still keeps capturing and will wake '
       + 'you with a short note when a new sheet fills up (then `peek`). It also stops everything the '
@@ -64,7 +72,12 @@ export function seeNowToolSpec() {
     parameters: {
       action: {
         type: 'string',
-        description: 'watch (default) | peek | start | stop | status',
+        description: 'watch (default) | peek | start | stop | status | window',
+      },
+      show: {
+        type: 'boolean',
+        description: 'With action:"window": true = 让悬浮窗显示出来（用户看不见窗时用），false = 藏起来'
+          + '（采集照常，只是一句 `say` 也看不见）。不传就只报状态，什么都不改。',
       },
       source: {
         type: 'string',

@@ -21,7 +21,7 @@ import { spawnFrames, pickScreenEngine, screenEngineWarning } from './capture.js
 import { createPipeline } from './pipeline.js';
 import { chatWatcherShared, enterChatWait } from './chat.js';
 import { noteInterjected } from './interject.js';
-import { openWindow, windowAlive } from './window.js';
+import { openWindow, windowAlive, setWindowHidden } from './window.js';
 
 /** 三档清晰度。数字是画布像素，token 约等于 像素÷1650（见调参报告）。 */
 export const SIZES = Object.freeze({
@@ -295,6 +295,14 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
       if (st.ok) {
         windowOpened = true;
         log(st.already ? '悬浮窗已开着' : `悬浮窗已开（${st.from}）`);
+        /**
+         * **自己开出来的窗必须是看得见的。**
+         *
+         * `hidden` 是磁盘上的粘性状态：用户上一次点了「藏起来」，这个窗就会带着
+         * `hidden:true` 启动 —— 进程活着、心跳在跳、画面一个字都不出（2026-11-03 实报）。
+         * 只在这一刻清掉它（`already` 说明窗是原来那个，用户可能正故意藏着，不动）。
+         */
+        if (!st.already) setWindowHidden(false, { log });
       } else {
         log(`悬浮窗没开起来：${st.reason}`);
       }
@@ -559,6 +567,9 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
         secondsSinceWake: pipeline?.secondsSinceWake ?? null,
         // 这一轮开过窗没有（循环靠它区分"用户关了窗" 和 "窗压根没开起来"）
         windowOpened,
+        // 开窗结果与失败原因：**"它在看但我什么都看不到"时第一个要看的就是 reason**
+        // （没有带 tkinter 的 python 是最常见的一种，那时窗根本不会出现）
+        window: { ok: windowState?.ok ?? null, reason: windowState?.reason ?? null, script: windowState?.from ?? null },
         // 有没有待领的说明（挂断那条）—— status 里看得见，才不会"明明写了没人读"
         notePending: Boolean(pendingNote),
       };

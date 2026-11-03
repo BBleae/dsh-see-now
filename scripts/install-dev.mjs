@@ -75,7 +75,32 @@ async function report() {
   console.log(`profile   : ${PROFILE_DIR}`);
   console.log(`${PKG_NAME}: ${installed ? '已安装' : '未安装'}  bundles ${registered ? '已注册' : '未注册'}`);
   console.log(`bundles 共 ${bundles.length} 项：${bundles.join(', ')}`);
-  return { installed, registered };
+
+  /**
+   * **版本对账。**
+   *
+   * 这一行是给"我这会话里怎么没有 see_now 这个工具"准备的：宿主启动时才组合插件树，
+   * 组合的是 profile 里那份**副本**。副本落后（或者 `dsh.plugin.json` 和 `package.json`
+   * 版本不一致）时，跑的就是旧代码 —— 而"新开一个会话"不会改变任何已加载的代码。
+   */
+  const repoVersion = (await readJson(join(HERE, 'package.json'))).version;
+  let stale = null;
+  if (installed) {
+    const copyVersion = await readJson(join(target, 'package.json')).then((p) => p.version).catch(() => null);
+    const copyManifest = await readJson(join(target, 'dsh.plugin.json')).then((p) => p.version).catch(() => null);
+    console.log(`源码版本  : ${repoVersion}`);
+    console.log(`副本版本  : ${copyVersion ?? '读不到'}`
+      + `${copyVersion === repoVersion ? '  ✓ 一致' : '  ⚠️ 和源码不一致（跑的是旧代码）'}`);
+    if (copyManifest !== null && copyManifest !== copyVersion) {
+      console.log(`  ⚠️ 副本里 dsh.plugin.json 写的是 ${copyManifest} —— 和 package.json 不一致，插件管理器会按旧版本认它`);
+    }
+    if (copyVersion !== repoVersion) stale = { copyVersion };
+  }
+  if (stale) {
+    console.log('\n→ 跑 `node scripts/install-dev.mjs` 同步，然后**重启 DSH Desktop**。');
+    console.log('  （新开一个会话不够：插件树是进程启动时组合的，已加载的代码不会换。）');
+  }
+  return { installed, registered, stale };
 }
 
 if (mode === 'check') {
