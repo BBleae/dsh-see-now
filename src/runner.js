@@ -373,7 +373,15 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
      * @returns {Promise<{ok:boolean, reason?:string, sheet?:object, waited:number}>}
      */
     async watch({
-      seconds = 300, minFrames = 1, src = null, quality: q = null, opts = {},
+      seconds = 300, minFrames = 1, src: reqSrc = null, quality: q = null, opts = {},
+      /**
+       * 只看屏幕上的某一块：`{x,y,w,h}` 用这块，`null` 显式取消，`undefined` 不干预。
+       *
+       * **跟 `src` 分开传**：region 不算"显式来源"。下面那道挂断硬闸是给
+       * "用户关掉了窗，别再自动弹出来"用的 —— 换一块看并不等于他重新要求看，
+       * 不能借这个由头把闸打开（那条路最后就是"关不掉，只能卸载"）。
+       */
+      region = undefined,
       // 宿主给的取消信号。**必须在这里看**：不看的话用户按了停止，这个调用还要挂到封顶
       // （陪看那边专门写过这条：`signal` 是"这一轮被取消了"的唯一通知）。
       signal = null,
@@ -388,7 +396,32 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
        * 从头再放一遍，对关过窗的用户意味着"我刚关掉它又弹出来了"。
        * 所以：只有**显式传了来源**（用户明确说要看什么）才允许清闸重开。
        */
-      const explicitSrc = Boolean(src && src.kind);
+      const explicitSrc = Boolean(reqSrc && reqSrc.kind);
+
+      /**
+       * region 落到"这次要抓的那个源"上。
+       *
+       * 不传 `src` 时按上一次的源走；上一次是**文件回放**就不套屏幕区域
+       * （region 是 gdigrab 的输入侧参数，对文件没有意义）。
+       */
+      let src = reqSrc;
+      if (region !== undefined) {
+        const prevKind = (source ?? lastSource)?.kind ?? 'screen';
+        if (src === null && prevKind === 'file') {
+          // 放着，让下面按文件继续；region 被忽略，调用方（index.js）会说明
+        } else if (src === null || src.kind === 'screen') {
+          src = { ...(src ?? { kind: 'screen' }) };
+          if (region) {
+            src.region = region;
+            // ddagrab 没有 -offset_x：带 region 必须走 gdigrab（见 capture.js）
+            src.engine = 'gdigrab';
+          } else {
+            delete src.region;
+            if (!reqSrc) delete src.engine;
+          }
+        }
+      }
+
       const blocked = guardReason({ hungUp, fileEnded: Boolean(endedSource), explicitSrc });
       if (blocked === 'hung-up') return { ok: false, reason: 'hung-up', waited: 0 };
       if (blocked === 'file-ended') {
@@ -402,11 +435,18 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
       try {
         const prevSrc = source ?? lastSource;
         const switching = Boolean(pipeline) && q && SIZES[q] && q !== quality;
-        // region 变了（窗口挪了 / 换了窗口）也必须重开：`-offset_x` 是建管道时定死的，
-        // 不重开的话新 region 会被**静默忽略** —— 用户以为框住了，其实还在抓老地方。
-        const regionChanged = Boolean(pipeline) && Boolean(prevSrc?.region) && Boolean(src?.region)
-          && (src.region.x !== prevSrc.region.x || src.region.y !== prevSrc.region.y
-            || src.region.w !== prevSrc.region.w || src.region.h !== prevSrc.region.h);
+        /**
+         * region 变了（窗口挪了 / 换了窗口 / **取消掉**）也必须重开：`-offset_x` 是建管道时
+         * 定死的，不重开的话新 region 会被**静默忽略** —— 用户以为框住了，其实还在抓老地方。
+         *
+         * "一边有一边没有"也算变了：以前只比四个数字，于是 `region:"off"` 这种
+         * **撤回**永远不触发重开 —— 用户点了取消，画面还在抓那一小块。
+         */
+        const a = prevSrc?.region ?? null;
+        const b = src?.region ?? null;
+        const regionChanged = Boolean(pipeline)
+          && Boolean(a || b)
+          && (a?.x !== b?.x || a?.y !== b?.y || a?.w !== b?.w || a?.h !== b?.h);
         // 管线参数变了（常规 ↔ 逐帧）：这两套口径建管线时就定死了，只能重开。
         const modeChanged = Boolean(pipeline) && optsSig(runOpts) !== optsSig(opts);
         /**

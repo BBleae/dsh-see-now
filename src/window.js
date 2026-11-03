@@ -247,7 +247,7 @@ function storePython() {
   return out;
 }
 
-function pythonCandidates() {
+export function pythonCandidates() {
   const cfg = seeConfig();
   const list = [];
   for (const c of [process.env.DSH_SEE_PYTHON, cfg.python, process.env.DSH_FLOAT_PYTHON]) {

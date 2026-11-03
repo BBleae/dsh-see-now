@@ -16,6 +16,7 @@ import { ensureConfiguredVoice, detachAdapters, attachedAdapters, configuredVoic
 import { speechSubscribers } from './speech.js';
 import { startLoop, HANGUP_NOTE } from './loop.js';
 import { windowHidden, setWindowHidden, windowReport, windowLine } from './window.js';
+import { pickRegion, loadRegion, clearRegion, regionText } from './region.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -284,6 +285,11 @@ async function registerAll(ctx) {
   let loopScene = null;
   /** 切模式时那一句说明：下一次工具结果里带给模型，然后清掉 */
   let pendingModeNote = '';
+  /**
+   * 上一次告诉模型的区域。变了才说一句 —— 每张图都重复"你在看 x,y,w,h"是噪音，
+   * 但**变了不说**更糟：模型会拿一块区域的画面去回答整屏的问题。
+   */
+  let lastRegionKey = regionText(loadRegion());
   if (typeof ctx.on === 'function') {
     try {
       const off = ctx.on('session/event', (session) => {
@@ -474,9 +480,34 @@ async function registerAll(ctx) {
         // `ensureLoop()` 现取，就会把后续唤醒投到"等待期间最后说话的那个会话"去
         // （issue #1 的复现：watch 在 A 会话发起，结束后循环绑到了 B）。
         const ownerAtStart = lastSessionId;
-        const built = srcOf(args);
+        /**
+         * region 的三个入口，优先级从高到低：
+         *   1. `region:"off"` —— 取消（存的那块一起删掉）
+         *   2. `region:"x,y,w,h"` —— 这一次用这块（`srcOf` 负责校验和报错）
+         *   3. 都没传 —— 用用户上次框好的那块（`~/.dsh/see-now/region.json`）
+         *
+         * 第 3 条是这次的重点：**模型不该被要求记住四个数字**。用户框一次，之后
+         * 每轮 `watch` 自动就是那块。
+         */
+        const rawRegion = typeof args.region === 'string' ? args.region.trim() : '';
+        const regionOff = /^(off|none|clear)$/i.test(rawRegion);
+        const built = srcOf(regionOff ? { ...args, region: undefined } : args);
         if (built.error) return { text: built.error, meta: { ok: false, reason: 'bad-region' } };
         const src = built.src;
+        const stickyRegion = regionOff ? null : (rawRegion ? undefined : loadRegion());
+        if (regionOff) clearRegion();
+        // 变了一次说一次：模型要知道自己现在只看这一块，也得知道已经回到整屏
+        const regionKey = regionText(stickyRegion ?? src?.region ?? null);
+        if (regionKey !== lastRegionKey) {
+          lastRegionKey = regionKey;
+          pendingModeNote = [
+            regionKey
+              ? `现在只抓屏幕上的 **${regionKey}** 这一块（屏幕物理像素）—— 画面之外的东西你看不到，`
+                + '也不要假设整屏发生过什么。'
+              : '已经回到**整屏**，不再只抓那一块。',
+            pendingModeNote,
+          ].filter(Boolean).join('\n\n');
+        }
         // **封顶必须小于宿主给这个工具的 timeoutMs**（见 tool-spec）：工具自己挂得比
         // 宿主的死线还久，到点就不是"返回一张图"，而是整条调用被 abort（还会顺带 abort signal）。
         const seconds = Math.min(
@@ -499,6 +530,8 @@ async function registerAll(ctx) {
           seconds,
           minFrames,
           src,
+          // 存下来的那块（undefined = 这次没提，保持原样；null = 显式取消）
+          region: regionOff ? null : stickyRegion,
           quality: args.quality ? String(args.quality).toLowerCase() : null,
           // 逐帧模式：一张图一帧 + 档位固定 1（铺满）；常规按节奏定切点门槛。
           // 参数变了 runner 会自己重开管线。
@@ -653,6 +686,54 @@ async function registerAll(ctx) {
         };
       }
 
+      /**
+       * 框一块屏幕给它看（`action:"region"`）。
+       *
+       * 为什么要有这条：`region:"x,y,w,h"` 是 PR #9 加的，但**谁来量这四个数**是
+       * 没人解决的问题 —— 让用户去截图软件里读像素不现实。这里起一个全屏取框窗
+       * （`pick_region.py`，和悬浮窗共用同一个带 tkinter 的 python），拖一下松手，
+       * 坐标直接落盘，之后 `watch` 默认就用它。
+       *
+       * 会**阻塞到用户框完**（最长 3 分钟）。调用前最好先 `say` 一句"屏幕上会变暗，
+       * 拖个框就行"，否则用户不知道那块黑罩子是哪来的。
+       */
+      if (action === 'region') {
+        if (/^(off|none|clear)$/i.test(String(args.region ?? '').trim())) {
+          const had = loadRegion();
+          clearRegion();
+          lastRegionKey = null;
+          return {
+            text: had ? `已取消区域（原来是 ${regionText(had)}），下一次 watch 抓整屏。` : '本来就没设区域，现在还是整屏。',
+            meta: { ok: true, region: null },
+          };
+        }
+        const r = await pickRegion({ log });
+        if (!r.ok) {
+          const why = {
+            cancelled: '用户取消了框选（Esc / 右键），什么都没改。',
+            timeout: '等了三分钟没框完，取框窗已经收掉了。',
+            'no-python': `找不到能跑取框窗的 python（要带 tkinter）：${r.detail ?? ''}`,
+            'no-script': `取框脚本不见了：${r.detail ?? ''}`,
+            failed: `取框失败：${r.detail ?? ''}`,
+          }[r.reason] ?? `取框没成（${r.reason}）。`;
+          return { text: why, meta: { ok: false, reason: r.reason, detail: r.detail ?? null } };
+        }
+        const t = regionText(r.region);
+        lastRegionKey = t;
+        pendingModeNote = `用户刚框好一块：**${t}**（屏幕物理像素）。现在只看这一块。`;
+        log(`区域已选：${t}`);
+        return {
+          text: `框好了：**${t}**（${r.region.w}×${r.region.h}，屏幕物理像素）。\n`
+            + '从现在起 `watch` 默认只抓这块，不用再传 `region`。\n\n'
+            + '三条你要知道的（也是该告诉用户的）：\n'
+            + '- 抓的是**屏幕上正在显示的像素**：这块被别的窗口挡住，你看到的就是挡住它的那个窗口。\n'
+            + '- 没接 OBS，抓不到后台窗口、最小化的窗口。\n'
+            + '- 只在主屏有效；框到主屏外面会被拒绝（gdigrab 不接受负偏移）。\n'
+            + '换一块：再调一次 `see_now({action:"region"})`；不要了：`see_now({action:"region", region:"off"})`。',
+          meta: { ok: true, region: r.region },
+        };
+      }
+
       if (action === 'status') {
         const s = runner.status();
         const voice = voiceState();
@@ -678,6 +759,8 @@ async function registerAll(ctx) {
             + ` · 节奏：${sceneMode ? 'dense（跟逐帧走）' : paceMode}`
             + `（切点门槛 ${(sceneMode ? PACES.dense : PACES[paceMode]).cutAbs}，`
             + `最多 ${sceneMode ? 4 : PACES[paceMode].wakeGapSec} 秒叫一次）`
+            // 区域：只看一小块时，模型得知道自己看到的不是整屏
+            + `\n区域：${regionText(s.lastSource?.region ?? loadRegion()) ?? '整屏'}`
             // 声音单独一行：听不到声音时第一个要看的就是这里
             + `\n声音：${voice.speakers > 0
               ? `已接上 ${voice.adapters.join(', ') || '适配器'}（${voice.speakers} 个会出声的订阅者）`

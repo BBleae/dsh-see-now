@@ -168,3 +168,13 @@ for (const name of ASSETS) {
   copyFileSync(from, to);
   say(`[sync-window] 资源已同步 ${name}`);
 }
+
+/**
+ * `pick_region.py`（自选区域）是 see-now **独有**的，上游没有，所以不进 ASSETS。
+ * 这里只确认它还在：它丢了 = 发布版里「框一块」直接不可用，而且开发机上永远
+ * 看得出来（源码里有），只有在用户机器上才炸。
+ */
+if (!existsSync(join(destDir, 'pick_region.py'))) {
+  process.stderr.write('[sync-window] 包内缺少 pick_region.py（自选区域要用），不能发布\n');
+  process.exit(1);
+}

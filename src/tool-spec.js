@@ -72,7 +72,20 @@ export function seeNowToolSpec() {
     parameters: {
       action: {
         type: 'string',
-        description: 'watch (default) | peek | start | stop | status | window',
+        description: 'watch (default) | peek | start | stop | status | window | region',
+      },
+      region: {
+        type: 'string',
+        description: '只抓屏幕上的**一块矩形**（手机竖屏通话、某个播放器窗口之类）。'
+          + '格式 "x,y,w,h"，屏幕物理像素。**通常不用你填**：让用户说"框这块"就调 '
+          + '`see_now({action:"region"})`，屏幕上会变暗、他自己拖一个框，坐标自动存下来，'
+          + '之后每次 `watch` 默认就是那块（存到 `~/.dsh/see-now/region.json`）。\n'
+          + '传 `region:"off"` 取消，回到整屏。\n'
+          + '限制（要如实告诉用户）：抓的是**屏幕上正在显示的像素** —— 这块被别的窗口挡住就只看到挡住它的东西；'
+          + '没接 OBS，抓不到后台/最小化窗口；只支持主屏。\n'
+          + '带上区域后：强制 gdigrab（ddagrab 没有偏移参数）、按区域比例出图（竖屏出竖屏）、'
+          + '每帧长边 = 档位长边、一张默认 2 帧最多 4 帧。token 会比全屏贵（帧不再被缩小）：'
+          + 'low 档 2 帧约 345 token、4 帧约 872（普通全屏 4 帧是 218）；要省钱就降 `quality`。',
       },
       show: {
         type: 'boolean',
@@ -84,18 +97,6 @@ export function seeNowToolSpec() {
         description: 'Where to capture from: "screen" (whole desktop, default), "obs" (OBS virtual camera), '
           + '"camera" (first webcam). Only matters on the first call of a session. '
           + 'Use "file" together with path to replay a local video instead of a live source (debugging).',
-      },
-      region: {
-        type: 'string',
-        description: '只抓屏幕上的**一块矩形**，比如手机竖屏通话窗口。格式 "x,y,w,h"，'
-          + '屏幕物理像素（和 desktop_control 的窗口矩形同一套坐标，150% 缩放下已验证按物理像素算）。'
-          + '传了它之后：强制走 gdigrab（ddagrab 不支持偏移）、'
-          + '**按这块的宽高比出图**（竖屏就出竖屏，不再压成 16:9）、'
-          + '**每帧长边固定 = 档位长边**（low 800 / standard 1066 / high 1280 / ultra 1600），'
-          + '一张图默认 2 帧、最多 4 帧。\n'
-          + '**token 成本会涨**：单帧长边固定意味着帧不再被缩小——low 档 2 帧约 345 token、'
-          + '4 帧约 872 token（普通全屏 4 帧是 218）。要省钱就降 `quality`，要认字就升。\n'
-          + '粘性，只在首次调用生效；改它要重开采集。',
       },
       path: {
         type: 'string',
