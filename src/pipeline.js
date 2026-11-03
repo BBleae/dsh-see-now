@@ -23,6 +23,7 @@ import { solve, toRects, splitOneBin } from './pack.js';
 import { composePacked, SEAM } from './sheet.js';
 import { coverInto } from './scale.js';
 import { encodePng } from './png.js';
+import { gridRects } from './layout.js';
 
 export const DEFAULTS = Object.freeze({
   width: 800,
@@ -199,6 +200,16 @@ export function createPipeline(opts = {}) {
   const o = { ...DEFAULTS, ...opts };
   const { width, height, fps } = o;
 
+  /**
+   * region 模式（只抓一块竖屏窗口）：`o.region` 存在时走一套独立的几何。
+   *
+   * 此时 `width/height` 的语义变成**单格尺寸**（runner 用 layout.cellSize 按
+   * 「长边 = 档位长边」算好后传进来），不是整张画布的尺寸 —— 画布尺寸要等
+   * 出图时按实际帧数（2 帧 2×1 / 4 帧 2×2）才算得出来。
+   * 为 null 时整条老路径（pack 的 DP + coverInto + 16:9 常量）一行不变。
+   */
+  const regionAspect = o.region ? o.region.w / o.region.h : null;
+
   const scorer = createScorer({
     width, height, scoreMode: o.scoreMode, mcTau: o.mcTau, mcRadius: o.mcRadius,
   });
@@ -300,6 +311,30 @@ export function createPipeline(opts = {}) {
 
   function checkFlush(t) {
     if (frames.length === 0) return;
+
+    /**
+     * region 模式：不走 pack 的装箱判定 —— 那套是为「一张图塞多帧、格子随密度变小」
+     * 设计的，竖屏一格一帧用不上，硬套还会因为 `bins > 1` 误触发截断。
+     *
+     * 这里只决定**几张出一张图**：
+     *   硬上限 4 —— 6 帧就要 3×2 或 6×1，后者长宽比 3.4，今天实测就是它糊掉的；
+     *   期望 2   —— 竖屏 2 帧并排 = 1.125，最接近 1:1。
+     *
+     * `regionAspect === null` 时这段**不可达**，普通路径一个字节不动。
+     */
+    if (regionAspect) {
+      const cap = Math.max(1, Number(o.maxFrames) || 4);
+      const prefer = Math.min(cap, Math.max(1, Number(o.preferFrames) || 2));
+      if (frames.length >= cap) { flush(t, 'cap'); return; }
+      if (frames.length >= prefer) { flush(t, 'prefer'); return; }
+      // 只有一帧时等兜底。**region 单独封顶 30 秒**：0.0.8 的 action 档把
+      // `maxWaitSec` 设到 60，×2 = 120 秒 —— 拿这个抓「用户想让我看的东西」，
+      // 举着不动两分钟才给一张图就废了。30 秒够判断静止，普通路径的 maxWaitSec 不动。
+      const singleWait = Math.min(30, o.maxWaitSec * 2);
+      if (frames.length === 1 && t - sheetStart >= singleWait) { flush(t, 'time'); return; }
+      return;
+    }
+
     const p = plan();
 
     // 硬：装不下了。**从末尾退到真装得下为止**，退出来的留给下一张（保序、不丢帧）。
@@ -350,10 +385,50 @@ export function createPipeline(opts = {}) {
     if (frames.length >= o.maxFrames) flush(t, 'cap');
   }
 
+  /**
+   * region 模式的出图：一帧一格，按 `gridRects` 摆成网格（2 帧 2×1 / 4 帧 2×2）。
+   *
+   * **源帧尺寸 === 单格尺寸**：采集时 ffmpeg 的 `scale=cellW:cellH` 已经按 region
+   * 的比例等比缩放好了，所以这里把 `buf` **直接搬进格子**。
+   * 绝不能再做一次 cover / scale —— 那会把「不拉伸」这个验收直接毁掉
+   * （coverInto 是保持比例的裁边，喂进来的正好同比例，裁掉的就是画面本身）。
+   */
+  function flushRegion(batch, t, why) {
+    const n = batch.length;
+    const g = gridRects(n, width, height, regionAspect);
+    const cells = batch.map((f) => ({ buffer: f.buf, w: width, h: height }));
+    const img = composePacked({
+      frames: cells, rects: g.rects, width: g.width, height: g.height, burn: 'index',
+    });
+    const png = encodePng(img.buffer, g.width, g.height, { level: 3 });
+    if (o.queueDepth > 0 && sheets.length >= o.queueDepth) { sheets.shift(); dropped += 1; }
+    const sheet = {
+      at: t,
+      from: batch[0].t,
+      to: batch[n - 1].t,
+      png,
+      w: g.width,
+      h: g.height,
+      fill: 1,
+      area: 1,
+      bins: 1,
+      why,
+      frames: batch.map((f) => ({ t: +f.t.toFixed(2), tier: 1, level: f.level, via: f.via })),
+      cells: g.rects.map((r) => ({ px: r.px, py: r.py, pw: r.pw, ph: r.ph, tier: 1 })),
+    };
+    sheets.push(sheet);
+    stats.sheets += 1;
+    return sheet;
+  }
+
   function flush(t, why) {
     if (!frames.length) return;
     const batch = frames;
     frames = [];
+    // region 模式：一帧一格，不走 pack 的 DP（也不做任何二次缩放）
+    // **必须 return** —— `flushNow()` 靠这个返回值拿图，返回 undefined 会让它
+    // 清空了 sheets 却交不出图（插话时用户什么都看不到）。
+    if (regionAspect) return flushRegion(batch, t, why);
     const seq = seqOf(batch);
     const p = solve(seq, { binCost: o.binCost });
     if (!p.cells.length) return;
@@ -517,9 +592,20 @@ export function createPipeline(opts = {}) {
         });
       }
       // 装不下就从**最老的**开始丢：插话要的是最新画面，老的让位
-      while (frames.length > 1 && plan().bins > 1) {
-        frames.shift();
-        sheetStart = frames[0].t;
+      if (regionAspect) {
+        // region 模式没有"装箱"这回事（一帧一格），只按硬上限截断。
+        // **不能调 plan()**：`plan()` 是 pack 的 DP，在 region 模式下算出来的
+        // bins 没有意义，误判会白丢帧。
+        const cap = Math.max(1, Number(o.maxFrames) || 4);
+        while (frames.length > cap) {
+          frames.shift();
+          sheetStart = frames[0].t;
+        }
+      } else {
+        while (frames.length > 1 && plan().bins > 1) {
+          frames.shift();
+          sheetStart = frames[0].t;
+        }
       }
       if (!frames.length) return null;
       const at = t ?? frames[frames.length - 1].t;

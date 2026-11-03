@@ -84,7 +84,10 @@ export function sourceArgs(
           '-capture_cursor', s.mouse ? '1' : '0',
           '-i', `${s.device ?? DEFAULT_SCREEN_DEVICE}:none`];
       }
-      const useDda = s.engine === 'ddagrab' || (s.engine !== 'gdigrab' && engine !== 'gdigrab');
+      // region 只能走 gdigrab：ddagrab 是 filter source，没有 `-offset_x`/`-video_size`
+      // 这类输入侧参数，带 region 时给它会把偏移静默丢掉（抓到整屏，用户以为生效了）。
+      const useDda = !s.region
+        && (s.engine === 'ddagrab' || (s.engine !== 'gdigrab' && engine !== 'gdigrab'));
       if (!useDda) {
         // gdigrab 的 -framerate 是**设备侧**采样率，必须给，否则默认 29.97 白解码
         const region = s.region

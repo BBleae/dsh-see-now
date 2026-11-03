@@ -72,6 +72,18 @@ export function seeNowToolSpec() {
           + '"camera" (first webcam). Only matters on the first call of a session. '
           + 'Use "file" together with path to replay a local video instead of a live source (debugging).',
       },
+      region: {
+        type: 'string',
+        description: '只抓屏幕上的**一块矩形**，比如手机竖屏通话窗口。格式 "x,y,w,h"，'
+          + '屏幕物理像素（和 desktop_control 的窗口矩形同一套坐标，150% 缩放下已验证按物理像素算）。'
+          + '传了它之后：强制走 gdigrab（ddagrab 不支持偏移）、'
+          + '**按这块的宽高比出图**（竖屏就出竖屏，不再压成 16:9）、'
+          + '**每帧长边固定 = 档位长边**（low 800 / standard 1066 / high 1280 / ultra 1600），'
+          + '一张图默认 2 帧、最多 4 帧。\n'
+          + '**token 成本会涨**：单帧长边固定意味着帧不再被缩小——low 档 2 帧约 345 token、'
+          + '4 帧约 872 token（普通全屏 4 帧是 218）。要省钱就降 `quality`，要认字就升。\n'
+          + '粘性，只在首次调用生效；改它要重开采集。',
+      },
       path: {
         type: 'string',
         description: 'With source:"file": absolute path of a video to replay.',

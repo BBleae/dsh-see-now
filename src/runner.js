@@ -19,6 +19,7 @@
 
 import { spawnFrames, pickScreenEngine, screenEngineWarning } from './capture.js';
 import { createPipeline } from './pipeline.js';
+import { cellSize } from './layout.js';
 import { chatWatcherShared, enterChatWait } from './chat.js';
 import { noteInterjected } from './interject.js';
 import { openWindow, windowAlive } from './window.js';
@@ -31,6 +32,18 @@ export const SIZES = Object.freeze({
   ultra: [1600, 900],     // 872 token/张 · 单帧时几乎等于原屏 —— 真要读字才用（仍低于 1024 封顶）
 });
 export const DEFAULT_QUALITY = 'low';
+
+/**
+ * 档位长边（`region` 模式用）。
+ *
+ * 为什么单独列一张表，而不是继续读 `SIZES[q][0]`：region 模式下 `width/height`
+ * 的语义变成**单格**尺寸，只有长边才对应档位；`SIZES` 里的 800×450 是整张画布的
+ * 尺寸（16:9），两者不能混用。数值与 `SIZES` 的长边一致，只是把「哪个数才是尺度」
+ * 显式写出来 —— 以后调 `SIZES` 时不会漏掉另一边。
+ */
+export const LONG_EDGE = Object.freeze({
+  low: 800, standard: 1066, high: 1280, ultra: 1600,
+});
 
 /**
  * 「逐帧 / 逐场景」模式的管线参数。
@@ -231,8 +244,27 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
     let engine = src.engine ?? 'auto';
     if (src.kind === 'screen' && engine === 'auto') engine = await pickScreenEngine({ ffmpegPath });
     const size = SIZES[q] ?? SIZES[DEFAULT_QUALITY];
+    /**
+     * region 模式：`width/height` 是**单格**尺寸（长边 = 档位长边），不是画布。
+     *
+     * 采集侧按单格抓、出图时再按实际帧数拼（2 帧 2×1 / 4 帧 2×2）——
+     * 这样 2 帧不会浪费半张画布；而且 ffmpeg 的 `scale=w:h` 与 region 同比例，
+     * 属于等比缩放，不变形。
+     */
+    const longEdge = LONG_EDGE[q] ?? LONG_EDGE[DEFAULT_QUALITY];
+    const [w, h] = src.region ? cellSize(longEdge, src.region) : size;
+    const regionOpts = src.region ? {
+      region: src.region,
+      // 硬上限 4（6 帧要 3×2 或 6×1，后者长宽比 3.4 —— 今天实测糊掉的就是它）；
+      // 期望 2（竖屏 2 帧并排 = 1.125，最接近 1:1）。
+      // 逐帧模式（`maxFrames: 1`）下两个都收敛到 1，保持「一张图一个画面」。
+      // **上限钉死 4**：0.0.8 的 action 档会往 opts 里塞 `maxFrames: 8`，region 不能
+      // 继承它 —— 上限只该由 region 自己说，不能靠 preferFrames 去掩盖。
+      maxFrames: Math.min(4, Math.max(1, Number(opts.maxFrames) || 4)),
+      preferFrames: Math.min(Math.max(1, Number(opts.maxFrames) || 4), 2),
+    } : {};
     // oneShot 由调用方（watch）决定：**只有换清晰度**时置 true（缓冲区刚扔，等攒满等于白等一个窗口）
-    const p = createPipeline({ ...opts, width: size[0], height: size[1] });
+    const p = createPipeline({ ...opts, width: w, height: h, ...regionOpts });
     // 记下"这次建管线用的调用方参数"（不含 oneShot）——watch 靠它发现"模式变了"。
     runOpts = { ...opts };
     delete runOpts.oneShot;
@@ -270,7 +302,7 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
       lastError = `ffmpeg: ${e?.message ?? e}`;
       if (pipeline === p) teardown('ffmpeg-error');
     });
-    log(`开始看 ${s.kind}${engine && engine !== 'auto' ? `/${engine}` : ''} @${size[0]}×${size[1]}`);
+    log(`开始看 ${s.kind}${engine && engine !== 'auto' ? `/${engine}` : ''} @${w}×${h}${s.region ? ` region=${s.region.x},${s.region.y},${s.region.w},${s.region.h}` : ''}`);
     // macOS 没给屏幕录制权限时，采集本身是"成功"的，只是画面全黑 ——
     // 探针已经试出来了，这里把它带回去，让模型（和用户）知道该去系统设置，而不是以为插件坏了。
     const warning = s.kind === 'screen' ? screenEngineWarning() : null;
@@ -362,6 +394,11 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
       try {
         const prevSrc = source ?? lastSource;
         const switching = Boolean(pipeline) && q && SIZES[q] && q !== quality;
+        // region 变了（窗口挪了 / 换了窗口）也必须重开：`-offset_x` 是建管道时定死的，
+        // 不重开的话新 region 会被**静默忽略** —— 用户以为框住了，其实还在抓老地方。
+        const regionChanged = Boolean(pipeline) && Boolean(prevSrc?.region) && Boolean(src?.region)
+          && (src.region.x !== prevSrc.region.x || src.region.y !== prevSrc.region.y
+            || src.region.w !== prevSrc.region.w || src.region.h !== prevSrc.region.h);
         // 管线参数变了（常规 ↔ 逐帧）：这两套口径建管线时就定死了，只能重开。
         const modeChanged = Boolean(pipeline) && optsSig(runOpts) !== optsSig(opts);
         /**
@@ -375,10 +412,11 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
         const stopped = Boolean(pipeline) && !running;
         // **冷启动**（手上没有管线，或采集已经停了）才 eager。换清晰度不算 —— 那条路已经用 oneShot 了。
         const cold = !pipeline || stopped;
-        if (!pipeline || stopped || switching || modeChanged) {
+        if (!pipeline || stopped || switching || modeChanged || regionChanged) {
           if (pipeline) {
             teardown(stopped ? '采集已停，重开'
-              : switching ? `换清晰度 ${quality} → ${q}` : '换模式（逐帧 / 常规）');
+              : switching ? `换清晰度 ${quality} → ${q}`
+                : regionChanged ? 'region 变了，重开' : '换模式（逐帧 / 常规）');
           }
           if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
           await start({
