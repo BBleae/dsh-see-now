@@ -31,3 +31,15 @@ test('悬浮窗开着时不按"多久没说话"收工（陪看中途不说话是
   assert.equal(shouldGoIdle({ wakesSinceUser: 2, now: NOW, lastUserAt: long, windowOpen: true }), false);
   assert.equal(shouldGoIdle({ wakesSinceUser: 2, now: NOW, lastUserAt: long, windowOpen: false }), true);
 });
+
+// ---- 收工还是"只听"，取决于窗还在不在（社区实报 2026-11-03）----
+import { idleAction } from '../src/loop.js';
+
+test('idle 之后：窗开着只降级成"只听"，窗关掉才真收工', () => {
+  assert.equal(idleAction({ idle: false, windowOpen: false }), 'continue');
+  assert.equal(idleAction({ idle: false, windowOpen: true }), 'continue');
+  assert.equal(idleAction({ idle: true, windowOpen: true }), 'listen',
+    '窗还在屏幕上，用户随时会打字 —— 不能把耳朵一起拆掉');
+  assert.equal(idleAction({ idle: true, windowOpen: false }), 'stop');
+  assert.equal(idleAction({}), 'continue');
+});

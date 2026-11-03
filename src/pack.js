@@ -19,6 +19,15 @@ export const DEFAULT_GROW = Object.freeze([3, 4, 5, 6, 7, 8]);
 export const UNIT = 840;
 
 /**
+ * 宽高比容差（与 storyboard 的 pack.DEFAULT_STRETCH 同一个数）。
+ *
+ * 0.3：最宽的格压到 h/w = 1/1.3、最窄格拉到 1.3，一行里能拉平的组合明显变多。
+ * 实测 40 帧混合档位的 solve 从 1.78ms 涨到 2.25ms（p50），换来箱数 -5%；
+ * 帧预算 83ms，这点开销可以忽略，而少 flush 一次省的是 PNG 8.3ms。
+ */
+export const DEFAULT_STRETCH = 0.3;
+
+/**
  * 档位 k 的边长区间（UNIT 单位）。
  *
  *   k=1  [1/2, 1]     —— 整幅只许缩到一半（两张 1 档正好并排）
@@ -46,12 +55,15 @@ export function bounds(k, grow = DEFAULT_GROW) {
 const ROW_CACHE = new Map();
 const ROW_CACHE_MAX = 20000;
 
-export function rowOptions(tiers, grow = DEFAULT_GROW, stretch = 0.2, fillRows = true) {
-  // 数值键：档位 0..8 编成 9 进制（0 = 自由尺寸），再带上长度和参数，避免字符串拼接的开销
-  let key = tiers.length;
-  for (let i = 0; i < tiers.length; i += 1) key = key * 9 + tiers[i];
-  key = key * 3 + (stretch > 0.15 ? 1 : 0);
-  key = key * 2 + (fillRows ? 1 : 0);
+export function rowOptions(tiers, grow = DEFAULT_GROW, stretch = DEFAULT_STRETCH, fillRows = true) {
+  // **键必须覆盖所有影响结果的参数**：键里只要 `stretch > 0.15` 这个布尔是错的 ——
+  // flat 的行高直接等于 `最宽/(1+stretch)`，0.2 和 0.3 会算出不同的候选，
+  // 却共用同一份缓存。加了 `grow` 之后还多一层：允不允许升档也是两套结果。
+  //
+  // 2026-11-04 把默认 stretch 从 0.2 提到 0.3 时踩到了：先算过 0.2 再算 0.3，
+  // 拿到的是 0.2 的候选（flat 缺失），单测直接给出假结论。
+  // 原来的数值键还有个隐患：`key * 9 + tier` 累乘，60 档时早就越过安全整数范围。
+  const key = `${tiers.join(',')}|${grow.join(',')}|${stretch}|${fillRows ? 1 : 0}`;
   const hit = ROW_CACHE.get(key);
   if (hit !== undefined) return hit;
   const val = rowOptionsRaw(tiers, grow, stretch, fillRows);
@@ -110,7 +122,7 @@ function rowOptionsRaw(tiers, grow, stretch, fillRows = true) {
   //    满足后这一行**零空隙**（面积 = 行高 × 1）。
   if (stretch > 0 && s.length > 1) {
     const wmax = Math.max(...s), wmin = Math.min(...s);
-    if (wmax <= wmin * ((1 + stretch) / (1 - stretch)) + 1e-9) {
+    if (wmax <= wmin * ((1 + stretch) * (1 + stretch)) + 1e-9) {
       const c2 = wmax / (1 + stretch);
       const A2 = c2 * sum(s);                    // 面积 = 行高 × 本行实占宽度（未满宽就不许虚报）
       if (!out.some((o) => Math.abs(o.c - c2) < 1e-9 && Math.abs(o.A - A2) < 1e-9)) {
@@ -122,7 +134,7 @@ function rowOptionsRaw(tiers, grow, stretch, fillRows = true) {
 }
 
 /** 预计算：ropt[i][ln-1] = seq[i..i+ln) 这一行的候选。DP 内层只查表。 */
-export function precompute(tiers, grow = DEFAULT_GROW, stretch = 0.2, fillRows = true) {
+export function precompute(tiers, grow = DEFAULT_GROW, stretch = DEFAULT_STRETCH, fillRows = true) {
   const n = tiers.length;
   const ropt = Array.from({ length: n }, () => []);
   for (let i = 0; i < n; i += 1) {
@@ -139,7 +151,7 @@ export function precompute(tiers, grow = DEFAULT_GROW, stretch = 0.2, fillRows =
  * 精确 DP：给定档位序列，求占用率最高的按行排布。
  *
  * 目标函数是 `Σ面积 − 箱数 × 每箱面积 × 1.02`。
- * 那个 1.02 是**箱子本身的代价**：多一张图就多一份 384 token 的图像开销，
+ * 那个 1.02 是**箱子本身的代价**：多一张图就多付一份图像的钱（按像素算，不是 384/张），
  * 所以两套排布占用率相同时必须选箱数少的。没有它的时候
  * `[1,1]` 会被排成"两张各 100%"，而正确解是"一张里并排两个 1/2"。
  *
@@ -148,7 +160,7 @@ export function precompute(tiers, grow = DEFAULT_GROW, stretch = 0.2, fillRows =
  *          x/y/w/h 是归一化坐标（0..1，y 相对本张），t=档位，f=实际缩放系数
  */
 export function solve(tiers, {
-  grow = DEFAULT_GROW, mu = 1, stretch = 0.2, binCost = 1.02, fillRows = true,
+  grow = DEFAULT_GROW, mu = 1, stretch = DEFAULT_STRETCH, binCost = 1.02, fillRows = true,
 } = {}) {
   const n = tiers.length;
   if (!n) return { bins: 0, fill: 0, cells: [], area: 0 };
@@ -224,9 +236,9 @@ export function solve(tiers, {
         x: x / UNIT,
         y: binH,
         w: sv / UNIT,
-        h: (flat ? rowH : sv) / UNIT,                 // 只有 flat 行才拉高；否则是正方格
+        h: (flat ? rowH : Math.min(rowH, sv * (1 + stretch))) / UNIT,
         s: sv / UNIT,                                 // 兼容旧字段
-        stretch: flat ? sv / rowH : 1,                // 宽/高（1 = 正方形格）
+        stretch: sv / (flat ? rowH : Math.min(rowH, sv * (1 + stretch))),
         t: tier,
         f: (sv * tier) / UNIT,
         bin,                                          // 第几张图（0-based）

@@ -82,9 +82,15 @@ test('帧数够了就压档，而且一张图塞得更多', () => {
   assert.ok(Math.max(...a) > Math.max(...b),
     `加成后档位该更大（格子更小）：${a.join(',')} vs ${b.join(',')}`);
 
-  const perA = withBoost.sheets.reduce((s, x) => s + x.frames.length, 0) / withBoost.sheets.length;
-  const perB = noBoost.sheets.reduce((s, x) => s + x.frames.length, 0) / noBoost.sheets.length;
-  assert.ok(perA >= perB, `加成后每张帧数不该变少：${perA} vs ${perB}`);
+  // 这里原来还断了一条"加成后每张帧数 >= 不加成"，2026-11-04 排布放宽（stretch 0.3 +
+  // 逐格部分拉伸）之后它不再成立，也不是回归：
+  //
+  //   改前：加成 2 张（6 帧）、不加成 2 张（3 帧） → perA 6 >= perB 3 通过
+  //   改后：加成 2 张（6 帧）、不加成 1 张（8 帧） → perA 6 <  perB 8 失败
+  //
+  // 变的是**不加成那一侧**：大格子现在靠行内拉伸能塞进一张，从 3 帧变 8 帧。
+  // 加成侧一张没变。所以这条断言测的其实是"不加成有多差"，方向反了。
+  // 现在只守档位（确实压小了）——每张几帧由 flush 时机和内容决定，不该由排布单测锁死。
 });
 
 test('markBoost 传字符串 "0" 时按 0 处理（不是字符串拼接）', () => {

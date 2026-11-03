@@ -46,6 +46,16 @@ export function pidPath() {
   return join(dshHome(), 'see-now-window.pid');
 }
 
+/**
+ * pid 文件的 mtime（毫秒；没有就 0）。
+ *
+ * 用来区分**"用户手动重开了窗"**和**"窗一直没关过"** —— 两者 `windowAlive()` 都是 true。
+ * 重开窗会重写 pid 文件，mtime 一定变；残留进程不会。
+ */
+export function pidStamp() {
+  try { return statSync(pidPath()).mtimeMs; } catch { return 0; }
+}
+
 /** 心跳文件：窗口每秒 touch 一次，用来区分"进程还在"和"窗口真的在画"。 */
 function heartbeatPath() {
   return join(chatDir(), 'window-heartbeat');
@@ -331,6 +341,8 @@ export async function openWindow({ force = false, log = () => {}, settleMs = 700
   }
 
   const tried = [];
+  /** 所有候选解释器上缺的包（去重后一次性报出来）—— 必须声明在循环外，否则末尾拼 reason 时看不到 */
+  const missing = new Set();
   for (const python of pythonCandidates()) {
     if (!hasTkinter(python)) { tried.push(`${python}（无 tkinter）`); continue; }
 
@@ -359,7 +371,11 @@ export async function openWindow({ force = false, log = () => {}, settleMs = 700
     const dead = await waitExit(child, settleMs);
     if (typeof errFd === 'number') { try { closeSync(errFd); } catch { /* 已关 */ } }
     if (dead) {
-      tried.push(`${python}（启动后 ${settleMs}ms 内退出，code=${dead.code}）`);
+      // code=1 且是"立刻退出"：八成是缺包。探测一次，把包名带进错误信息。
+      const miss = dead.code === 1 ? missingPkgs(python) : [];
+      for (const m of miss) missing.add(m);
+      tried.push(`${python}（启动后 ${settleMs}ms 内退出，code=${dead.code}`
+        + `${miss.length ? `，缺 ${miss.join('/')}` : ''}）`);
       log(`[window] ${python} 启动后立即退出，换下一个`);
       continue;
     }
@@ -369,11 +385,37 @@ export async function openWindow({ force = false, log = () => {}, settleMs = 700
     return { ok: true, script, from, python };
   }
 
-  return {
-    ok: false,
-    reason: `没有能用的解释器（要带 tkinter）：${tried.join(' / ') || '一个候选都没有'}`,
-    script,
-  };
+  let reason = `没有能用的解释器（要带 tkinter）：${tried.join(' / ') || '一个候选都没有'}`;
+  if (missing.size) {
+    const pkgs = [...missing].join(' ');
+    reason += `\n缺 Python 包：${pkgs}。装一下：`
+      + `python -m pip install ${pkgs}`
+      + `（用上面那句报错里的那个 python；装完把窗关掉重开）。`;
+  }
+  return { ok: false, reason, script, missing: [...missing] };
+}
+
+/**
+ * 窗口脚本需要这三个包。**缺任何一个都会让 python 在 700ms 内退出、code=1**，
+ * 而插件这边只看得到 exit code —— 社区实报"只报 code=1，不知道要装什么"。
+ * 所以启动全失败之后跑一次探测，把缺的包名换成 pip 命令一起报出去。
+ */
+const DEPS_PROBE = [
+  'miss = []',
+  'for mod, pkg in (("PIL", "Pillow"), ("mss", "mss"), ("numpy", "numpy")):',
+  '    try:',
+  '        __import__(mod)',
+  '    except Exception:',
+  '        miss.append(pkg)',
+  'print(",".join(miss))',
+].join('\n');
+
+function missingPkgs(python) {
+  try {
+    const r = spawnSync(python, ['-c', DEPS_PROBE], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
+    const out = String(r.stdout ?? '').trim();
+    return out ? out.split(',') : [];
+  } catch { return []; }
 }
 
 /** 等最多 `ms`；进程先退出就返回 {code}，否则返回 null（还活着）。 */

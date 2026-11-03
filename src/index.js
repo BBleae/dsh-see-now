@@ -768,6 +768,23 @@ async function registerAll(ctx) {
         };
       }
 
+/**
+ * 循环状态那一行。三种态要分清，别都写成"在跑"：
+ *   - `listen`：采集停了，但窗口里的输入还收得到（用户打字仍然能叫醒模型）
+ *   - `active`：正常在跑
+ *   - 已停 / 没起
+ */
+function loopLine(lp) {
+  if (!lp) return '没起（还没调过 watch）';
+  if (lp.mode === 'listen') return '只听（采集已停，窗口里的输入还收得到；要看就调 peek）';
+  if (lp.stopped) return lp.reason ? `已停（${lp.reason}）` : '已停';
+  const fail = lp.wakeFailures ? `，失败 ${lp.wakeFailures} 次` : '';
+  const last = lp.lastWakeAt
+    ? `，上一次 ${Math.round((Date.now() - lp.lastWakeAt) / 1000)}s 前${lp.lastWakeOk === false ? '（失败）' : ''}`
+    : '';
+  return `在跑（叫醒 ${lp.wakes} 次${fail}${last}，会话 ${lp.session ?? '未知'}）`;
+}
+
       if (action === 'status') {
         const s = runner.status();
         const voice = voiceState();
@@ -778,11 +795,7 @@ async function registerAll(ctx) {
               + `${s.lastError ? `\n⚠ ${s.lastError}` : ''}`
             : `没在采集（${s.idleSec}s 前停的）${s.lastError ? `\n⚠ ${s.lastError}` : ''}`)
             // 循环状态单独一行：**"模型答一句就停"时第一个要看的就是它**
-            + `\n循环：${lp && !lp.stopped
-              ? `在跑（叫醒 ${lp.wakes} 次${lp.wakeFailures ? `，失败 ${lp.wakeFailures} 次` : ''}`
-                + `${lp.lastWakeAt ? `，上一次 ${Math.round((Date.now() - lp.lastWakeAt) / 1000)}s 前${lp.lastWakeOk === false ? '（失败）' : ''}` : ''}`
-                + `，会话 ${lp.session ?? '未知'}）`
-              : lp?.reason ? `已停（${lp.reason}）` : '没起（还没调过 watch）'}`
+            + `\n循环：${loopLine(lp)}`
             // 队列：手上有没有攒着没取走的图 —— `pending` 一直是 1 时模型不会收到新图，只会一直被叫
             + `\n队列：${s.pending ? `有 ${s.pending} 张没取走（出图序号 ${s.sheets}）` : '空'}`
             // 窗口：**"它在看但我什么都没看到"时第一个要看的就是这一行**

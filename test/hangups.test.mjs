@@ -41,3 +41,20 @@ test('没挂断时 watch 不会被误拦', async () => {
   assert.equal(r.endedFile(), null);
   assert.notEqual(guardReason({ hungUp: r.isHungUp(), fileEnded: Boolean(r.endedFile()) }), 'hung-up');
 });
+
+// ---- 手动重开窗之后要能继续看（社区实报 2026-11-03）----
+import { resumeFromReopen } from '../src/runner.js';
+
+test('重开窗解除挂断：必须看 pid 文件有没有被重写，不能只看窗口活着', () => {
+  // 挂断、窗活着、但 pid 文件没变过 → 是残留进程，**不许解除**
+  assert.equal(resumeFromReopen({ hungUp: true, winAlive: true, pidNow: 1000, pidAtHangUp: 1000 }), false,
+    '残留窗口不能把挂断解掉，否则就是"关掉又弹出来"');
+  // 挂断之后 pid 文件被重写（用户跑了 --force）→ 解除
+  assert.equal(resumeFromReopen({ hungUp: true, winAlive: true, pidNow: 2000, pidAtHangUp: 1000 }), true);
+  // 窗没活着 → 还是要看真有没有重开；这里不解除（挂断成立）
+  assert.equal(resumeFromReopen({ hungUp: true, winAlive: false, pidNow: 2000, pidAtHangUp: 1000 }), false);
+  // 本来就没挂断 → 不需要解除
+  assert.equal(resumeFromReopen({ hungUp: false, winAlive: true, pidNow: 2000, pidAtHangUp: 1000 }), false);
+  // 空参数不抛
+  assert.equal(resumeFromReopen({}), false);
+});

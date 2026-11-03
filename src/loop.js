@@ -58,6 +58,19 @@ export const MAX_AUTONOMOUS_WAKES = 8;
  * 社区实报「装上后卡读图循环」：常驻循环原来**只有"采集停了"一个退出条件**，
  * 屏幕一直动（放视频、刷网页）就会每 15 秒叫醒模型一次，永远不停。
  */
+/**
+ * 判到 idle 之后该干什么。
+ *
+ * `stop` = 彻底收工（窗都没了，留着循环只是白烧）；`listen` = 只停采集、**留着耳朵**。
+ *
+ * 社区实报 2026-11-03：窗开着、循环因为连续叫不醒收工，用户之后在窗里打的字
+ * 没有任何人读 —— 可那扇窗还摆在屏幕上，他当然以为自己在跟它说话。
+ */
+export function idleAction({ idle = false, windowOpen = false } = {}) {
+  if (!idle) return 'continue';
+  return windowOpen ? 'listen' : 'stop';
+}
+
 export function shouldGoIdle({ wakesSinceUser = 0, now = Date.now(), lastUserAt = now, windowOpen = false } = {}) {
   if (wakesSinceUser >= MAX_AUTONOMOUS_WAKES) return true;
   // 悬浮窗开着 = 有人在陪看，中途不说话是正常的，只靠"叫太多次"兜底
@@ -171,6 +184,37 @@ export function startLoop({
   /** 还没被处理掉的插话（一次只处理一条，剩下的留着下一拍） */
   const queue = [];
 
+  /**
+   * `active` = 正常干活；`listen` = **只听不说话**。
+   *
+   * 为什么需要这个状态（社区实报 2026-11-03）：悬浮窗开着、但循环因为"连续叫不醒"
+   * 已经收工，于是用户之后在窗里打的字**没有任何人读**。可那扇窗还明晃晃摆在屏幕上，
+   * 用户当然以为自己在跟它说话。
+   *
+   * 收工 ≠ 拆掉耳朵。这里让循环停掉采集（省资源），但**留着 ticker 继续盯 chat.jsonl**：
+   * 一旦有人开口，立刻回到 active 去唤醒模型。采集不自动重启 —— 模型要看图会调 `peek`，
+   * 那时才启动，用户的 region / 清晰度设置才不会被冲掉。
+   */
+  let mode = 'active';
+  /**
+   * 采集是**我们自己为了进只听模式停掉的**。
+   *
+   * 没有这个标志的话，退出只听后的第一拍就会看到 `!alive` —— 那本来是我们主动停的，
+   * 却会被下面 ② 判成 `capture-stopped`，于是用户刚说一句话，循环整个收工。
+   */
+  let pausedByListen = false;
+
+  const enterListen = () => {
+    if (mode === 'listen' || disposed) return;
+    mode = 'listen';
+    pausedByListen = true;
+    log('进入只听模式：停止采集，但继续盯着窗口里的输入');
+    try { runner.stop(); } catch { /* 已经停了 */ }
+    try {
+      appendSpoken('meta', '（有一阵没人说话了，我先停一停 —— 你在这儿打字我还能看见，说一声就继续看。）', { speak: false });
+    } catch { /* 写不进不影响听 */ }
+  };
+
   const stop = (reason) => {
     if (stopReason) return;
     stopReason = reason;
@@ -245,6 +289,20 @@ export function startLoop({
         if (verdict === 'stalled') { stop('window-stalled'); return; }
       }
 
+      // ①.5 只听模式：**必须排在窗口判断之后**（否则窗关了也发现不了），
+      //      也必须排在采集判断之前（我们已经主动停了采集，那里会误判成 capture-stopped）。
+      //      这一拍除了"听"什么都不做。
+      if (mode === 'listen') {
+        if (!queue.length) return;
+        mode = 'active';
+        wakesSinceUser = 0;
+        consecutiveFails = 0;
+        lastUserAt = Date.now();
+        deadTicks = 0;
+        log('窗口里有人说话 —— 退出只听模式');
+        // 采集不在这里重启：模型要图会调 peek，那条路会按用户原来的 region/清晰度起管道。
+      }
+
       // ② 采集自己停了（源断了、ffmpeg 挂了）。
       //    **续命放在这之前**：静态画面下 60 秒不出图，宽限期会把采集收走，
       //    那时 `!running` 是"没人来取"而不是"坏了"，不能当成停。
@@ -257,10 +315,24 @@ export function startLoop({
        * 文件回放一次能塞几十张进去，循环就被这些"永远取不完"的 pending 吊住，
        * 模型每拍被叫醒一次，用户看到的就是"一直弹有新画面、关窗都停不干净"。
        */
-      if (!alive) {
+      if (alive) {
+        deadTicks = 0;
+        // 采集回来了（模型 peek 会把管道重新拉起来），暂停标记到此为止
+        pausedByListen = false;
+      } else if (!pausedByListen) {
         deadTicks += 1;
         if (!st.pending || deadTicks > 2) { stop('capture-stopped'); return; }
-      } else if (deadTicks) deadTicks = 0;
+      }
+
+      /**
+       * 采集已经停了：**只允许第一拍把已经攒好的那张报出去**，之后不再产生唤醒。
+       *
+       * 社区实报：capture-stopped 之后还连收几条「有新画面了」，而且文案里
+       * 「上一句 say N 秒前」的 N 越来越大 —— 因为 `lastSaidNote()` 是拿 `Date.now()`
+       * 实时算的，采集都没了还在造新提词，那句话当然是"过期"的。
+       * 队列里剩下的图仍然能 `peek` 到（那条路不经过这里），所以不报不会丢东西。
+       */
+      if (!alive && deadTicks > 1) return;
 
       // ③ 有人在阻塞等的时候，整条叫醒路径都让开 —— 那一轮本来就还没结束，
       //    `followup` 投进去只会排队到这一轮之后，纯属插队无效还容易串话。
@@ -279,10 +351,15 @@ export function startLoop({
       }
 
       // ④.5 没人在看就收工（社区实报「卡读图循环」的止血线，判据见 shouldGoIdle）
-      if (shouldGoIdle({ wakesSinceUser, lastUserAt, windowOpen: windowAlive() })) {
-        stop('idle');
-        return;
-      }
+      //      **但窗还开着的时候只降级、不收工** —— 那扇窗还在屏幕上，用户随时可能打字，
+      //      把循环整个拆掉等于把他的输入扔进黑洞（见 mode 的说明）。
+      const winOpenNow = windowAlive();
+      const act = idleAction({
+        idle: shouldGoIdle({ wakesSinceUser, lastUserAt, windowOpen: winOpenNow }),
+        windowOpen: winOpenNow,
+      });
+      if (act === 'listen') { enterListen(); return; }
+      if (act === 'stop') { stop('idle'); return; }
 
       // ⑤ 攒够一张**新的**图了 —— 这才是常态唤醒。
       // **必须按出图序号判重**：以前只看 `pending > 0`，而模型要是没调 `peek`
@@ -324,6 +401,8 @@ export function startLoop({
     stopped: () => stopReason !== null,
     state: () => ({
       stopped: stopReason !== null,
+      // 'active' 在正常看；'listen' = 只剩耳朵（采集停了，但窗里打字仍然收得到）
+      mode,
       reason: stopReason,
       session: owner,
       wakes: wakeCount,

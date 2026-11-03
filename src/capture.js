@@ -203,13 +203,30 @@ export function captureArgs({
     });
     child.on('error', reject);
     child.on('close', (code) => {
+      const secs = Math.round((Date.now() - t0) / 1000);
       // `code === null` = 被我们自己 SIGKILL 的（stop / 换清晰度 / 收工）。
       // 那是正常收尾，不是失败 —— 否则每次 stop 都往 lastError 里写一条假错误。
-      if (code !== 0 && code !== null && err.trim()) {
-        reject(new Error(`ffmpeg exit ${code}: ${err.trim().slice(-300)}`));
+      if (code === null) {
+        resolve({ frames: n, ms: Date.now() - t0, code });
         return;
       }
-      resolve({ frames: n, ms: Date.now() - t0, code });
+      /**
+       * 屏幕采集**不存在"自然播完"**：源是活的屏幕，ffmpeg 只会在出错或源消失时自己退出。
+       * 所以 code 非 0 一律是异常；code === 0 也不是收工（以前这里会静默 resolve，
+       * 于是"采集中途停了"在上层看来跟正常停止一模一样，社区报的那种 141s/177s 中途退出
+       * 就查不出原因）。
+       *
+       * 报错里必须带**跑了多久、收了多少帧** —— 只有 code 是定位不了的：
+       * 12fps 下 141s/1686 帧说明是正常跑着跑着停的，而不是启动就崩。
+       */
+      if (code !== 0) {
+        reject(new Error(`ffmpeg exit ${code}（运行 ${secs}s / ${n} 帧）`
+          + `: ${err.trim().slice(-300) || '无 stderr'}`));
+        return;
+      }
+      reject(new Error(`ffmpeg 自己退出了（code 0，运行 ${secs}s / ${n} 帧）—— `
+        + `屏幕源没了？独占全屏切换 / 显示器休眠 / 抓屏引擎掉线都会这样。`
+        + ` stderr: ${err.trim().slice(-300) || '空'}`));
     });
   });
 
