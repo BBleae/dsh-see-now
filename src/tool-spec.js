@@ -69,6 +69,12 @@ export function seeNowToolSpec() {
       + 'The image is returned as a tool result (not pushed into the chat), so just read it. '
       + 'Frames are numbered 1..n in time order; the text lists each frame\'s timestamp and pixel size. '
       + 'Do NOT poll faster than every ~10 seconds — nothing new arrives that fast, and each image costs tokens.\n\n'
+      + '**Sound.** When the machine can hear what is playing (system audio → speech-to-text), the text '
+      + 'also carries a transcript block (it starts with `台词`): what was said during that window, with '
+      + 'timestamps in the same coordinate system as the frames. Use it to follow dialogue and narration '
+      + 'instead of guessing from faces. Two caveats: it is **machine-transcribed** (homophones happen — '
+      + 'never quote it as an exact line), and it only appears when audio capture is available; if the '
+      + 'block is missing, just work from the pictures and do not claim the video was silent.\n\n'
       + 'If you cannot read something (small text, filenames, a menu), do NOT guess: call again with '
       + '`quality:"high"` and you get one sharp frame of the current screen in about half a second.',
     parameters: {
@@ -120,7 +126,9 @@ export function seeNowToolSpec() {
           + '这一档只适合**动作游戏**。实测代价：同一段 137 秒的射击游戏，normal 出 95 帧、action 只出 11 帧；'
           + '而在一段快剪视频上覆盖率只有 12.7%（normal 67%）。所以**不适合访谈/口播/播放器看剧/快剪视频**'
           + '（那些内容会半天没反应或漏掉大半镜头，要切回 normal）。\n'
-          + '粘性，一直生效到下次再改；改它要重开采集（约 0.5 秒）。不传就是保持当前档。',
+          + '粘性，一直生效到下次再改；改它要重开采集（约 0.5 秒）。不传就是保持当前档。\n'
+          + '**看视频 / 影视剧 / 直播**建议用 dense：实测 27 段短视频上 cutAbs=7 的切点 F1 是 56.8%，'
+          + '默认 12 只有 51.9% —— 12fps 采样本来就会吃掉一部分快切。',
       },
       scene: {
         type: 'boolean',
