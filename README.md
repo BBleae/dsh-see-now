@@ -88,6 +88,9 @@ dsh plugin --profile web add dsh-see-now
 
 - **`web`** 是浏览器里用的那个 profile；桌面版换成 `--profile desktop`（那个 profile 需要先开过一次桌面端才会被初始化）。
 - 装完**重启 DSH** 生效（插件树在进程启动时组合）。
+- 重启之后**不用新开会话**：工具表是每一步重新组装的，旧会话下一轮就能看到 `see_now`
+  （宿主还会插一条 `tool-addition` 告诉模型多了这个工具）。所以「工具表在会话开头就定死了」
+  不成立 —— 挂不上多半是没重启，或者装的是旧副本。
 - 卸载：`dsh plugin --profile web remove dsh-see-now`
 - 升级：`dsh plugin --profile web update dsh-see-now`
 

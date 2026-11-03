@@ -140,13 +140,18 @@ if (same) {
 
 /**
  * **window.py 不是单独一个文件**：它 `import window_protocol`、跑 `mic.py`、
- * 贴同目录的 `mic-dsh.png`。只同步 .py 会得到一个"能装、装完起不来"的包 ——
- * 用户看到的是 `FileNotFoundError: .../mic-dsh.png`，然后以为插件坏了。
+ * 贴同目录的 `mic-dsh.png`，0.2.11 起还把玻璃拆成了 `glass_*` 和
+ * `window_widgets` 几个模块。只同步那个入口会得到一个「能装、装完起不来」的包
+ * —— 用户看到的是 `ModuleNotFoundError: glass_geometry`，然后以为插件坏了。
  *
  * 这是 issue #2 第 3 条（spawn 失败静默）的一个真根因：包内那份 window.py
  * 在只装了 see-now、没装 watch-together 的机器上必崩。
  */
-const ASSETS = ['mic-dsh.png', 'mic.py', 'window_protocol.py'];
+const ASSETS = [
+  'mic-dsh.png', 'mic.py', 'window_protocol.py',
+  'glass_geometry.py', 'glass_capture.py', 'glass_cpu.py', 'glass_gpu.py',
+  'glass_window.py', 'glass_window_gpu.py', 'window_widgets.py',
+];
 const srcDir = dirname(upstream.p);
 const destDir = dirname(DEST);
 for (const name of ASSETS) {
