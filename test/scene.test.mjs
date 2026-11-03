@@ -69,7 +69,7 @@ test('常规模式不受影响：同一段素材仍然多帧拼一张', () => {
 });
 
 test('自适应兜底：三档都带 floorGapK，越省电兜底越长，默认仍走固定 20s', () => {
-  for (const k of ['calm', 'normal', 'dense', 'action']) {
+  for (const k of ['calm', 'normal', 'dense', 'game-economic']) {
     assert.ok(PACES[k].pipeline?.floorGapK > 0, `${k} 必须带自适应兜底`);
     assert.ok(PACES[k].pipeline.floorMin < PACES[k].pipeline.floorMax, `${k} 的兜底上下界要合理`);
   }
@@ -111,7 +111,7 @@ test('自适应兜底真的会生效：出帧变稀之后兜底跟着缩短', ()
 
 test('三档节奏：越省门槛越高、叫醒越稀，逐帧用的是最密那档', () => {
   // action 是"内容类型"那条轴，不参与灵敏度排序 —— 它在下一个测试里单独验
-  assert.deepEqual(Object.keys(PACES).sort(), ['action', 'calm', 'dense', 'normal']);
+  assert.deepEqual(Object.keys(PACES).sort(), ['calm', 'dense', 'game-economic', 'normal']);
   // 门槛：calm 最高（最不敏感）→ dense 最低
   assert.ok(PACES.calm.cutAbs > PACES.normal.cutAbs, 'calm 的门槛必须比 normal 高');
   assert.ok(PACES.normal.cutAbs > PACES.dense.cutAbs, 'normal 的门槛必须比 dense 高');
@@ -124,12 +124,12 @@ test('三档节奏：越省门槛越高、叫醒越稀，逐帧用的是最密�
   assert.equal(createPipeline({}).constants.cutAbs, PACES[DEFAULT_PACE].cutAbs);
 });
 
-test('action 档：门槛比 calm 还高，并且靠 pipeline 把出帧密度一起压下来', () => {
+test('game-economic 档：门槛比 calm 还高，并且靠 pipeline 把出帧密度一起压下来', () => {
   // 实测反馈（全屏动作游戏）：正常切点淹没在运动里，门槛 12 等于"全是切点"
-  assert.ok(PACES.action.cutAbs > PACES.calm.cutAbs, 'action 的门槛必须高于 calm');
+  assert.ok(PACES['game-economic'].cutAbs > PACES.calm.cutAbs, 'action 的门槛必须高于 calm');
   // 不能比最灵敏那档更吵
-  assert.ok(PACES.action.wakeGapSec >= PACES.dense.wakeGapSec, 'action 不能比 dense 更吵');
-  const p = PACES.action.pipeline;
+  assert.ok(PACES['game-economic'].wakeGapSec >= PACES.dense.wakeGapSec, 'action 不能比 dense 更吵');
+  const p = PACES['game-economic'].pipeline;
   assert.ok(p && typeof p === 'object', 'action 必须带 pipeline 覆盖');
   // 这两条是关键：只抬 cutAbs 不抬积分，出帧密度不变，照样贴限速
   assert.ok(p.integralSeconds > 3, '积分阈值必须抬高');

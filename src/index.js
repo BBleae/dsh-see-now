@@ -491,7 +491,9 @@ async function registerAll(ctx) {
        * 光靠模型在 `say` 里答应没用 —— 出图频率和唤醒间隔都是插件参数，
        * 不改参数就是不改行为。所以听到"慢一点 / 省点钱"就传 `pace:"calm"`。
        */
-      const wantPace = args.pace ? String(args.pace).toLowerCase() : null;
+      let wantPace = args.pace ? String(args.pace).toLowerCase() : null;
+      // 旧名兼容：`action` 曾短暂用过，收到就走新档
+      if (wantPace === 'action') wantPace = 'game-economic';
       if (wantPace && PACES[wantPace] && wantPace !== paceMode) {
         paceMode = wantPace;
         try { runner.stop(); } catch { /* 没在跑 */ }
@@ -501,7 +503,7 @@ async function registerAll(ctx) {
           calm: '已切到**省电节奏**：20 分以上才算换画面，最多 30 秒叫你一次。',
           normal: '已切回**默认节奏**：12 分算换画面，最多 15 秒叫一次。',
           dense: '已切到**灵敏节奏**：7 分就算换画面，最多 8 秒叫一次（费钱，只在演示/逐帧时用）。',
-          action: '已切到**动作节奏**：80 分以上才算换画面，出帧按"攒够 30 秒运动量"算，'
+          'game-economic': '已切到**动作节奏**：80 分以上才算换画面，出帧按"攒够 30 秒运动量"算，'
             + '最多 20 秒叫一次，每张图最多 8 帧（全屏游戏/高速画面用，信息量比 normal 少）。',
         }[wantPace];
         pendingModeNote = [t, pendingModeNote].filter(Boolean).join('\n\n');

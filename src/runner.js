@@ -69,7 +69,7 @@ export const SCENE_OPTS = Object.freeze({ maxFrames: 1, strategy: 'single' });
  * | calm | 20 | 30s | 日常挂着看，只想知道"大场面变了没" |
  * | normal | 12 | 15s | 默认。滚网页/切窗口不会每下都留帧 |
  * | dense | 7 | 8s | 幻灯片、逐帧播报这种"每一刀都要"的 |
- * | action | 80 | 20s | 全屏游戏 / 高速运动。靠 `pipeline` 把积分阈值也一起抬高 |
+ * | game-economic | 80 | 20s | 全屏游戏 / 高速运动。靠 `pipeline` 把积分阈值也一起抬高 |
  *
  * 7 是能给的最低值（再低只有"只改亮度"那种肉眼都看不出的变化），
  * 但它对日常屏幕太敏感 —— 光标一停、窗口一换都能过线，所以不做默认。
@@ -88,7 +88,7 @@ export const PACES = Object.freeze({
   normal: { cutAbs: 12, wakeGapSec: 15, pipeline: { floorGapK: 2, floorMin: 2, floorMax: 20 } },
   dense: { cutAbs: 7, wakeGapSec: 8, pipeline: { floorGapK: 1.2, floorMin: 2, floorMax: 20 } },
   /**
-   * 全屏动作游戏 / 高速运动画面。
+   * 全屏动作游戏 / 高速运动画面（key 用 `game-economic`：目标就是"陪玩但别烧钱"）。
    *
    * 为什么需要单独一档：这类画面**每一帧都在动**，分数基线被抬高，切点门槛 12 等于"全是切点"，
    * 尖峰判据也救不回来（左右邻居同样高）。实测反馈（B 站用户「总在冬眠的熊」，打了一两个小时
@@ -99,7 +99,7 @@ export const PACES = Object.freeze({
    * 因为他的 40 帧/张是在 normal 档下被 maxWait 逼出来的，不是他真想要 6 帧。
    * `pipeline` 里的键会原样覆盖 `pipeline.js::DEFAULTS` 的同名项。
    */
-  action: {
+  'game-economic': {
     cutAbs: 80,
     wakeGapSec: 20,
     pipeline: {
