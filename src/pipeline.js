@@ -106,6 +106,16 @@ export const DEFAULTS = Object.freeze({
   markMinGap: 0.5,
   /** 画面完全静止时的兜底：这么久都没出帧就给一张，否则模型会一直拿到"没更新"。 */
   silentFloorSec: 20,
+  /**
+   * **按出帧节奏自适应**（比按活跃度更直接）：兜底 = clamp(k × 近期出帧间隔, floorMin, floorMax)。
+   *
+   * 为什么按间隔而不是按活跃度：分数高的地方本来就会连续出帧，低谷期才需要兜底；
+   * 而"平时 2 秒一张、突然 8 秒没动静"正是该补一张的信号。
+   * 静态画面下近期间隔会被拉长到 floorMax，等价于旧行为。
+   *
+   * 0 = 关闭（用固定 silentFloorSec）。
+   */
+  floorGapK: 0,
   /** 和上一张留下的帧差小于这个分就不留（0–255 刻度，见 cuts.js）。 */
   dupMin: 8,
 
@@ -186,6 +196,9 @@ export function createPipeline(opts = {}) {
   let acc = 0;                 // 积分累加
   let lastCut = -Infinity;
   let lastBound = -Infinity;
+  /** 近期"出帧间隔"的滑动平均（按节奏自适应兜底用） */
+  let gapEwma = 0;
+  let lastKeepT = null;
   let lastSeen = null;         // 最近解出来的一帧（插话时如果本张是空的，拿它兜底）
   let sheetStart = 0;          // 本张第一帧的时刻（maxWaitSec 从这儿算）
 
@@ -244,6 +257,11 @@ export function createPipeline(opts = {}) {
       dup: dup === null ? null : +dup.toFixed(1),
     });
     lastBound = entry.t;
+    if (lastKeepT !== null) {
+      const g = entry.t - lastKeepT;
+      gapEwma = gapEwma === 0 ? g : gapEwma + (g - gapEwma) * 0.3;
+    }
+    lastKeepT = entry.t;
     stats.kept += 1;
     if (via === 'cut') stats.cuts += 1;
     else if (via === 'mark') stats.marks += 1;
@@ -415,7 +433,11 @@ export function createPipeline(opts = {}) {
       if (keep(entry, 'mark')) acc = 0;
       return;
     }
-    if (entry.t - lastBound >= o.silentFloorSec) keep(entry, 'floor');
+    let floorSec = o.silentFloorSec;
+    if (o.floorGapK > 0 && gapEwma > 0) {
+      floorSec = Math.min(o.floorMax, Math.max(o.floorMin, o.floorGapK * gapEwma));
+    }
+    if (entry.t - lastBound >= floorSec) keep(entry, 'floor');
   }
 
   return {

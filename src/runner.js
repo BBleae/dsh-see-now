@@ -66,9 +66,11 @@ export const SCENE_OPTS = Object.freeze({ maxFrames: 1, strategy: 'single' });
  * 否则"改画面"的门槛抬了、出帧密度却没降，还是会被叫到贴限速。
  */
 export const PACES = Object.freeze({
-  calm: { cutAbs: 20, wakeGapSec: 30 },
-  normal: { cutAbs: 12, wakeGapSec: 15 },
-  dense: { cutAbs: 7, wakeGapSec: 8 },
+  // 三档都带自适应兜底（`floorGapK`）：兜底间隔 = k × 近期出帧间隔，夹在 [floorMin, floorMax]。
+  // 越省电的档兜底越长（calm k=3 / normal k=2 / dense k=1.5），因为省电档宁可漏也不要多。
+  calm: { cutAbs: 20, wakeGapSec: 30, pipeline: { floorGapK: 3, floorMin: 3, floorMax: 30 } },
+  normal: { cutAbs: 12, wakeGapSec: 15, pipeline: { floorGapK: 2, floorMin: 2, floorMax: 20 } },
+  dense: { cutAbs: 7, wakeGapSec: 8, pipeline: { floorGapK: 1.5, floorMin: 2, floorMax: 20 } },
   /**
    * 全屏动作游戏 / 高速运动画面。
    *
@@ -91,6 +93,9 @@ export const PACES = Object.freeze({
       silentFloorSec: 40,
       cutSpike: 1.5,
       cutSpikeAbs: 30,
+      floorGapK: 2,
+      floorMin: 2,
+      floorMax: 20,
     },
   },
 });

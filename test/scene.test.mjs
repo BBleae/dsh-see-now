@@ -68,6 +68,47 @@ test('常规模式不受影响：同一段素材仍然多帧拼一张', () => {
   assert.ok(maxFrames >= 2, `常规模式该把多帧拼进一张，实际最多 ${maxFrames} 帧/张`);
 });
 
+test('自适应兜底：三档都带 floorGapK，越省电兜底越长，默认仍走固定 20s', () => {
+  for (const k of ['calm', 'normal', 'dense', 'action']) {
+    assert.ok(PACES[k].pipeline?.floorGapK > 0, `${k} 必须带自适应兜底`);
+    assert.ok(PACES[k].pipeline.floorMin < PACES[k].pipeline.floorMax, `${k} 的兜底上下界要合理`);
+  }
+  // 省电档宁可漏也不要多 → 倍率更大
+  assert.ok(PACES.calm.pipeline.floorGapK > PACES.normal.pipeline.floorGapK);
+  assert.ok(PACES.normal.pipeline.floorGapK > PACES.dense.pipeline.floorGapK);
+  // 不经过节奏、直接建管线时保持旧行为（floorGapK=0 时退回固定 silentFloorSec）
+  const c = createPipeline({}).constants;
+  assert.equal(c.floorGapK, 0);
+  assert.equal(c.silentFloorSec, 20);
+});
+
+test('自适应兜底真的会生效：出帧变稀之后兜底跟着缩短', () => {
+  // 前 5 秒一直动（间隔约 2 秒），之后完全静止 25 秒
+  const H2 = 90; const W2 = 160;
+  const mk = (f, moving) => {
+    const buf = Buffer.alloc(W2 * H2 * 3, 40);
+    const bx = moving ? (f * 6) % (W2 - 30) : 10;
+    for (let y = 10; y < 50; y += 1) {
+      for (let x = bx; x < bx + 30; x += 1) {
+        const i = (y * W2 + x) * 3; buf[i] = 240; buf[i + 1] = 220; buf[i + 2] = 60;
+      }
+    }
+    return buf;
+  };
+  const times = (opts) => {
+    const p = createPipeline({ width: W2, height: H2, fps: 12, queueDepth: 0, ...opts });
+    for (let f = 0; f < 360; f += 1) p.push({ t: f / 12, buf: mk(f, f < 60) });
+    const { sheets } = p.finish();
+    return sheets.flatMap((s) => s.frames.map((fr) => fr.t));
+  };
+  const plain = times({});
+  const adaptive = times({ floorGapK: 2, floorMin: 2, floorMax: 20 });
+  // 静止段（t>5）里，自适应应该比固定 20 秒多留帧
+  const tail = (a) => a.filter((t) => t > 5.5).length;
+  assert.ok(tail(adaptive) > tail(plain),
+    `静止段自适应应更密：固定 ${tail(plain)} 帧 / 自适应 ${tail(adaptive)} 帧`);
+});
+
 test('三档节奏：越省门槛越高、叫醒越稀，逐帧用的是最密那档', () => {
   // action 是"内容类型"那条轴，不参与灵敏度排序 —— 它在下一个测试里单独验
   assert.deepEqual(Object.keys(PACES).sort(), ['action', 'calm', 'dense', 'normal']);
