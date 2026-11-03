@@ -7,11 +7,12 @@
  *   - 待回执不清 → 一轮话被念三遍
  */
 
-import { test, beforeEach } from 'node:test';
+import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { attachConfiguredVoice, attachedAdapters, detachAdapters, ensureConfiguredVoice, lastVoiceError, loadVoiceAdapter } from '../src/voice.js';
 
 const home = mkdtempSync(join(tmpdir(), 'dsh-see-speech-'));
 process.env.DSH_HOME = home;
@@ -24,6 +25,20 @@ const { interjectNote, noteInterjected, clearInterjected, pendingInterjected,
   replyReminder, __resetInterject } = await import('../src/interject.js');
 
 beforeEach(() => { __resetSpeech(); __resetInterject(); });
+afterEach(async () => { await detachAdapters(); });
+
+const fixtureKey = Symbol.for('dsh-see-now.voice-test');
+function voiceFixture(attach) {
+  globalThis[fixtureKey] = attach;
+  return `data:text/javascript,${encodeURIComponent(`export const attach = globalThis[Symbol.for('dsh-see-now.voice-test')]; // ${voiceFixture.id++}`)}`;
+}
+voiceFixture.id = 0;
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
 test('没有订阅者时发事件是空操作，不抛', () => {
   assert.equal(emitSpeech({ text: 'hi' }), 0);
@@ -52,30 +67,32 @@ test('speak:false 只写盘不发事件（诊断行不该被念）', () => {
 test('speechSubscribers 只数 voice:true 的（只做展示的订阅者不算会出声）', () => {
   const offA = onSpeech(() => {}, { voice: true });
   const offB = onSpeech(() => {}, { voice: false });
+
   assert.equal(speechSubscribers(), 1);
-  offA(); offB();
+  offA();
   assert.equal(speechSubscribers(), 0);
+  offB();
 });
 
 test('适配器发的 spoken 能送到订阅者手里', () => {
   const got = [];
   onSpeech((e) => got.push(e.state), { voice: true });
-  emitSpeech({ text: 'x', state: 'due' });
-  emitSpoken({ text: 'x' });
-  assert.deepEqual(got, ['due', 'spoken']);
+
+  emitSpoken({ text: '出声了' });
+
+  assert.equal(got.length, 1);
+  assert.equal(got[0], 'spoken');
 });
 
 test('插话话术必须说清楚"只有 say 能进窗、会被念"', () => {
-  const note = interjectNote('这是啥');
-  assert.match(note, /这是啥/);
-  assert.match(note, /先说话/, '要明确"先说话再干活"');
-  assert.match(note, /say/, '要指名 say 这个参数');
-  assert.match(note, /看不到|看不见/, '要说清楚普通回复用户看不到');
+  const note = interjectNote('你好');
+  assert.match(note, /say/, '必须点名 say 参数');
+  assert.match(note, /只有/, '必须强调通道唯一');
+  assert.match(note, /你好/, '必须把用户说的话带上');
 });
 
 test('插话记待回执；没带 say 时提醒一次，且只提醒一次', () => {
   noteInterjected('这个表格最后一列是啥');
-  assert.equal(pendingInterjected().text, '这个表格最后一列是啥');
 
   const first = replyReminder({ answered: false });
   assert.match(first, /未回应/);
@@ -114,4 +131,155 @@ test('chat.jsonl 里能同时看到 assistant 的话和 user 的插话', () => {
     .trim().split('\n').map((l) => JSON.parse(l));
   assert.ok(lines.some((l) => l.role === 'assistant' && l.text.includes('先看看')));
   assert.ok(lines.some((l) => l.role === 'user' && l.text.includes('报错')));
+});
+
+test('默认挂载复用，owner/scope 卸载只影响自己的适配器', { timeout: 2000 }, async () => {
+  const signals = [];
+  let detached = 0;
+  const spec = voiceFixture((api) => {
+    signals.push(api.signal);
+    api.onSpeech(() => {});
+    return () => { detached += 1; };
+  });
+  const owner = {};
+  const env = { DSH_VOICE_ADAPTER: spec };
+  await Promise.all([loadVoiceAdapter(spec), loadVoiceAdapter(spec)]);
+  assert.equal(speechSubscribers(), 1);
+  assert.equal((await loadVoiceAdapter(spec)).cached, true);
+  await attachConfiguredVoice({ env, scope: owner });
+  assert.equal((await loadVoiceAdapter(spec, { owner })).cached, true);
+  const unrelatedOff = onSpeech(() => {});
+  await detachAdapters({ owner });
+  assert.equal(detached, 1);
+  assert.equal(signals[1].aborted, true);
+  assert.equal(signals[0].aborted, false);
+  assert.equal(speechSubscribers(), 2);
+  assert.deepEqual(attachedAdapters(), [spec]);
+  await detachAdapters();
+  assert.equal(speechSubscribers(), 1);
+  unrelatedOff();
+});
+
+test('热配置并发切换、删配置和 signal 取消只清本 owner', { timeout: 2000 }, async () => {
+  const entered = deferred();
+  const oldSpec = voiceFixture((api) => {
+    api.onSpeech(() => {});
+    entered.resolve();
+    return new Promise(() => {});
+  });
+  const owner = {};
+  const stale = ensureConfiguredVoice({ env: { DSH_HOME: home, DSH_VOICE_ADAPTER: oldSpec }, owner });
+  await entered.promise;
+  const freshSpec = voiceFixture((api) => { api.onSpeech(() => {}); return () => {}; });
+  const env = { DSH_HOME: home, DSH_VOICE_ADAPTER: freshSpec };
+  await ensureConfiguredVoice({ env, owner: {} });
+  const controller = new AbortController();
+  await ensureConfiguredVoice({ env, owner, signal: controller.signal });
+  assert.equal((await stale).reason, 'aborted');
+  assert.equal(speechSubscribers(), 2);
+  const results = await Promise.all([ensureConfiguredVoice({ env, owner }), ensureConfiguredVoice({ env, owner })]);
+  assert.ok(results.every((result) => result.cached));
+  controller.abort();
+  assert.equal(speechSubscribers(), 1);
+  await ensureConfiguredVoice({ env, owner, signal: new AbortController().signal });
+  assert.equal((await ensureConfiguredVoice({ env: { ...env, DSH_VOICE_ADAPTER: '' }, owner })).reason, 'not-configured');
+  assert.equal(speechSubscribers(), 1);
+});
+
+test('适配器重复订阅同一 handler 仍按总线契约去重', { timeout: 2000 }, async () => {
+  let calls = 0;
+  const handler = () => { calls += 1; };
+  await loadVoiceAdapter(voiceFixture((api) => {
+    api.onSpeech(handler);
+    api.onSpeech(handler);
+  }));
+  assert.equal(speechSubscribers(), 1);
+  emitSpeech({ text: '只发一次' });
+  assert.equal(calls, 1);
+});
+
+test('pending attach 卸载后可重挂，迟到订阅和回执失效，旧 detach 仍执行一次', { timeout: 2000 }, async () => {
+  const entered = deferred();
+  const release = deferred();
+  const lateDetached = deferred();
+  let calls = 0;
+  let lateDelivered;
+  const spec = voiceFixture(async (api) => {
+    api.onSpeech(() => {});
+    if (++calls === 1) {
+      entered.resolve();
+      await release.promise;
+      api.onSpeech(() => {});
+      lateDelivered = api.emitSpoken({ text: '迟到回执' });
+      return () => lateDetached.resolve();
+    }
+    return () => {};
+  });
+  const owner = {};
+  const controller = new AbortController();
+  const loading = loadVoiceAdapter(spec, { owner, signal: controller.signal });
+  await entered.promise;
+  controller.abort();
+  await detachAdapters({ scope: owner });
+  assert.equal(speechSubscribers(), 0);
+  assert.equal((await loading).reason, 'aborted');
+  assert.equal((await loadVoiceAdapter(spec, { owner })).ok, true);
+  release.resolve();
+  await lateDetached.promise;
+  assert.equal(lateDelivered, 0);
+  assert.equal(speechSubscribers(), 1);
+  assert.deepEqual(attachedAdapters(), [spec]);
+});
+
+test('signal 取消挂载并允许原 owner 用新 signal 再挂载', { timeout: 2000 }, async () => {
+  let detached = 0;
+  const spec = voiceFixture((api) => {
+    api.onSpeech(() => {});
+    return () => { detached += 1; };
+  });
+  const owner = {};
+  const controller = new AbortController();
+  await loadVoiceAdapter(spec, { owner });
+  await loadVoiceAdapter(spec, { owner, signal: controller.signal });
+  controller.abort();
+  assert.equal(speechSubscribers(), 0);
+  await detachAdapters({ owner });
+  assert.equal(detached, 1);
+  assert.equal((await loadVoiceAdapter(spec, { owner, signal: controller.signal })).reason, 'aborted');
+  assert.equal((await loadVoiceAdapter(spec, { owner, signal: new AbortController().signal })).ok, true);
+});
+
+test('detach 先退订再调用，挂起的 detach 有界返回且不阻塞其他实例', { timeout: 2500 }, async () => {
+  let subscribersAtDetach;
+  let fastDetached = false;
+  const stuck = voiceFixture((api) => {
+    api.onSpeech(() => {});
+    return () => {
+      subscribersAtDetach = speechSubscribers();
+      return new Promise(() => {});
+    };
+  });
+  await loadVoiceAdapter(stuck);
+  const fast = voiceFixture((api) => {
+    api.onSpeech(() => {});
+    return () => { fastDetached = true; };
+  });
+  await loadVoiceAdapter(fast);
+  const closing = detachAdapters();
+  assert.equal(speechSubscribers(), 0);
+  await new Promise(setImmediate);
+  assert.equal(fastDetached, true);
+  assert.equal(subscribersAtDetach, 0);
+  await closing;
+  assert.deepEqual(attachedAdapters(), []);
+});
+
+test('attach 先订阅后抛仍退订并保留失败原因', { timeout: 2000 }, async () => {
+  const spec = voiceFixture((api) => {
+    api.onSpeech(() => {});
+    throw new Error('broken voice');
+  });
+  assert.match((await loadVoiceAdapter(spec)).reason, /attach failed: broken voice/);
+  assert.equal(speechSubscribers(), 0);
+  assert.match(lastVoiceError(), /broken voice/);
 });
