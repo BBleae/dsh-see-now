@@ -8,6 +8,7 @@
 
 import { createRunner, SCENE_OPTS, PACES, DEFAULT_PACE } from './runner.js';
 import { resolveFfmpeg } from './binaries.js';
+import { parseRegion } from './layout.js';
 import { seeNowToolSpec, TOOL_TIMEOUT_MS, DEFAULT_BLOCK_SEC, TOOL_NAME } from './tool-spec.js';
 import { interjectNote, replyReminder, clearInterjected, noteInterjected, pendingInterjected } from './interject.js';
 import { appendSpoken, lastSaidNote, chatDir } from './chat.js';
@@ -17,6 +18,44 @@ import { startLoop, HANGUP_NOTE } from './loop.js';
 import { windowHidden, setWindowHidden, windowReport, windowLine } from './window.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+
+/**
+ * 从工具参数构造 source 描述。`watch` 和 `start` 两个入口共用。
+ *
+ * `region` 是 `source:"screen"` 的**修饰参数**，不是独立 kind：
+ *   - 它同时把 engine 钉死在 `gdigrab` —— `ddagrab` 是 filter source，没有
+ *     `-offset_x`/`-video_size`，带 region 给它会把偏移**静默丢掉**（抓到整屏，
+ *     用户和模型都以为生效了，这是最坏的一种失败）；
+ *   - 格式不对时**明确返回错误**，同样不静默退化成全屏。
+ *
+ * @returns {{src: object|null, error?: string}}
+ */
+function srcOf(args) {
+  const kind = args.source ? String(args.source).toLowerCase() : null;
+  const src = kind ? { kind } : null;
+  if (src && kind === 'file') {
+    src.path = args.path;
+    src.realtime = args.realtime === true;
+  }
+  const rawRegion = args.region;
+  if (rawRegion === undefined || rawRegion === null || rawRegion === '') return { src };
+  if (src && kind !== 'screen') {
+    return { src: null, error: `region 只能配 source:"screen"，现在是 "${kind}"。` };
+  }
+  const region = parseRegion(rawRegion);
+  if (!region) {
+    return {
+      src: null,
+      error: `region 格式不对：「${String(rawRegion)}」。要 "x,y,w,h" 四个整数（屏幕物理像素，`
+        + '和 desktop_control 的 window rect 同一套坐标），例如 "1593,375,568,1010"。'
+        + '\n没有按全屏抓 —— 那会让你以为 region 生效了。',
+    };
+  }
+  const out = src ?? { kind: 'screen' };
+  out.region = region;
+  out.engine = 'gdigrab';
+  return { src: out };
+}
 
 export const name = 'dsh-see-now';
 
@@ -435,9 +474,9 @@ async function registerAll(ctx) {
         // `ensureLoop()` 现取，就会把后续唤醒投到"等待期间最后说话的那个会话"去
         // （issue #1 的复现：watch 在 A 会话发起，结束后循环绑到了 B）。
         const ownerAtStart = lastSessionId;
-        const src = args.source ? {
-          kind: String(args.source).toLowerCase(), path: args.path, realtime: args.realtime === true,
-        } : null;
+        const built = srcOf(args);
+        if (built.error) return { text: built.error, meta: { ok: false, reason: 'bad-region' } };
+        const src = built.src;
         // **封顶必须小于宿主给这个工具的 timeoutMs**（见 tool-spec）：工具自己挂得比
         // 宿主的死线还久，到点就不是"返回一张图"，而是整条调用被 abort（还会顺带 abort signal）。
         const seconds = Math.min(
@@ -565,8 +604,9 @@ async function registerAll(ctx) {
       }
 
       if (action === 'start') {
-        const src = args.source ? { kind: String(args.source).toLowerCase() } : { kind: 'screen' };
-        const r = await runner.start({ src });
+        const built = srcOf(args);
+        if (built.error) return { text: built.error, meta: { ok: false, reason: 'bad-region' } };
+        const r = await runner.start({ src: built.src ?? { kind: 'screen' } });
         return {
           text: r.already ? '已经在看了。'
             : `开始看 ${r.source.kind}（引擎 ${r.engine}）${r.warning ? `。⚠️ ${r.warning}` : '。'}`,
