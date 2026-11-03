@@ -22,7 +22,7 @@ import { createPipeline } from './pipeline.js';
 import { cellSize } from './layout.js';
 import { chatWatcherShared, enterChatWait } from './chat.js';
 import { noteInterjected } from './interject.js';
-import { openWindow, windowAlive, setWindowHidden } from './window.js';
+import { openWindow, pidStamp, windowAlive, setWindowHidden } from './window.js';
 
 /** 三档清晰度。数字是画布像素，token 约等于 像素÷1650（见调参报告）。 */
 export const SIZES = Object.freeze({
@@ -80,9 +80,12 @@ export const SCENE_OPTS = Object.freeze({ maxFrames: 1, strategy: 'single' });
  */
 export const PACES = Object.freeze({
   // 三档都带自适应兜底（`floorGapK`）：兜底间隔 = k × 近期出帧间隔，夹在 [floorMin, floorMax]。
-  // 越省电的档兜底越长（calm k=3 / normal k=1.5 / dense k=1.2），因为省电档宁可漏也不要多。
+  // 越省电的档兜底越长（calm k=3 / normal k=2 / dense k=1.2），因为省电档宁可漏也不要多。
+  // normal 取 2 而不是 1.5：实测覆盖率 64.2→67.4（SHOT）/ 89.1→94.2（BBC），帧数只 +8~10%；
+  // 1.5 能到 70.4 / 97.5，但 BBC 上每多 1 个点要花 83 帧（k=2 只要 47），是为最后几个点付溢价。
+  // 想要全覆盖：给 normal 传 floorGapK: 1.5。
   calm: { cutAbs: 20, wakeGapSec: 30, pipeline: { floorGapK: 3, floorMin: 3, floorMax: 30 } },
-  normal: { cutAbs: 12, wakeGapSec: 15, pipeline: { floorGapK: 1.5, floorMin: 2, floorMax: 20 } },
+  normal: { cutAbs: 12, wakeGapSec: 15, pipeline: { floorGapK: 2, floorMin: 2, floorMax: 20 } },
   dense: { cutAbs: 7, wakeGapSec: 8, pipeline: { floorGapK: 1.2, floorMin: 2, floorMax: 20 } },
   /**
    * 全屏动作游戏 / 高速运动画面。
@@ -127,6 +130,17 @@ function optsSig(o) {
  * - 文件放完了（`fileEnded`）→ 同上，文件回放是一次性的，不能自动重播。
  * - 显式传了来源 = 用户明确要求 → 一律放行。
  */
+/**
+ * 挂断之后该不该因为"窗被重新打开"而解除。
+ *
+ * **不能只看 `windowAlive()`**：残留进程（用户关了但进程没死、或者测试机上本来就有窗口）
+ * 同样让它为 true，那样就会把窗重新弹出来 —— 正是社区实报的"关掉又弹出来"。
+ * 判据必须是"pid 文件在挂断之后被**重写过**"，那才代表有人主动开了窗。
+ */
+export function resumeFromReopen({ hungUp = false, winAlive = false, pidNow = 0, pidAtHangUp = 0 } = {}) {
+  return Boolean(hungUp && winAlive && pidNow > pidAtHangUp);
+}
+
 export function guardReason({ hungUp = false, fileEnded = false, explicitSrc = false } = {}) {
   if (explicitSrc) return null;
   if (hungUp) return 'hung-up';
@@ -188,6 +202,8 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
    * 挂断之后只有**显式指定来源**（用户说了要看什么）才允许重新开始。
    */
   let hungUp = false;
+  /** 挂断时 pid 文件的 mtime；用来识别"用户又手动把窗开回来了" */
+  let hungUpStamp = 0;
   /** 最近一次的采集源（teardown 会把 `source` 清空，但事后判断还需要它） */
   let lastSource = null;
   /**
@@ -353,7 +369,14 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
      * 用户体感就是"关掉又弹出来，除非卸载插件"（社区实报）。这里立一个硬闸，
      * 直到有人显式指定来源为止。
      */
-    hangUp() { hungUp = true; teardown('用户关窗'); return { hungUp: true }; },
+    hangUp() {
+      hungUp = true;
+      // 记下挂断那一刻的 pid 文件时间：之后只有它变了才说明窗被**重开过**
+      // （见 start() 里的解除逻辑）。
+      hungUpStamp = pidStamp();
+      teardown('用户关窗');
+      return { hungUp: true };
+    },
     /** 挂断状态（测试和状态页用） */
     isHungUp() { return hungUp; },
     /** 有没有一个"已经放完、不能自动重播"的文件源 */
@@ -420,6 +443,18 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
             if (!reqSrc) delete src.engine;
           }
         }
+      }
+
+      // **手动重开窗 = 用户又想看了**，挂断的前提（"窗没了"）已经不成立。
+      // 社区实报：关窗后跑 `bin/see-window.mjs --force` 把窗拉回来，再看就永远被拒 ——
+      // 因为 `hungUp` 是**本进程内存里的一个变量**，而那个脚本是另一个 node 进程，
+      // 它只杀/重开 python 窗口，碰不到这里。重启 DSH 能恢复也正是因为它重置了这个值。
+      // 所以判据改成看事实：窗活着就不是"用户关掉了"。
+      if (resumeFromReopen({
+        hungUp, winAlive: windowAlive(), pidNow: pidStamp(), pidAtHangUp: hungUpStamp,
+      })) {
+        hungUp = false;
+        log('悬浮窗被重新打开过 —— 解除挂断，继续看。');
       }
 
       const blocked = guardReason({ hungUp, fileEnded: Boolean(endedSource), explicitSrc });
