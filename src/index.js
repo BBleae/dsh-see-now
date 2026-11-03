@@ -13,7 +13,8 @@ import { seeNowToolSpec, TOOL_TIMEOUT_MS, DEFAULT_BLOCK_SEC, TOOL_NAME } from '.
 import { interjectNote, replyReminder, clearInterjected, noteInterjected, pendingInterjected } from './interject.js';
 import { appendSpoken, appendChat, lastSaidNote, lastSaidText, chatDir } from './chat.js';
 import { ensureConfiguredVoice, detachAdapters, attachedAdapters, configuredVoiceAdapter, lastVoiceError } from './voice.js';
-import { speechSubscribers } from './speech.js';
+import { speechSubscribers, onSpeech } from './speech.js';
+import { markSpeaking } from './listen.js';
 import { startLoop, HANGUP_NOTE } from './loop.js';
 import { windowAlive, windowHidden, setWindowHidden, windowReport, windowLine } from './window.js';
 import { pickRegion, loadRegion, clearRegion, regionText } from './region.js';
@@ -119,6 +120,26 @@ async function loadDefineTool() {
   throw new Error('cannot resolve @deepseek-ai/dsh-tools (set DSH_TOOLS_PATH for local dev)');
 }
 
+/**
+ * 台词清单。**只在真有台词时出现** —— 转写没开/没听见的时候，凭空来一行
+ * "台词："只会让模型以为转写坏了，然后去猜。
+ *
+ * 时间码是相对采集起点的秒数，和上面每帧那个 `24.1s` 是同一个坐标系 ——
+ * 模型才能把"这句话"和"第几格画面"对上。算法见 runner 的 `attachLines()`。
+ */
+export function linesText(sheet) {
+  const got = sheet.lines;
+  if (!got?.length) return '';
+  const f0 = sheet.frames?.[0];
+  // frame.wall 是 epoch ms、frame.t 是相对秒 → 两者相减就是"t=0 那一刻的 epoch"
+  const origin = f0?.wall != null ? f0.wall - f0.t * 1000 : null;
+  const rows = got.map((l) => {
+    const rel = origin === null ? '—' : `${((l.t0 - origin) / 1000).toFixed(1)}s`;
+    return `  ${rel}  ${l.text}`;
+  });
+  return `\n台词（这段时间里视频里在说的，机器转写，可能有错字/听岔）：\n${rows.join('\n')}`;
+}
+
 /** 一张图 → 模型看得懂的清单。数字都是「这张图里第几格」，不是抽象指标。 */
 function sheetText(sheet, { waited = 0, partial = false, userText = null, say = null, looping = false } = {}) {
   const { frames, from, to, why } = sheet;
@@ -155,7 +176,7 @@ function sheetText(sheet, { waited = 0, partial = false, userText = null, say = 
       + '你现在只要做一件事 —— 值得说就用 `say` 说一句，不值得说就别出声。'
       + '用户关掉悬浮窗我就停。'
     : '';
-  return `${head}\n${lines.join('\n')}${ask}${lastSaidNote()}${loopNote}\n（${whyText}；想看下一段就再调一次 \`see_now({action:"watch"})\`。）${replyReminder({ answered: Boolean(say) })}`;
+  return `${head}\n${lines.join('\n')}${linesText(sheet)}${ask}${lastSaidNote()}${loopNote}\n（${whyText}；想看下一段就再调一次 \`see_now({action:"watch"})\`。）${replyReminder({ answered: Boolean(say) })}`;
 }
 
 /**
@@ -248,6 +269,8 @@ async function registerAll(ctx) {
   const runner = createRunner({
     ffmpegPath: ffmpeg.path,
     log,
+    // 听声音要宿主 `speechToText`（社区用户那边零安装）；给不到就只降级成"没字幕"
+    ctx,
   });
   disposers.push(() => runner.stop());
 
@@ -259,6 +282,19 @@ async function registerAll(ctx) {
     .then((r) => { if (!r.ok && r.reason !== 'not-configured') log(`声音没挂上：${r.reason}`); })
     .catch(() => { /* 已经在里面兜过了 */ });
   disposers.push(() => { detachAdapters().catch(() => {}); });
+
+  /**
+   * 念之前占住"静音窗口"。
+   *
+   * 不占会怎样：AI 用自己的声音念台词 → 音箱出声 → 回环收回去 → 转成文字 →
+   * 被当成"视频里说的" → 模型接着那句话聊下去。自己跟自己聊，停不下来。
+   *
+   * **`voice: false` 不能省**：那是"只观察、不出声"的订阅者。标成 true 会让
+   * `speechSubscribers()` 一直 > 0，展示层就会一直等一个永远不会来的 `spoken`。
+   */
+  disposers.push(onSpeech((e) => {
+    if (e?.state === 'due') markSpeaking(e.text);
+  }, { voice: false }));
 
   /**
    * 当前会话 id：从 `session/event` 钩子里拿（`session.header.id`）。
@@ -576,7 +612,12 @@ async function registerAll(ctx) {
             // 档位自带的管线覆盖（`action` 用：积分阈值、每张帧数、兜底间隔…）。
             // 逐帧模式不吃这套 —— 它自己已经定死了 maxFrames/strategy。
             ...(sceneMode ? {} : (PACES[paceMode].pipeline ?? {})),
-            cutAbs: (sceneMode ? PACES.dense : PACES[paceMode]).cutAbs,
+            // **文件回放（看视频）走视频最优门槛**：实测 27 段短视频上，cutAbs 7 的切点 F1 是 56.8%，
+            // 默认 12 只有 51.9%（12fps 采样本来就会吃掉一部分快切）。屏幕采集不受影响。
+            // 用户显式传了 pace 就尊重用户。
+            cutAbs: (sceneMode
+              ? PACES.dense
+              : (src?.kind === 'file' && !wantPace && paceMode === 'normal' ? PACES.dense : PACES[paceMode])).cutAbs,
           },
           signal: run?.signal ?? null,
         });
@@ -787,6 +828,21 @@ function loopLine(lp) {
   return `在跑（叫醒 ${lp.wakes} 次${fail}${last}，会话 ${lp.session ?? '未知'}）`;
 }
 
+/**
+ * 「听声音」一行。
+ *
+ * 用户说"它好像没听见台词"时，答案全在这一行：是没转写服务、没 Python 包、
+ * 还是这台机器根本抓不到回环。**不要把未启用写成"正常"** —— 那会让人一直查画面。
+ */
+function listenLine(l) {
+  if (!l) return '没起（还没调过 watch）';
+  if (l.enabled) {
+    const last = l.lastSegAt ? `，最近一句 ${Math.round((Date.now() - l.lastSegAt) / 1000)}s 前` : '，还没转出过台词';
+    return `在听（${l.backend}，累计 ${l.total} 句${last}）`;
+  }
+  return `没在听 —— ${l.reason}`;
+}
+
       if (action === 'status') {
         const s = runner.status();
         const voice = voiceState();
@@ -815,7 +871,9 @@ function loopLine(lp) {
               ? `已接上 ${voice.adapters.join(', ') || '适配器'}（${voice.speakers} 个会出声的订阅者）`
               : voice.configured
                 ? `配了 ${voice.configured} 但没挂上（${voice.reason ?? '原因未知'}）`
-                : '没配 —— 写 ~/.dsh/voice.json 的 {"adapter":"…"} 才有声音'}`,
+                : '没配 —— 写 ~/.dsh/voice.json 的 {"adapter":"…"} 才有声音'}`
+            // 听声音（视频里的台词）：**"它不知道台词"时第一个要看的就是这一行**
+            + `\n听声音：${listenLine(s.listen)}`,
           meta: { ...s, voice, loop: lp, window: windowReport() },
         };
       }
