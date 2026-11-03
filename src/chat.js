@@ -102,6 +102,11 @@ export function lastSaidNote({ maxAgeSec = 300, clipLen = 60 } = {}) {
   return `\n（你上一句说的是「${clip}」，${age} 秒前 —— 别重复它。）`;
 }
 
+/** 最近一次 `say` 的原文与时间（镜像正文时用来去重：那句话已经进过窗了）。 */
+export function lastSaidText() {
+  return lastSaid ? { text: lastSaid.text, at: lastSaid.at } : null;
+}
+
 /** 仅测试用：换一场会话别把上一场的口头禅带过来 */
 export function __resetSpokenLog() {
   lastSaid = null;

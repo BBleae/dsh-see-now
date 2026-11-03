@@ -11,11 +11,11 @@ import { resolveFfmpeg } from './binaries.js';
 import { parseRegion } from './layout.js';
 import { seeNowToolSpec, TOOL_TIMEOUT_MS, DEFAULT_BLOCK_SEC, TOOL_NAME } from './tool-spec.js';
 import { interjectNote, replyReminder, clearInterjected, noteInterjected, pendingInterjected } from './interject.js';
-import { appendSpoken, lastSaidNote, chatDir } from './chat.js';
+import { appendSpoken, appendChat, lastSaidNote, lastSaidText, chatDir } from './chat.js';
 import { ensureConfiguredVoice, detachAdapters, attachedAdapters, configuredVoiceAdapter, lastVoiceError } from './voice.js';
 import { speechSubscribers } from './speech.js';
 import { startLoop, HANGUP_NOTE } from './loop.js';
-import { windowHidden, setWindowHidden, windowReport, windowLine } from './window.js';
+import { windowAlive, windowHidden, setWindowHidden, windowReport, windowLine } from './window.js';
 import { pickRegion, loadRegion, clearRegion, regionText } from './region.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -290,11 +290,45 @@ async function registerAll(ctx) {
    * 但**变了不说**更糟：模型会拿一块区域的画面去回答整屏的问题。
    */
   let lastRegionKey = regionText(loadRegion());
+
+  /**
+   * 把模型的**正文**也记进小窗那条流。
+   *
+   * 为什么：小窗原来只有 `say` 气泡和用户自己打的字 —— 模型正常回的话一句都不在
+   * 里面，于是它只好跟用户解释"我们的对话不会记录在窗口"（2026-11-03 社区反馈）。
+   * 记录本来就该是完整的：窗开着的时候，把这一轮的正文追加进 `chat.jsonl`
+   * （**不朗读** —— 只有 `say` 才念，这条只是留痕）。
+   *
+   * 三条护栏：
+   *   - 窗没开着就不写：没人在看，写了只是让文件长胖；
+   *   - `say` 已经进过窗的（正文包含那句 say）就跳过，不然用户会看到同一句两遍；
+   *   - 超长截断到 600 字：小窗是气泡流，不是终端。
+   */
+  const mirrorAssistantText = (event) => {
+    try {
+      if (event?.type !== 'assistant/message') return;
+      const payload = event.data ?? event;
+      const blocks = payload?.message?.content;
+      if (!Array.isArray(blocks)) return;
+      const text = blocks
+        .filter((b) => b?.type === 'text' && typeof b.text === 'string')
+        .map((b) => b.text)
+        .join('\n')
+        .trim();
+      if (text.length < 2) return;
+      if (!windowAlive()) return;
+      const said = lastSaidText();
+      const norm = (s) => String(s).replace(/\s+/g, '');
+      if (said && Date.now() - said.at < 120_000 && norm(text).includes(norm(said.text))) return;
+      appendChat('assistant', text.length > 600 ? `${text.slice(0, 600)}…` : text);
+    } catch { /* 记录失败绝不能影响会话本身 */ }
+  };
   if (typeof ctx.on === 'function') {
     try {
-      const off = ctx.on('session/event', (session) => {
+      const off = ctx.on('session/event', (session, event) => {
         const id = session?.header?.id ?? session?.id;
         if (id) lastSessionId = id;
+        mirrorAssistantText(event);
       });
       if (typeof off === 'function') disposers.push(off);
     } catch (e) {

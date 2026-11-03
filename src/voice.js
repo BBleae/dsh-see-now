@@ -54,6 +54,26 @@ export function configuredVoiceAdapter(env = process.env) {
   return null;
 }
 
+/**
+ * `voice.json` 里给适配器的 `options`（对象，可选）。
+ *
+ * **为什么加这个**：核心不内置引擎，引擎路径/模型目录该由用户决定；但以前除了
+ * "用哪个适配器"没有任何透传入口，适配器只能把模型路径写死在自己代码里 ——
+ * 用户换一个自己训的模型就得改别人的源码（2026-11-03 社区反馈原话：
+ * "语音写死了一个地方去找那个模型，我明明自己搞过语音模型，能不能支持自定义"）。
+ *
+ * 现在 `{ "adapter": "...", "options": { "model": "D:/my/model" } }` 会原样交给
+ * `attach(api, options)`。**老适配器不受影响**：它们本来就只接一个参数。
+ */
+export function configuredVoiceOptions(env = process.env) {
+  const home = env.DSH_HOME || join(env.USERPROFILE || env.HOME || homedir(), '.dsh');
+  try {
+    const cfg = JSON.parse(readFileSync(join(home, 'voice.json'), 'utf8'));
+    const opts = cfg?.options;
+    return opts && typeof opts === 'object' && !Array.isArray(opts) ? opts : null;
+  } catch { return null; }
+}
+
 /** `D:/code/x.mjs`、`./x.mjs`、`/opt/x.mjs` 当路径；`my-voice-adapter` 当包名 */
 function toImportSpecifier(spec) {
   const s = String(spec).trim();
@@ -102,7 +122,7 @@ export function lastVoiceError() {
  * @param {{ log?: (msg:string)=>void }} [o]
  * @returns {Promise<{ok:boolean, reason?:string, cached?:boolean, name?:string}>}
  */
-export async function loadVoiceAdapter(spec, { log = () => {} } = {}) {
+export async function loadVoiceAdapter(spec, { log = () => {}, options = null } = {}) {
   const raw = String(spec ?? '').trim();
   if (!raw) { lastError = 'empty-specifier'; return { ok: false, reason: 'empty-specifier' }; }
   if (attached.has(raw)) return { ok: true, cached: true, name: raw };
@@ -129,7 +149,7 @@ export async function loadVoiceAdapter(spec, { log = () => {} } = {}) {
     try {
       const detach = await attach(trackedApi({
         onSpeech, speechSubscribers, emitSpeech, emitSpoken, lastSpeech,
-      }, subscriptions));
+      }, subscriptions), options ?? {});
       attached.set(raw, {
         detach: typeof detach === 'function' ? detach : null,
         subscriptions,
@@ -163,7 +183,7 @@ export async function loadVoiceAdapter(spec, { log = () => {} } = {}) {
 export async function attachConfiguredVoice({ env = process.env, log = () => {} } = {}) {
   const spec = configuredVoiceAdapter(env);
   if (!spec) return { ok: false, reason: 'not-configured' };
-  return loadVoiceAdapter(spec, { log });
+  return loadVoiceAdapter(spec, { log, options: configuredVoiceOptions(env) });
 }
 
 /**
@@ -185,7 +205,10 @@ export function voiceSignature(env = process.env) {
     const buf = readFileSync(join(home, 'tts.json'));
     stamp = createHash('sha256').update(buf).digest('hex').slice(0, 16);
   } catch { /* 没有 tts.json：用适配器自己的默认值 */ }
-  return `${spec}|${stamp}`;
+  // `options` 也算进指纹：它是**挂载时**读进闭包的，改了不重挂就等于没改
+  let opts = '';
+  try { opts = JSON.stringify(configuredVoiceOptions(env) ?? null); } catch { opts = '?'; }
+  return `${spec}|${stamp}|${opts}`;
 }
 
 /** 上一次成功挂载时的指纹。 */

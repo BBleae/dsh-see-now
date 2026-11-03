@@ -170,6 +170,14 @@ setInterval(() => {
 { "adapter": "/绝对路径/examples/voice-say-mac.mjs" }
 ```
 
+**自定义模型**：适配器自己的配置走 `options`，原样交给 `attach(api, options)` ——
+换自己训的模型不用改适配器源码：
+
+```json
+// ~/.dsh/voice.json
+{ "adapter": "D:/my-voice/index.mjs", "options": { "model": "D:/my/models/xxx" } }
+```
+
 macOS 自带一个：`examples/voice-say-mac.mjs`，走系统的 `say`，音色和语速从
 `~/.dsh/tts.json` 读（和 `dsh-watch-together` 共用同一份）：
 
@@ -192,15 +200,32 @@ macOS 自带一个：`examples/voice-say-mac.mjs`，走系统的 `say`，音色�
 
 | 参数 | 说明 |
 |---|---|
-| `action` | `watch`（默认，阻塞取图）/ `peek` / `start` / `stop` / `status` / `window` |
+| `action` | `watch`（默认，阻塞取图）/ `peek` / `start` / `stop` / `status` / `window` / `region` |
 | `show` | 配 `action:"window"`：`true` 把悬浮窗叫回来，`false` 藏起来，不传只报状态 |
-| `say` | **唯一能进悬浮窗、能被念出来的通道**。普通回复用户看不到 |
+| `region` | 只看屏幕上一块：`"x,y,w,h"`（屏幕物理像素），或 `"off"` 取消。**一般不用手填** —— 说"框这块"让它自己框，见下 |
+| `say` | **唯一能进悬浮窗、能被念出来的通道**。普通回复不进气泡，但会被记进小窗的对话记录 |
 | `quality` | `low`(800×450) / `standard` / `high` / `ultra`。改它会重启采集（~0.6s），并立刻返回当前这一帧 |
 | `pace` | 节奏：`calm` / `normal`（默认）/ `dense`。见下 |
 | `scene` | `true` = 逐场景模式：一张图只装一个画面、铺满。见下 |
 | `seconds` | `watch` 的阻塞上限（默认 300，封顶 860）。只是上限，攒够一张就提前返回 |
 | `minFrames` | 少于这么多帧的图就别给我了（省 token） |
 | `source` / `path` / `realtime` | 采集源：屏幕 / 摄像头 / 回放一个视频文件 |
+
+### 只看一块（`region` / `action:"region"`）
+
+只想让它盯住屏幕上的一个窗口（手机竖屏通话、播放器的画面、某个聊天窗口）时，
+**不用自己量像素**：说一句"框这块"，模型会调 `see_now({action:"region"})`，
+屏幕变暗后拖一个框，松手就行。坐标存在 `~/.dsh/see-now/region.json`，
+之后每次 `watch` 默认只看这块，`region:"off"` 取消。
+
+三条边界（插件会如实告诉模型，模型也该如实转述）：
+
+- 抓的是**屏幕上正在显示的像素**：这块被别的窗口挡住，看到的就是挡住它的那个窗口；
+- **没接 OBS**，抓不到后台窗口、最小化的窗口；
+- 只支持**主屏**（负坐标表达不了，gdigrab 也不接受）。
+
+带上区域后出图规则也变了：按区域宽高比出图（竖屏就出竖屏）、每帧长边固定 = 档位长边、
+一张默认 2 帧最多 4 帧。token 会比全屏贵（帧不再被缩小）：low 档 2 帧约 345 token。
 
 ### 三档节奏（`pace`）
 
@@ -337,6 +362,9 @@ test/                     87 条测试
   **Linux 还没接**（要补 `x11grab` 或 PipeWire，现在会直接报错，不假装能用）。
 - **macOS 要多给一次权限**：系统设置 → 隐私与安全性 → **屏幕录制**，勾上跑 DSH 的那个 App。
   没给的时候不会报错，只会全黑 —— 插件会提示，但权限本身只能你去点。
+- **区域模式只能看到前台像素**：没有 OBS 之类的采集源，被遮挡 / 最小化的窗口抓不到。
+  抓屏整体失败时（锁屏、UAC 安全桌面、远程桌面）窗口会退成一块**纯色底板**，
+  字还能读，但背后不是真实画面。
 
 ---
 
