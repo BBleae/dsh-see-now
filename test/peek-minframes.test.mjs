@@ -8,12 +8,12 @@
  *      旧实现里 `minFrames: 5` 照样返回一张 1 帧的图，且 `ok: true`。
  *
  * 用 `source:"file"` 喂合成视频，和线上同一条代码路径，只是把屏幕换成文件。
- * 需要 ffmpeg 在 PATH 上；没有就跳过。
+ * ffmpeg 由 test/ffmpeg.mjs 统一解析（DSH_FFMPEG_PATH / DSH_HOME / PATH）；没有就跳过。
  */
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { FFMPEG, ffmpegOk } from './ffmpeg.mjs';
 import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,18 +24,11 @@ process.env.DSH_SEE_NO_WINDOW = '1';
 
 const FIXTURE = join('.tmp', 'peek-clip.mp4');
 
-function ffmpegOk() {
-  try {
-    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' });
-    return true;
-  } catch { return false; }
-}
-
 function makeFixture() {
   if (existsSync(FIXTURE) && statSync(FIXTURE).size > 10_000) return FIXTURE;
   mkdirSync('.tmp', { recursive: true });
   // testsrc2 一直在动 → 积分帧持续触发，能攒出真正的多帧图
-  execFileSync('ffmpeg', ['-hide_banner', '-v', 'error', '-y',
+  execFileSync(FFMPEG, ['-hide_banner', '-v', 'error', '-y',
     '-f', 'lavfi', '-i', 'testsrc2=size=640x480:rate=12', '-t', '20',
     '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-preset', 'ultrafast', FIXTURE], { stdio: 'inherit' });
   return FIXTURE;
@@ -46,7 +39,7 @@ const skip = !ffmpegOk();
 const { createRunner } = skip ? {} : await import('../src/runner.js');
 
 test('peek 队列空时返回 null，不再凭空截一张', { skip }, async () => {
-  const runner = createRunner();
+  const runner = createRunner({ ffmpegPath: FFMPEG });
   try {
     await runner.start({
       src: { kind: 'file', path: makeFixture(), realtime: true },
@@ -71,7 +64,7 @@ test('peek 队列空时返回 null，不再凭空截一张', { skip }, async () 
 });
 
 test('peek 取走队列里的那张，取一张少一张', { skip }, async () => {
-  const runner = createRunner();
+  const runner = createRunner({ ffmpegPath: FFMPEG });
   try {
     // maxWaitSec 调小 + 每箱 3 帧：几秒就能封出第一张，测试不用等 20 秒
     await runner.start({
@@ -101,7 +94,7 @@ test('peek 取走队列里的那张，取一张少一张', { skip }, async () =>
 });
 
 test('minFrames 在正常返回路径生效：凑不够就不交付', { skip }, async () => {
-  const runner = createRunner();
+  const runner = createRunner({ ffmpegPath: FFMPEG });
   try {
     await runner.start({ src: { kind: 'file', path: makeFixture(), realtime: true } });
 
