@@ -59,6 +59,13 @@ export function rgbToHsv(rgb, out) {
 }
 
 /** 两帧 HSV 的加权绝对差均值，0–255。色相按环形处理，低饱和像素的色相降权。 */
+function hsvDiff(a, b, pa, pb = pa) {
+  const dh = Math.abs(a[pa] - b[pb]);
+  const hd = Math.min(dh, 255 - dh);
+  const w = Math.min(a[pa + 1], b[pb + 1]) / 255;
+  return (hd * w + Math.abs(a[pa + 1] - b[pb + 1]) + Math.abs(a[pa + 2] - b[pb + 2])) / 3;
+}
+
 export function scorePair(prev, cur) {
   let sum = 0;
   for (let i = 0; i < cur.length; i += 3) {
@@ -82,9 +89,13 @@ export function scorePair(prev, cur) {
  * 返回 0–255 的占比刻度（×255 与旧口径同量级，便于复用现有阈值经验）。
  * 出处：Nagasaka & Tanaka 1992（像素变化计数）、Shahraray 1995（邻域匹配）；独立实现，未取代码。
  */
-export function mcRatioScore(prev, cur, { tau = 15, radius = 2 } = {}) {
+export function mcStats(prev, cur, { tau = 15, radius = 2 } = {}) {
   const n = SCAN_W * SCAN_H;
   let changed = 0;
+  let minX = SCAN_W;
+  let minY = SCAN_H;
+  let maxX = -1;
+  let maxY = -1;
   for (let y = 0; y < SCAN_H; y += 1) {
     for (let x = 0; x < SCAN_W; x += 1) {
       const p3 = (y * SCAN_W + x) * 3;
@@ -105,15 +116,172 @@ export function mcRatioScore(prev, cur, { tau = 15, radius = 2 } = {}) {
           if (d <= tau) { matched = true; break; }
         }
       }
-      if (!matched) changed += 1;
+      if (!matched) {
+        changed += 1;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
     }
   }
-  return (changed / n) * 255;
+  const w = changed === 0 ? 0 : maxX - minX + 1;
+  const h = changed === 0 ? 0 : maxY - minY + 1;
+  return {
+    score: (changed / n) * 255,
+    count: changed,
+    bbox: ((w * h) / n) * 255,
+    fill: changed === 0 ? 0 : changed / (w * h),
+    spanX: w / SCAN_W,
+    spanY: h / SCAN_H,
+    box: changed === 0 ? null : { x: minX, y: minY, w, h },
+  };
 }
 
-export function createScorer({ width, height, scoreMode = 'abs', mcTau = 15, mcRadius = 2 }) {
+export function mcRatioScore(prev, cur, opts = {}) {
+  return mcStats(prev, cur, opts).score;
+}
+
+/**
+ * 背景模型：在最近 `history.length` 帧里找**一直没怎么动**的格子，
+ * 再看当前帧把这些稳定背景格改掉了多少。
+ *
+ * 前景运动（手、勺子、遮挡物）只盖住一部分背景，稳定背景格大部分还在；
+ * 真正切镜头会把旧背景整片换掉。返回值里的 `score` 是稳定背景格的变化占比（0–255），
+ * `stable` 少的时候不要用它下结论。
+ */
+export function bgStats(history, cur, { stableRange = 24, tau = 15, withModel = false } = {}) {
+  const n = SCAN_W * SCAN_H;
+  const m = history.length;
+  if (m === 0) return { score: null, stable: 0, changed: 0, stablePct: 0, model: null };
+  const vals = new Float32Array(m);
+  const model = withModel
+    ? { med: new Float32Array(n * 3), stable: new Uint8Array(n), tau }
+    : null;
+  let stable = 0;
+  let changed = 0;
+  for (let c = 0; c < n; c += 1) {
+    const p = c * 3;
+    let range = 0;
+    const med = [0, 0, 0];
+    for (let ch = 0; ch < 3; ch += 1) {
+      for (let j = 0; j < m; j += 1) vals[j] = history[j][p + ch];
+      vals.sort();
+      med[ch] = vals[m >> 1];
+      const r = vals[m - 1] - vals[0];
+      if (r > range) range = r;
+    }
+    if (model) {
+      model.med[p] = med[0];
+      model.med[p + 1] = med[1];
+      model.med[p + 2] = med[2];
+    }
+    if (range > stableRange) continue;
+    stable += 1;
+    if (model) model.stable[c] = 1;
+    if (hsvDiff(cur, med, p, 0) > tau) changed += 1;
+  }
+  return {
+    score: stable === 0 ? null : (changed / stable) * 255,
+    stable,
+    changed,
+    stablePct: (stable / n) * 255,
+    model,
+  };
+}
+
+/** 用候选帧后的画面确认：候选帧改掉的格子，有多少到未来帧还没回到参考背景。 */
+export function bgKeep(model, candidate, future, { tau = 15 } = {}) {
+  if (!model) return { score: null, changed: 0, kept: 0 };
+  const n = SCAN_W * SCAN_H;
+  let changed = 0;
+  let kept = 0;
+  for (let c = 0; c < n; c += 1) {
+    const p = c * 3;
+    if (hsvDiff(candidate, model.med, p) > tau) {
+      changed += 1;
+      if (hsvDiff(future, model.med, p) > tau) kept += 1;
+    }
+  }
+  return {
+    score: changed === 0 ? null : (kept / changed) * 255,
+    changed,
+    kept,
+  };
+}
+
+/**
+ * 候选帧改掉了多少外圈（去掉上下黑边）：大面积前景停住时外圈通常还是旧背景；
+ * 真正换镜头外圈也会被新画面替换。activeY < 0.25 或全黑时返回 null，保守不判。
+ */
+export function bgBorderChanged(model, candidate, activeY = 1, { thick = 4, tau = 15 } = {}) {
+  if (!model || !(activeY >= 0.25)) return null;
+  const bar = activeY >= 0.999 ? 0 : Math.round((1 - activeY) * SCAN_H / 2);
+  const t = Math.max(1, Math.min(thick, Math.floor((SCAN_H - bar * 2) / 4)));
+  const y0 = bar + t;
+  const y1 = SCAN_H - bar - t;
+  if (y1 <= y0) return null;
+  let total = 0;
+  let changed = 0;
+  for (let y = bar; y < SCAN_H - bar; y += 1) {
+    const edgeRow = y < y0 || y >= y1;
+    for (let x = 0; x < SCAN_W; x += 1) {
+      if (!(edgeRow || x < t || x >= SCAN_W - t)) continue;
+      total += 1;
+      if (hsvDiff(candidate, model.med, (y * SCAN_W + x) * 3) > tau) changed += 1;
+    }
+  }
+  if (!total) return null;
+  return { score: (changed / total) * 255, changed, total };
+}
+
+/** 画面有效高度占比：去掉上下黑边（宽银幕 letterbox），全黑帧返回 0。 */
+export function contentHeightRatio(hsv) {
+  const darkRow = (y) => {
+    let maxV = 0;
+    let sum = 0;
+    for (let x = 0; x < SCAN_W; x += 1) {
+      const v = hsv[(y * SCAN_W + x) * 3 + 2];
+      if (v > maxV) maxV = v;
+      sum += v;
+    }
+    return maxV < 24 && sum / SCAN_W < 12;
+  };
+  let top = 0;
+  let bottom = 0;
+  while (top < SCAN_H && darkRow(top)) top += 1;
+  while (top + bottom < SCAN_H && darkRow(SCAN_H - 1 - bottom)) bottom += 1;
+  return (SCAN_H - top - bottom) / SCAN_H;
+}
+
+/**
+ * 前景守卫用的有效高度：正常情况等同 contentHeightRatio；
+ * 全黑帧仍为 0，但“上下暗、中间有亮内容”的暗场不再被当成没有画面。
+ */
+export function guardHeightRatio(hsv) {
+  const ratio = contentHeightRatio(hsv);
+  if (ratio >= 0.25) return ratio;
+  let maxV = 0;
+  const y0 = Math.floor(SCAN_H * 0.25);
+  const y1 = Math.ceil(SCAN_H * 0.75);
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = 0; x < SCAN_W; x += 1) {
+      const v = hsv[(y * SCAN_W + x) * 3 + 2];
+      if (v > maxV) maxV = v;
+    }
+  }
+  return maxV >= 48 ? 1 : ratio;
+}
+
+export function createScorer({
+  width, height, scoreMode = 'abs', mcTau = 15, mcRadius = 2, gateMcRadius = mcRadius,
+  bgWindow = 6, bgStableRange = 24, bgTau = 15, bgModel = false,
+  bgRefWindow = 0, futureMinScore = Infinity,
+}) {
   const n = SCAN_W * SCAN_H;
   const rgb = new Float32Array(n * 3);
+  const bgHistory = [];
+  const refHistory = [];
   let prev = null;
   let cur = new Float32Array(n * 3);
 
@@ -121,14 +289,64 @@ export function createScorer({ width, height, scoreMode = 'abs', mcTau = 15, mcR
     gridRgb(frame, width, height, rgb);
     rgbToHsv(rgb, cur);
     let s = null;
-    if (prev) {
-      s = scoreMode === 'mc'
-        ? mcRatioScore(prev, cur, { tau: mcTau, radius: mcRadius })
-        : scorePair(prev, cur);
+    let mcScore = null;
+    let mcBox = null;
+    let mcFill = null;
+    let mcSpanY = 0;
+    let bgScore = null;
+    let bgStable = 0;
+    let bgChanged = 0;
+    let bgModelOut = null;
+    let futureModel = null;
+    const activeY = contentHeightRatio(cur);
+    const guardY = guardHeightRatio(cur);
+    if (bgWindow > 0 && bgHistory.length >= bgWindow) {
+      const bg = bgStats(bgHistory, cur, { stableRange: bgStableRange, tau: bgTau, withModel: bgModel });
+      bgScore = bg.score;
+      bgStable = bg.stable;
+      bgChanged = bg.changed;
+      bgModelOut = bg.model;
     }
+    if (prev) {
+      const mc = mcStats(prev, cur, { tau: mcTau, radius: gateMcRadius });
+      mcScore = mc.score;
+      mcBox = mc.bbox;
+      mcFill = mc.fill;
+      mcSpanY = mc.spanY;
+      if (scoreMode === 'mc') {
+        s = gateMcRadius === mcRadius
+          ? mcScore
+          : mcRatioScore(prev, cur, { tau: mcTau, radius: mcRadius });
+      } else {
+        s = scorePair(prev, cur);
+      }
+    }
+    if (bgRefWindow > 0
+      && s !== null
+      && s >= futureMinScore
+      && refHistory.length >= Math.min(bgRefWindow, 8)) {
+      const ref = bgStats(refHistory, cur, { stableRange: bgStableRange, tau: bgTau, withModel: true });
+      futureModel = ref.model;
+    }
+    const prevHsv = prev ? Float32Array.from(prev) : null;
     const tmp = prev ?? new Float32Array(n * 3);
     tmp.set(cur);
     prev = tmp;
-    return { score: s, hsv: cur };
+    if (bgWindow > 0) {
+      const snapshot = new Float32Array(n * 3);
+      snapshot.set(cur);
+      bgHistory.push(snapshot);
+      if (bgHistory.length > bgWindow) bgHistory.shift();
+    }
+    if (bgRefWindow > 0) {
+      const snapshot = new Float32Array(n * 3);
+      snapshot.set(cur);
+      refHistory.push(snapshot);
+      if (refHistory.length > bgRefWindow) refHistory.shift();
+    }
+    return {
+      score: s, mcScore, mcBox, mcFill, mcSpanY, activeY, guardY, bgScore, bgStable, bgChanged,
+      bgModel: bgModelOut, futureModel, prevHsv, hsv: cur,
+    };
   };
 }

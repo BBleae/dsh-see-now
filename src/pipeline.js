@@ -17,7 +17,7 @@
  *    只数切点会让档位永远 1 档、一张图只放 4 帧。见 tiers.js 的推导。
  */
 
-import { createScorer, scorePair } from './cuts.js';
+import { bgBorderChanged, bgKeep, createScorer, scorePair } from './cuts.js';
 import { createTiers, applyStrategy } from './tiers.js';
 import { solve, toRects, splitOneBin } from './pack.js';
 import { composePacked, SEAM } from './sheet.js';
@@ -84,6 +84,85 @@ export const DEFAULTS = Object.freeze({
    */
   cutSpikeAbs: 0,
   cutMinGap: 0.4,
+
+  /**
+   * 运动补偿切点（mc）：整屏平移能被邻域吸收，换镜头不能。这是"运镜中切机位"的
+   * 直接证据，不靠绝对分台阶。
+   *
+   * - `cutMcRadius` 默认 4：实测随机纹理平移 8 格时，radius=2 的 mc 高达 194，
+   *   radius=4 只有 5；快速运镜因此不会被当成切点。
+   * - `cutMcAbs` 默认 60：B 站游戏片里真切点 30.33s（abs 23.2 / mc 121）、
+   *   39s（abs 35.5 / mc 68）能过；UI 面板变化（abs 6~12 / mc 10~18）不过。
+   * - `cutMcMinScore` 是绝对分地板，挡住纯 UI 小变化；0 关闭整条路径。
+   */
+  cutMcRadius: 4,
+  cutMcAbs: 60,
+  cutMcMinScore: 6,
+  /** 尖峰切点也要有 mc 覆盖，避免在真切换前 0.4s 的过渡帧先切一刀；0=不查。 */
+  cutSpikeMcAbs: 20,
+
+  /**
+   * 相似构图/相似主体的弱切点。
+   *
+   * 这类切点整屏平均分只有 7~8（低于 cutAbs=12），但前后邻居接近 0 ——
+   * 不是“运动”，而是孤立的一下子。给一个更低、但要求**更尖**的绝对地板：
+   * 6 分以上、高于前后邻居 3 倍，且 mc 覆盖率 ≥8、变化包围盒 ≥20、包围盒填充率 ≥0.2。
+   * 只改亮度（约 5.3 分）不会被误判；B 站 UI 小面板 mc 只有 1~18，bbox 虽大但很稀
+   * （填充率 0.01~0.11），会被填充率挡掉；真正的相似构图主体占 20×10，填充率约 0.4。
+   * 0 = 关闭。
+   */
+  cutIsolatedAbs: 6,
+  cutIsolatedSpike: 3.0,
+  cutIsolatedMcAbs: 8,
+  cutIsolatedMcBBox: 20,
+  cutIsolatedFill: 0.2,
+
+  /**
+   * 背景模型 / 前景运动抑制。
+   * 稳定背景格被改掉的比例（bgStats 的 score，0–255）低于 `cutBgAbs`，
+   * 且变化区域没有盖满有效画面高度（`mcSpanY / activeY < cutBgMaxSpanY`，上下黑边不计）时，
+   * 视为手/勺子/遮挡物这类前景运动，不切。只在分数低于 `cutBgMaxScore`
+   * 且不是孤立弱切点时启用；真正切镜头会把稳定背景整片换掉（几百），
+   * 前景运动只换一部分（几十）。`cutBgMinCells` 太少时不可信，直接不启用；
+   * `cutBgMaxChanged` 是绝对变化格数上限：稳定背景格很多时，比例低也可能已经是
+   * 真切镜头（实测开箱视频 18.67s 比例 89/255，但变了约 700 格），这类不挡。
+   */
+  cutBgAbs: 100,
+  cutBgMaxScore: 60,
+  cutBgMinCells: 128,
+  cutBgMaxChanged: 600,
+  cutBgMaxSpanY: 0.85,
+  cutBgWindow: 6,
+
+  /**
+   * 未来帧确认（只用于高分候选）：
+   * 高分镜头可能把大面积前景运动当切点；等 `cutFutureDelay` 秒后，
+   * 再看候选帧改掉的格子有多少还没回到参考背景（最近 `cutFutureRefWindow` 帧）。
+   * 低于 `cutFutureKeep` 的判为短暂前景运动，不切。真正换镜头在新场景里稳定下来，
+   * keep 很高；候选帧前的前景离开（画面回到旧背景）也会被 `bgKeep` 抓到。
+   * 高分前景停住时，外圈通常还是旧背景（`bgBorderChanged`），
+   * 背景变化不算整片且外圈几乎不动时也判为前景。
+   * 0 = 关闭未来帧确认。
+   */
+  cutFutureDelay: 0.5,
+  cutFutureMinScore: 60,
+  cutFutureKeep: 100,
+  cutFutureMinChanged: 64,
+  cutFutureRefWindow: 24,
+  /** 外圈变化低于这个值（0–255）且背景仍稳定时，判为停住的大面积前景。 */
+  cutFutureBorderMax: 10,
+
+  /**
+   * 运动中的切机位。
+   *
+   * 原 spike 要求 `s > 2.5 × max(前,后)`；机位切换前后都有人在动/镜头在摇时，
+   * 前后分也很高，真切点反而被 2.5 倍卡掉（实测 117 分，前后 73/54，只到 1.6 倍）。
+   * 这里额外允许“绝对分够高 + 比邻居高出一截”的台阶：
+   *   0 = 关闭；默认 80 分、跳 12 分、至少 1.5 倍。
+   */
+  cutJumpAbs: 80,
+  cutJumpMargin: 12,
+  cutJumpRatio: 1.5,
 
   /**
    * 积分取帧（伪切点）：沿时间**累加画面变化量**，累够就录一帧、清零。
@@ -212,12 +291,15 @@ export function createPipeline(opts = {}) {
 
   const scorer = createScorer({
     width, height, scoreMode: o.scoreMode, mcTau: o.mcTau, mcRadius: o.mcRadius,
+    gateMcRadius: o.cutMcRadius, bgWindow: o.cutBgWindow, bgModel: o.cutFutureDelay > 0,
+    bgRefWindow: o.cutFutureDelay > 0 ? o.cutFutureRefWindow : 0,
+    futureMinScore: o.cutFutureMinScore,
   });
   const tiers = createTiers({
     fps, dtFrames: o.dtFrames, smoothFrames: o.smoothFrames,
   });
 
-  let q = [];                  // 待判的帧（最多 2）
+  let q = [];                  // 待判的帧（未来帧确认时最多 ~delay*fps 帧）
   let lastScore = null;
   let acc = 0;                 // 积分累加
   let lastCut = -Infinity;
@@ -519,15 +601,94 @@ export function createPipeline(opts = {}) {
     return solve(seqOf(batch), { binCost: o.binCost });
   }
 
-  function decide(entry, nextScore) {
+  /** 停住的大面积前景：外圈还是旧背景，且背景变化不到整片。 */
+  function stillForeground(entry) {
+    const guardY = entry.guardY ?? entry.activeY ?? 0;
+    if (!entry.futureModel
+      || !(guardY >= 0.25)
+      || entry.bg === null
+      || entry.bg <= 0
+      || entry.bg >= 220) return false;
+    const border = bgBorderChanged(entry.futureModel, entry.hsv, guardY);
+    return border !== null && border.score < o.cutFutureBorderMax;
+  }
+
+  function decide(entry, nextScore, nextMc = null, future = null) {
     const s = entry.score;
     if (s === null) { keep(entry, 'start'); return; }
 
     const px = entry.prev ?? 0;
     const nx = nextScore ?? 0;
+    const base = Math.max(1, px, nx);
+    const mcOkForSpike = o.cutMcAbs <= 0 || o.cutSpikeMcAbs <= 0
+      || (entry.mc ?? 0) >= o.cutSpikeMcAbs;
     const spike = nextScore === null
-      || (s > o.cutSpike * Math.max(1, px, nx) && s >= o.cutSpikeAbs);
-    if (s >= o.cutAbs && spike && entry.t - lastCut >= o.cutMinGap) {
+      || (s > o.cutSpike * base && s >= o.cutSpikeAbs && mcOkForSpike);
+    // 运动中的切机位：前后都在动时 spike 的 2.5 倍凑不出来，改用“台阶”
+    const jump = s - base;
+    const step = o.cutJumpAbs > 0
+      && s >= o.cutAbs
+      && s >= o.cutJumpAbs
+      && jump >= o.cutJumpMargin
+      && s >= o.cutJumpRatio * base;
+    // 运动补偿：整屏在动但邻域里找得到对应 → 运镜；找不到对应 → 换镜头。
+    // 半径 4 的 mc 比“绝对台阶”更直接：真实运动切机位 abs 只有 23 也能过。
+    const mc = entry.mc ?? 0;
+    const mcBox = entry.mcBox ?? 0;
+    const mcFill = entry.mcFill ?? 0;
+    const mcCut = o.cutMcAbs > 0
+      && s >= o.cutMcMinScore
+      && mc >= o.cutMcAbs;
+    // 相似构图/相似主体的弱切点：低于 cutAbs，但几乎孤立
+    const isolated = o.cutIsolatedAbs > 0
+      && nextScore !== null
+      && (o.cutMcAbs <= 0 || nextMc === null || nextMc < o.cutMcAbs)
+      && (o.cutIsolatedMcAbs <= 0 || mc >= o.cutIsolatedMcAbs)
+      && (o.cutIsolatedMcBBox <= 0 || mcBox >= o.cutIsolatedMcBBox)
+      && (o.cutIsolatedFill <= 0 || mcFill >= o.cutIsolatedFill)
+      && s >= o.cutIsolatedAbs
+      && s < o.cutAbs
+      && s > o.cutIsolatedSpike * base;
+    // 前景运动不是切镜头：稳定背景大部分还在，且变化区域没盖满高度。
+    // 只看低/中分事件；孤立弱切点另有区域门槛，不在这里误伤。
+    const bg = entry.bg;
+    const guardY = entry.guardY ?? entry.activeY ?? 0;
+    const fgMotion = o.cutBgAbs > 0
+      && s < o.cutBgMaxScore
+      && !isolated
+      && (o.cutBgMinCells <= 0 || (entry.bgStable ?? 0) >= o.cutBgMinCells)
+      && bg !== null
+      && bg > 0
+      && bg < o.cutBgAbs
+      && (o.cutBgMaxChanged <= 0 || (entry.bgChanged ?? 0) <= o.cutBgMaxChanged)
+      && guardY >= 0.25
+      && (o.cutBgMaxSpanY <= 0
+        || (guardY > 0
+          ? (entry.mcSpanY ?? 1) / guardY
+          : (entry.mcSpanY ?? 1)) < o.cutBgMaxSpanY);
+    // 高分候选不能只靠当前帧：等 0.5 秒，看候选帧改掉的稳定背景有没有回来。
+    // 大面积前景运动离开/移开 -> keep 低；真正换镜头 -> 新场景还在，keep 高。
+    let futureFg = false;
+    if (o.cutFutureDelay > 0
+      && s >= o.cutFutureMinScore
+      && entry.futureModel) {
+      const fk = future && future.hsv
+        ? bgKeep(entry.futureModel, entry.hsv, future.hsv)
+        : null;
+      const rk = entry.prevHsv
+        ? bgKeep(entry.futureModel, entry.prevHsv, entry.hsv)
+        : null;
+      const gone = (r) => r && r.score !== null
+        && r.changed >= o.cutFutureMinChanged
+        && r.score < o.cutFutureKeep;
+      // 前景停住时外圈通常还是旧背景：背景变化不算整片，外圈几乎没动，
+      // 就不要等未来帧回来。真正换镜头 bg 很高，不会被这条挡住。
+      futureFg = gone(fk) || gone(rk) || stillForeground(entry);
+    }
+    if (entry.t - lastCut >= o.cutMinGap
+      && !fgMotion
+      && !futureFg
+      && (mcCut || (s >= o.cutAbs && (spike || step)) || isolated)) {
       lastCut = entry.t;
       acc = 0;                      // 切点之后重新攒（那一帧的分属于跨刀，不算运动）
       keep(entry, 'cut');
@@ -559,13 +720,26 @@ export function createPipeline(opts = {}) {
       // `wall` 是这一帧被处理时的墙上时间（epoch ms）。台词（ASR）只有时间码没有帧号，
       // 对齐只能靠同一个时钟 —— `t` 是"第几秒"，掉帧就漂，不能拿来对字幕。
       const entry = {
-        t, buf, score: s, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
+        t, buf, score: s, mc: r.mcScore, mcBox: r.mcBox, mcFill: r.mcFill, mcSpanY: r.mcSpanY, activeY: r.activeY, guardY: r.guardY, bg: r.bgScore, bgStable: r.bgStable, bgChanged: r.bgChanged, bgModel: r.bgModel, futureModel: r.futureModel, prevHsv: r.prevHsv, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
       };
       lastSeen = entry;
       lastScore = s;
       q.push(entry);
       while (q.length >= 2) {
-        decide(q[0], q[1].score);
+        const front = q[0];
+        if (front.score === null) {
+          decide(front, q[1].score, q[1].mc, null);
+          q.shift();
+          continue;
+        }
+        const needFuture = o.cutFutureDelay > 0
+          && front.score >= o.cutFutureMinScore
+          && !stillForeground(front);
+        const future = o.cutFutureDelay > 0
+          ? q.find((e) => e !== front && e.t - front.t >= o.cutFutureDelay) ?? null
+          : null;
+        if (needFuture && !future) break;
+        decide(front, q[1].score, q[1].mc, future);
         q.shift();
       }
     },
@@ -573,7 +747,11 @@ export function createPipeline(opts = {}) {
     /** 流结束：把还剩的那一帧判掉，再把最后一张发出去。 */
     finish() {
       while (q.length) {
-        decide(q[0], q.length > 1 ? q[1].score : null);
+        const front = q[0];
+        const future = o.cutFutureDelay > 0
+          ? q.find((e) => e !== front && e.t - front.t >= o.cutFutureDelay) ?? null
+          : null;
+        decide(front, q.length > 1 ? q[1].score : null, q.length > 1 ? q[1].mc : null, future);
         q.shift();
       }
       // 收尾这批也要**一段一箱**：多箱多半出现在最后（帧都攒在尾部），
