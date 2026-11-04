@@ -86,6 +86,22 @@ export const DEFAULTS = Object.freeze({
   cutMinGap: 0.4,
 
   /**
+   * 运动补偿切点（mc）：整屏平移能被邻域吸收，换镜头不能。这是"运镜中切机位"的
+   * 直接证据，不靠绝对分台阶。
+   *
+   * - `cutMcRadius` 默认 4：实测随机纹理平移 8 格时，radius=2 的 mc 高达 194，
+   *   radius=4 只有 5；快速运镜因此不会被当成切点。
+   * - `cutMcAbs` 默认 60：B 站游戏片里真切点 30.33s（abs 23.2 / mc 121）、
+   *   39s（abs 35.5 / mc 68）能过；UI 面板变化（abs 6~12 / mc 10~18）不过。
+   * - `cutMcMinScore` 是绝对分地板，挡住纯 UI 小变化；0 关闭整条路径。
+   */
+  cutMcRadius: 4,
+  cutMcAbs: 60,
+  cutMcMinScore: 6,
+  /** 尖峰切点也要有 mc 覆盖，避免在真切换前 0.4s 的过渡帧先切一刀；0=不查。 */
+  cutSpikeMcAbs: 20,
+
+  /**
    * 相似构图/相似主体的弱切点。
    *
    * 这类切点整屏平均分只有 7~8（低于 cutAbs=12），但前后邻居接近 0 ——
@@ -235,6 +251,7 @@ export function createPipeline(opts = {}) {
 
   const scorer = createScorer({
     width, height, scoreMode: o.scoreMode, mcTau: o.mcTau, mcRadius: o.mcRadius,
+    gateMcRadius: o.cutMcRadius,
   });
   const tiers = createTiers({
     fps, dtFrames: o.dtFrames, smoothFrames: o.smoothFrames,
@@ -531,15 +548,17 @@ export function createPipeline(opts = {}) {
     return solve(seqOf(batch), { binCost: o.binCost });
   }
 
-  function decide(entry, nextScore) {
+  function decide(entry, nextScore, nextMc = null) {
     const s = entry.score;
     if (s === null) { keep(entry, 'start'); return; }
 
     const px = entry.prev ?? 0;
     const nx = nextScore ?? 0;
     const base = Math.max(1, px, nx);
+    const mcOkForSpike = o.cutMcAbs <= 0 || o.cutSpikeMcAbs <= 0
+      || (entry.mc ?? 0) >= o.cutSpikeMcAbs;
     const spike = nextScore === null
-      || (s > o.cutSpike * base && s >= o.cutSpikeAbs);
+      || (s > o.cutSpike * base && s >= o.cutSpikeAbs && mcOkForSpike);
     // 运动中的切机位：前后都在动时 spike 的 2.5 倍凑不出来，改用“台阶”
     const jump = s - base;
     const step = o.cutJumpAbs > 0
@@ -547,14 +566,21 @@ export function createPipeline(opts = {}) {
       && s >= o.cutJumpAbs
       && jump >= o.cutJumpMargin
       && s >= o.cutJumpRatio * base;
+    // 运动补偿：整屏在动但邻域里找得到对应 → 运镜；找不到对应 → 换镜头。
+    // 半径 4 的 mc 比“绝对台阶”更直接：真实运动切机位 abs 只有 23 也能过。
+    const mc = entry.mc ?? 0;
+    const mcCut = o.cutMcAbs > 0
+      && s >= o.cutMcMinScore
+      && mc >= o.cutMcAbs;
     // 相似构图/相似主体的弱切点：低于 cutAbs，但几乎孤立
     const isolated = o.cutIsolatedAbs > 0
       && nextScore !== null
+      && (o.cutMcAbs <= 0 || nextMc === null || nextMc < o.cutMcAbs)
       && s >= o.cutIsolatedAbs
       && s < o.cutAbs
       && s > o.cutIsolatedSpike * base;
     if (entry.t - lastCut >= o.cutMinGap
-      && ((s >= o.cutAbs && (spike || step)) || isolated)) {
+      && (mcCut || (s >= o.cutAbs && (spike || step)) || isolated)) {
       lastCut = entry.t;
       acc = 0;                      // 切点之后重新攒（那一帧的分属于跨刀，不算运动）
       keep(entry, 'cut');
@@ -586,13 +612,13 @@ export function createPipeline(opts = {}) {
       // `wall` 是这一帧被处理时的墙上时间（epoch ms）。台词（ASR）只有时间码没有帧号，
       // 对齐只能靠同一个时钟 —— `t` 是"第几秒"，掉帧就漂，不能拿来对字幕。
       const entry = {
-        t, buf, score: s, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
+        t, buf, score: s, mc: r.mcScore, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
       };
       lastSeen = entry;
       lastScore = s;
       q.push(entry);
       while (q.length >= 2) {
-        decide(q[0], q[1].score);
+        decide(q[0], q[1].score, q[1].mc);
         q.shift();
       }
     },
@@ -600,7 +626,7 @@ export function createPipeline(opts = {}) {
     /** 流结束：把还剩的那一帧判掉，再把最后一张发出去。 */
     finish() {
       while (q.length) {
-        decide(q[0], q.length > 1 ? q[1].score : null);
+        decide(q[0], q.length > 1 ? q[1].score : null, q.length > 1 ? q[1].mc : null);
         q.shift();
       }
       // 收尾这批也要**一段一箱**：多箱多半出现在最后（帧都攒在尾部），

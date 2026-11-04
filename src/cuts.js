@@ -111,7 +111,9 @@ export function mcRatioScore(prev, cur, { tau = 15, radius = 2 } = {}) {
   return (changed / n) * 255;
 }
 
-export function createScorer({ width, height, scoreMode = 'abs', mcTau = 15, mcRadius = 2 }) {
+export function createScorer({
+  width, height, scoreMode = 'abs', mcTau = 15, mcRadius = 2, gateMcRadius = mcRadius,
+}) {
   const n = SCAN_W * SCAN_H;
   const rgb = new Float32Array(n * 3);
   let prev = null;
@@ -121,14 +123,20 @@ export function createScorer({ width, height, scoreMode = 'abs', mcTau = 15, mcR
     gridRgb(frame, width, height, rgb);
     rgbToHsv(rgb, cur);
     let s = null;
+    let mcScore = null;
     if (prev) {
-      s = scoreMode === 'mc'
-        ? mcRatioScore(prev, cur, { tau: mcTau, radius: mcRadius })
-        : scorePair(prev, cur);
+      mcScore = mcRatioScore(prev, cur, { tau: mcTau, radius: gateMcRadius });
+      if (scoreMode === 'mc') {
+        s = gateMcRadius === mcRadius
+          ? mcScore
+          : mcRatioScore(prev, cur, { tau: mcTau, radius: mcRadius });
+      } else {
+        s = scorePair(prev, cur);
+      }
     }
     const tmp = prev ?? new Float32Array(n * 3);
     tmp.set(cur);
     prev = tmp;
-    return { score: s, hsv: cur };
+    return { score: s, mcScore, hsv: cur };
   };
 }

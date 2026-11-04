@@ -86,7 +86,7 @@ export const PACES = Object.freeze({
   // 1.5 能到 70.4 / 97.5，但 BBC 上每多 1 个点要花 83 帧（k=2 只要 47），是为最后几个点付溢价。
   // 想要全覆盖：给 normal 传 floorGapK: 1.5。
   // calm 刻意只抓大场面：关掉 6~20 分的弱切点，避免省电档反而变吵
-  calm: { cutAbs: 20, wakeGapSec: 30, pipeline: { cutIsolatedAbs: 0, floorGapK: 3, floorMin: 3, floorMax: 30 } },
+  calm: { cutAbs: 20, wakeGapSec: 30, pipeline: { cutIsolatedAbs: 0, cutMcAbs: 0, floorGapK: 3, floorMin: 3, floorMax: 30 } },
   normal: { cutAbs: 12, wakeGapSec: 15, pipeline: { floorGapK: 2, floorMin: 2, floorMax: 20 } },
   dense: { cutAbs: 7, wakeGapSec: 8, pipeline: { floorGapK: 1.2, floorMin: 2, floorMax: 20 } },
   /**
@@ -111,9 +111,10 @@ export const PACES = Object.freeze({
       silentFloorSec: 40,
       cutSpike: 1.5,
       cutSpikeAbs: 30,
-      // 游戏画面每帧都在动：低分孤立 / 台阶判据都会把运动误判成切点
+      // 游戏画面每帧都在动：低分孤立 / 台阶 / mc 都会把运动误判成切点
       cutIsolatedAbs: 0,
       cutJumpAbs: 0,
+      cutMcAbs: 0,
       floorGapK: 2,
       floorMin: 2,
       floorMax: 20,
