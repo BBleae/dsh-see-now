@@ -25,12 +25,12 @@ import { noteInterjected } from './interject.js';
 import { openWindow, pidStamp, windowAlive, setWindowHidden } from './window.js';
 import { createListener } from './listen.js';
 
-/** 三档清晰度。数字是画布像素，token 约等于 像素÷1650（见调参报告）。 */
+/** 四档清晰度。数字是画布像素，实际 token 见 src/tokens.js（42px patch 网格）。 */
 export const SIZES = Object.freeze({
-  low: [800, 450],        // 218 token/张 · 4 帧时每格 400×225 —— 看视频/场景够
-  standard: [1066, 600],  // 388 token/张 · 每格 533×300 —— 屏幕上的中号字能认
-  high: [1280, 720],      // 559 token/张 · 每格 640×360 —— 文件名/小字能认
-  ultra: [1600, 900],     // 872 token/张 · 单帧时几乎等于原屏 —— 真要读字才用（仍低于 1024 封顶）
+  low: [800, 450],        // 233 token/张 · 4 帧时每格 400×225 —— 看视频/场景够
+  standard: [1066, 600],  // 407 token/张 · 每格 533×300 —— 屏幕上的中号字能认
+  high: [1280, 720],      // 578 token/张 · 每格 640×360 —— 文件名/小字能认
+  ultra: [1600, 900],     // 882 token/张 · 单帧时几乎等于原屏 —— 真要读字才用（仍低于 1024 封顶）
 });
 export const DEFAULT_QUALITY = 'low';
 

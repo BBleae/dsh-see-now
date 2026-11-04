@@ -21,6 +21,7 @@
     "./pack": "./src/pack.js",
     "./png": "./src/png.js",
     "./pipeline": "./src/pipeline.js",
+    "./tokens": "./src/tokens.js",
     "./capture": "./src/capture.js",
     "./chat": "./src/chat.js",
     "./speech": "./src/speech.js",

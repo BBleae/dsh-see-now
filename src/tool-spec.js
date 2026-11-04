@@ -93,7 +93,7 @@ export function seeNowToolSpec() {
           + '没接 OBS，抓不到后台/最小化窗口；只支持主屏。\n'
           + '带上区域后：强制 gdigrab（ddagrab 没有偏移参数）、按区域比例出图（竖屏出竖屏）、'
           + '每帧长边 = 档位长边、一张默认 2 帧最多 4 帧。token 会比全屏贵（帧不再被缩小）：'
-          + 'low 档 2 帧约 345 token、4 帧约 872（普通全屏 4 帧是 218）；要省钱就降 `quality`。',
+          + 'low 档 2 帧约 345 token、4 帧约 872（普通全屏 4 帧是 233）；要省钱就降 `quality`。',
       },
       show: {
         type: 'boolean',
@@ -166,11 +166,11 @@ export function seeNowToolSpec() {
       },
       quality: {
         type: 'string',
-        description: 'How sharp the image is. "low" (default, 800×450, ≈218 tokens) — 4 frames are 400×225 each, '
+        description: 'How sharp the image is. "low" (default, 800×450, ≈233 tokens) — 4 frames are 400×225 each, '
           + 'enough for faces/scenes/video but small text is unreadable. '
-          + '"standard" (1066×600, ≈388 tokens) — 533×300 per frame, medium text readable. '
-          + '"high" (1280×720, ≈559 tokens) — 640×360 per frame, filenames readable. '
-          + '"ultra" (1600×900, ≈872 tokens) — a single frame is nearly the real screen; use it only when '
+          + '"standard" (1066×600, ≈407 tokens) — 533×300 per frame, medium text readable. '
+          + '"high" (1280×720, ≈578 tokens) — 640×360 per frame, filenames readable. '
+          + '"ultra" (1600×900, ≈882 tokens) — a single frame is nearly the real screen; use it only when '
           + '"high" is still not enough.\n'
           + 'Switch it UP as soon as you cannot read something — do not guess from a blurry image. '
           + 'Changing quality restarts the capture (~0.6s) and immediately returns ONE frame of the current '
