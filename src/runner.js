@@ -110,6 +110,9 @@ export const PACES = Object.freeze({
       silentFloorSec: 40,
       cutSpike: 1.5,
       cutSpikeAbs: 30,
+      // 游戏画面每帧都在动：低分孤立 / 台阶判据都会把运动误判成切点
+      cutIsolatedAbs: 0,
+      cutJumpAbs: 0,
       floorGapK: 2,
       floorMin: 2,
       floorMax: 20,

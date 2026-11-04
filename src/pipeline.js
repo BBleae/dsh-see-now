@@ -86,6 +86,29 @@ export const DEFAULTS = Object.freeze({
   cutMinGap: 0.4,
 
   /**
+   * 相似构图/相似主体的弱切点。
+   *
+   * 这类切点整屏平均分只有 7~8（低于 cutAbs=12），但前后邻居接近 0 ——
+   * 不是“运动”，而是孤立的一下子。给一个更低、但要求**更尖**的绝对地板：
+   * 6 分以上、且高于前后邻居 3 倍才算。只改亮度（约 5.3 分）不会被误判。
+   * 0 = 关闭。
+   */
+  cutIsolatedAbs: 6,
+  cutIsolatedSpike: 3.0,
+
+  /**
+   * 运动中的切机位。
+   *
+   * 原 spike 要求 `s > 2.5 × max(前,后)`；机位切换前后都有人在动/镜头在摇时，
+   * 前后分也很高，真切点反而被 2.5 倍卡掉（实测 117 分，前后 73/54，只到 1.6 倍）。
+   * 这里额外允许“绝对分够高 + 比邻居高出一截”的台阶：
+   *   0 = 关闭；默认 80 分、跳 12 分、至少 1.5 倍。
+   */
+  cutJumpAbs: 80,
+  cutJumpMargin: 12,
+  cutJumpRatio: 1.5,
+
+  /**
    * 积分取帧（伪切点）：沿时间**累加画面变化量**，累够就录一帧、清零。
    *
    * 这就是 Storyboard 的算法，不是等间隔抽样。区别在于**阈值是固定的绝对值**：
@@ -514,9 +537,24 @@ export function createPipeline(opts = {}) {
 
     const px = entry.prev ?? 0;
     const nx = nextScore ?? 0;
+    const base = Math.max(1, px, nx);
     const spike = nextScore === null
-      || (s > o.cutSpike * Math.max(1, px, nx) && s >= o.cutSpikeAbs);
-    if (s >= o.cutAbs && spike && entry.t - lastCut >= o.cutMinGap) {
+      || (s > o.cutSpike * base && s >= o.cutSpikeAbs);
+    // 运动中的切机位：前后都在动时 spike 的 2.5 倍凑不出来，改用“台阶”
+    const jump = s - base;
+    const step = o.cutJumpAbs > 0
+      && s >= o.cutAbs
+      && s >= o.cutJumpAbs
+      && jump >= o.cutJumpMargin
+      && s >= o.cutJumpRatio * base;
+    // 相似构图/相似主体的弱切点：低于 cutAbs，但几乎孤立
+    const isolated = o.cutIsolatedAbs > 0
+      && nextScore !== null
+      && s >= o.cutIsolatedAbs
+      && s < o.cutAbs
+      && s > o.cutIsolatedSpike * base;
+    if (entry.t - lastCut >= o.cutMinGap
+      && ((s >= o.cutAbs && (spike || step)) || isolated)) {
       lastCut = entry.t;
       acc = 0;                      // 切点之后重新攒（那一帧的分属于跨刀，不算运动）
       keep(entry, 'cut');
