@@ -40,12 +40,30 @@ $url = (yt-dlp --no-warnings -f 'best[height<=720]/best' -g 'https://live.bilibi
 
 - 59.83：手从上方进入，背景稳定，低分背景守卫；
 - 97.5：手/产品盖到画面外圈，分数 28.5、`bg=145`、稳定背景仅 270 格；
-  低分未来帧确认（`keep=198 < cutFutureLowKeep=200`）；
+  低分未来帧确认（`keep=198 < cutFutureLowKeep=210`，余量 12）；
 - 109.33：手持产品靠近，分数 18、`bg=45`、`keep=47`，同上；
 - 121.83：手离开，低分背景守卫。
 
+## 强灯光样本（第二个直播）
+
+- 平台：B 站直播
+- 房间：https://live.bilibili.com/23202464
+- 标题：Akko 键盘盲盒
+- 录制：2026-11-04，60s，720x1280，强棚灯 + 大字贴片 + 主播手持产品
+- 本地文件：`D:\DSHwork\bili-live-key-60.flv`（约 9.9 MB，不提交）
+
+重录命令把房间和时间换掉即可：
+
+```powershell
+$url = (yt-dlp --no-warnings -f 'best[height<=720]/best' -g 'https://live.bilibili.com/23202464' | Select-Object -First 1)
+& 'D:/deepseek-harness-dsh-v0.2.1rc2/.dsh-home/bin/ffmpeg.exe' -y -loglevel error -i $url -t 60 -c copy 'D:\DSHwork\bili-live-key-60.flv'
+```
+
+结果：基线和当前都是 **0 刀**（主播持续展示，没有换镜头）。
+
 ## 边界
 
-- 3 分钟不是完整直播；更长流、强灯光、不同主播/机位还需样本。
+- 3 分钟带货 + 60 秒强灯光，仍不是完整直播；更长流、不同主播/机位还要样本。
+- 强灯光样本没有出现换镜头，不能证明它对真切点不误挡。
 - 低分未来帧确认只对「外圈也被改掉 + 稳定背景少 + bg < 160」的候选启用，
   避免像烹饪/开箱/宽银幕那样把静态外框的真切点一起挡掉。

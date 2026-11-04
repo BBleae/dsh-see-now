@@ -158,7 +158,7 @@ export const DEFAULTS = Object.freeze({
   /** 稳定背景格数太少时，优先怀疑大面积前景，而不是整屏新场景。 */
   cutFutureLowStableMax: 700,
   /** 低/中分候选的 keep 门槛更宽：只有一部分旧背景回来就可能是前景/移动。 */
-  cutFutureLowKeep: 200,
+  cutFutureLowKeep: 210,
   /** 低分候选也要有参考背景模型才能做上面这次确认。 */
   cutFutureBuildMinScore: 12,
 
