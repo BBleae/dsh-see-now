@@ -290,3 +290,24 @@ test('linesText：台词同时给本机时钟和相对秒', async () => {
   assert.match(out, /2\.0s/, `要有相对秒，实际：${out}`);
   assert.match(out, /第一句/);
 });
+
+test('httpTranscriber：服务不在时必须抛错，不能静默返回空串', async () => {
+  const { httpTranscriber } = await import('../src/listen.js');
+  // 端口 9 是 discard 服务，本机不会有人监听 → 连接被拒
+  const t = httpTranscriber({ baseUrl: 'http://127.0.0.1:9/v1', model: 'm' }, { timeoutMs: 2000, log: () => {} });
+  // **这是 2026-11-04 那次"看不到字幕"的根因**：以前 catch 里 return ''，
+  // 于是上层只当"这段没人说话"，失败计数永远 0、status 永远显示"在听"。
+  await assert.rejects(() => t(Buffer.alloc(2048)), Error);
+});
+
+test('probeService：没人监听就 false，不抛', async () => {
+  const { probeService } = await import('../src/listen.js');
+  assert.equal(await probeService('http://127.0.0.1:9/v1', { timeoutMs: 800 }), false);
+});
+
+test('ensureService：asr.json 没写 manage.start 就老实返回不托管', async () => {
+  const { ensureService } = await import('../src/listen.js');
+  const r = await ensureService({ baseUrl: 'http://127.0.0.1:9/v1' }, { log: () => {}, waitMs: 500 });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /manage\.start/);
+});

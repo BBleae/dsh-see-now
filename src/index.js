@@ -865,11 +865,14 @@ function loopLine(lp) {
  */
 function listenLine(l) {
   if (!l) return '没起（还没调过 watch）';
-  if (l.enabled) {
-    const last = l.lastSegAt ? `，最近一句 ${Math.round((Date.now() - l.lastSegAt) / 1000)}s 前` : '，还没转出过台词';
-    return `在听（${l.backend}，累计 ${l.total} 句${last}）`;
-  }
-  return `没在听 —— ${l.reason}`;
+  if (!l.enabled) return `没在听 —— ${l.reason}`;
+  // **转写挂了不能说成"在听"**：那会让人一直去查画面。
+  // 2026-11-04 社区实报：本地 ASR 服务没起，界面上一直显示"在听、0 句"，
+  // 看起来和"视频是默片"一模一样。
+  if (l.paused) return `在听但转写停了：${l.error ?? '原因未知'}（30 秒后自动重试，音量条还在）`;
+  if (l.error) return `在听（${l.backend}），但最近一次转写失败：${l.error}`;
+  const last = l.lastSegAt ? `，最近一句 ${Math.round((Date.now() - l.lastSegAt) / 1000)}s 前` : '，还没转出过台词';
+  return `在听（${l.backend}，累计 ${l.total} 句${last}）`;
 }
 
       if (action === 'status') {

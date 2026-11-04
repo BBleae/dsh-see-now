@@ -47,6 +47,13 @@ export const LISTEN_SCRIPT = join(HERE, '..', 'examples', 'floating-chat', 'list
 const KEEP_MS = 180_000;
 /** 连续失败几次就停（每 3 秒一句，坏一次不算坏，一直坏就别耗着了）。 */
 const MAX_FAILS = 3;
+/**
+ * 失败到上限后隔多久重试。
+ *
+ * 30 秒是照着"本地服务冷启动"定的：模型加载实测要 20~30 秒，
+ * 比这更短只是在它还没 ready 的时候反复打空。
+ */
+const RETRY_MS = 30_000;
 
 /**
  * 把 ffmpeg/PortAudio 风格的 WAV 改写成宿主认的 **canonical** 形式。
@@ -164,6 +171,12 @@ export function asrConfig(env = process.env) {
     key: env.DSH_ASR_KEY || cfg.key || '',
     model: env.DSH_ASR_MODEL || cfg.model || 'paraformer-zh-2024-03-09',
     language: env.DSH_ASR_LANGUAGE || cfg.language || 'zh',
+    /**
+     * `manage` 必须原样带出来 —— 它是"服务没起时怎么拉起"的唯一来源。
+     * 早先这里只挑了 4 个字段，于是 `ensureService` 永远报"没写 manage.start"，
+     * 服务永远不会被拉起（2026-11-04 排查"看不到字幕"时发现）。
+     */
+    manage: cfg.manage && typeof cfg.manage === 'object' ? cfg.manage : undefined,
   };
 }
 
@@ -190,11 +203,63 @@ export function httpTranscriber(cfg, { timeoutMs = 30_000, log = () => {} } = {}
       return String(j?.text ?? '').trim();
     } catch (e) {
       log(`转写失败：${e?.message ?? e}`);
-      return '';
+      // **必须抛**。以前这里 `return ''`，于是上层看到的只是"这段没说话"：
+      // 失败计数永远不涨、永远不停、status 里永远是"在听、0 句" ——
+      // 服务根本没起的时候，界面上和"视频是默片"一模一样（2026-11-04 实报）。
+      throw e;
     } finally {
       clearTimeout(timer);
     }
   };
+}
+
+// ------------------------------------------------------------------ 本地服务
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 端点活着吗。2 秒超时 —— 本地服务要么秒回要么没起，等再久没意义。 */
+export async function probeService(baseUrl, { timeoutMs = 2000 } = {}) {
+  try {
+    const origin = new URL(baseUrl).origin;
+    const res = await fetch(`${origin}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+    return res.ok;
+  } catch { return false; }
+}
+
+/**
+ * 本地转写服务没在跑就拉起来（按 `~/.dsh/asr.json` 的 `manage.start`）。
+ *
+ * 为什么必须有：那个服务是**空闲就退**的（`idleMs: 5000`），平时根本不在。
+ * storyboard 有 `asr-lifecycle.js` 负责按需拉起，see-now 原来没有 ——
+ * 表现就是"听得见、但一句台词都转不出来"，而界面上还显示"在听"。
+ *
+ * **只管拉、不管关**：服务自己有 idleMs，用完自己走。我们只保证"要用的时候它在"。
+ */
+export async function ensureService(cfg, { log = () => {}, waitMs = 60_000 } = {}) {
+  const start = cfg?.manage?.start;
+  if (!start) return { ok: false, reason: 'asr.json 里没写 manage.start' };
+  if (await probeService(cfg.baseUrl)) return { ok: true, already: true };
+
+  const cmd = Array.isArray(start) ? start.map(String) : [String(start)];
+  const [exe, ...args] = cmd;
+  log(`转写服务没在跑，拉起：${cmd.join(' ')}`);
+  try {
+    // 脚本目录当 cwd：很多服务按相对路径找模型
+    const cwd = args[0] ? dirname(args[0]) : undefined;
+    const child = spawn(exe, args, {
+      detached: true, stdio: 'ignore', windowsHide: true, ...(cwd ? { cwd } : {}),
+    });
+    child.unref();
+  } catch (e) {
+    return { ok: false, reason: `起不来：${e?.message ?? e}` };
+  }
+
+  const until = Date.now() + waitMs;
+  while (Date.now() < until) {
+    await sleep(1000);
+    if (await probeService(cfg.baseUrl)) return { ok: true, waitedMs: waitMs - (until - Date.now()) };
+  }
+  return { ok: false, reason: `等了 ${Math.round(waitMs / 1000)} 秒还没就绪` };
 }
 
 /** 选一个能用的转写器。宿主优先 —— 社区用户那边不用装任何东西。 */
@@ -363,6 +428,10 @@ export function createListener({
   /** 音量条数据：`{step, from, db[]}`，Python 那边每秒原子重写一次 levels.json */
   let levels = null;
   let levelsAt = 0;
+  /** 转写连续失败时的暂停截止时间（epoch ms）。见 drain 里的注释。 */
+  let pausedUntil = 0;
+  /** 最近一次转写错误（status 里要看得见，不能只进日志） */
+  let lastError = null;
 
   function state() {
     return {
@@ -374,6 +443,9 @@ export function createListener({
       lines: buffer.size,
       total,
       lastSegAt: lastSegAt || null,
+      /** 转写出过错就带上原因 —— "在听但没台词"必须能分清是没人说话还是转写挂了 */
+      error: lastError,
+      paused: pausedUntil > Date.now(),
     };
   }
 
@@ -421,14 +493,36 @@ export function createListener({
   /** 扫目录，处理没见过的 wav。一次一条，串行 —— 并发打同一个模型只会互相排队。 */
   async function drain() {
     if (busy || !transcriber) return;
+    /**
+     * **连续失败不 stop，只暂停**。
+     *
+     * 以前是"3 次就收工"，可最常见的那种失败（本地服务没起 / 正在冷启动 30 秒）
+     * 完全会自己好起来 —— 那时候把整条链停掉，等于永久放弃。而且停掉会连带
+     * kill 采集进程，音量条也没了。
+     *
+     * 暂停期间**不删文件**（留着等重试），到点先重新探活/拉起服务。
+     */
+    if (pausedUntil) {
+      if (Date.now() < pausedUntil) return;
+      pausedUntil = 0;
+      fails = 0;
+      ensureService(asrConfig(env), { log }).catch(() => {});
+    }
     busy = true;
     try {
       pollLevels();       // 音量条和转写共用这一拍，但它自己节流到 1 秒一次
       let names = [];
       try { names = readdirSync(audioDir); } catch { names = []; }
-      const segs = names
+      let segs = names
         .filter((n) => /^seg-\d+\.wav$/.test(n))
         .sort((a, b) => Number(a.slice(4, -4)) - Number(b.slice(4, -4)));
+      // 转写长期不通时目录会堆 —— 只留最新的 40 段，老的直接扔
+      if (segs.length > 40) {
+        for (const old of segs.slice(0, segs.length - 40)) {
+          try { unlinkSync(join(audioDir, old)); } catch { /* 删不掉算了 */ }
+        }
+        segs = segs.slice(-40);
+      }
       if (env.DSH_SEE_NOW_DEBUG) log(`[listen] drain: 目录里 ${names.length} 个文件，待处理 ${segs.length}`);
       for (const name of segs) {
         const path = join(audioDir, name);
@@ -444,13 +538,16 @@ export function createListener({
         try {
           text = await transcriber.transcribe(canonicalizeWav(wav));
           fails = 0;
+          lastError = null;
         } catch (e) {
           fails += 1;
-          log(`转写出错（${fails}/${MAX_FAILS}）：${e?.message ?? e}`);
+          lastError = String(e?.message ?? e);
+          log(`转写出错（${fails}/${MAX_FAILS}）：${lastError}`);
           if (fails >= MAX_FAILS) {
-            stop(`连续 ${MAX_FAILS} 次转写失败`);
-            return;
+            pausedUntil = Date.now() + RETRY_MS;
+            reason = `在听（音量条还在），但转写连续失败：${lastError}`;
           }
+          continue;      // **不删文件** —— 服务起来之后这些段还要用
         }
         // 处理完就删：目录是工作区，不是档案。留着会几小时涨到几千个文件。
         try { unlinkSync(path); } catch { /* 删不掉就下次再说 */ }
@@ -481,6 +578,17 @@ export function createListener({
       reason = '没有可用的转写服务（宿主没有 speechToText，也没有 ~/.dsh/asr.json）';
       enabled = false;
       return { ok: false, reason };
+    }
+    /**
+     * 走 HTTP 就先确认本地服务在不在。
+     *
+     * **不 await**：服务冷启动要 20~30 秒，挡在这里会让"开始看"变成一个几十秒的空转。
+     * 采集和音量条先跑，转写在后台等它就绪 —— 期间的段不删，起来之后照常处理。
+     */
+    if (transcriber.kind === 'http') {
+      ensureService(asrConfig(env), { log })
+        .then((r) => { if (!r.ok) log(`转写服务没起来：${r.reason}`); })
+        .catch(() => { /* 已经在里面兜过了 */ });
     }
     if (!existsSync(script)) {
       reason = `找不到 listen.py（${script}）`;
