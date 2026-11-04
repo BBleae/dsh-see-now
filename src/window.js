@@ -23,6 +23,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -272,6 +273,51 @@ export function pythonCandidates() {
   return [...new Set(list.filter(Boolean))];
 }
 
+const PROTOCOL_VERSION = 1;
+const MAX_PROTOCOL_LINE = 8192;
+const COMMANDS = new Set(['pause', 'resume', 'stop', 'seek', 'watch', 'configure']);
+let protocol = null;
+
+function protocolAlive() {
+  return Boolean(protocol && !protocol.exited && protocol.state === 'ready');
+}
+
+/** 协议窗口的显式状态；旧窗口返回 null，继续走 pid + 心跳。 */
+export function windowStatus() {
+  if (!protocol) return null;
+  return { alive: protocolAlive(), state: protocol.state, reason: protocol.reason,
+    owned: true, protocol: true };
+}
+
+export function acceptWindowProtocol(record, line) {
+  if (line.length > MAX_PROTOCOL_LINE) return;
+  let message;
+  try { message = JSON.parse(line); } catch { return; }
+  if (message?.version !== PROTOCOL_VERSION || typeof message.state !== 'string') return;
+  record.state = message.state;
+  record.reason = typeof message.reason === 'string' ? message.reason : null;
+  if (message.state === 'ready') record.ready(record);
+  if (message.state === 'closed' || message.state === 'failed') {
+    record.reason ??= message.state;
+    record.ready(record);
+  }
+  if (message.command && COMMANDS.has(message.command)) {
+    const { version, ...command } = message;
+    void version;
+    queueMicrotask(() => {
+      if (protocol === record && !record.exited && record.state === 'ready') record.onCommand?.(command);
+    });
+  }
+}
+
+/** 向协议窗口推送真实播放状态；旧窗口没有这条通道，调用是空操作。 */
+export function sendWindowState(state) {
+  if (!protocolAlive()) return false;
+  const line = JSON.stringify({ version: PROTOCOL_VERSION, state });
+  if (Buffer.byteLength(line) > MAX_PROTOCOL_LINE) return false;
+  return protocol.child.stdin.write(`${line}\n`);
+}
+
 /** pid 文件指向的那个进程还在不在。**不看心跳**，见 `windowPidAlive` 的注释。 */
 export function windowPidAlive() {
   if (process.env.DSH_SEE_NO_WINDOW === '1') return false;
@@ -296,6 +342,7 @@ export function windowPidAlive() {
  * 见 `loop.js` 的 `windowVerdict()`。
  */
 export function windowAlive() {
+  if (protocol) return protocolAlive();
   if (!windowPidAlive()) return false;
   try {
     const hb = statSync(heartbeatPath());
@@ -317,7 +364,9 @@ export function windowAlive() {
  *
  * @returns {{ok:boolean, script?:string, python?:string, from?:string, reason?:string, already?:boolean}}
  */
-export async function openWindow({ force = false, log = () => {}, settleMs = 700, script: forced = null } = {}) {
+export async function openWindow({ force = false, log = () => {}, settleMs = 700, script: forced = null,
+  onCommand = null, signal = null,
+} = {}) {
   if (process.env.DSH_SEE_NO_WINDOW === '1') return { ok: false, reason: 'disabled' };
   if (!force && windowAlive()) return { ok: true, already: true };
 
@@ -349,10 +398,11 @@ export async function openWindow({ force = false, log = () => {}, settleMs = 700
     let errFd = 'ignore';
     try { errFd = openSync(logPath(), 'a'); } catch { /* 打不开日志就丢掉 */ }
 
+    const useProtocol = Boolean(onCommand || signal);
     let child;
     try {
       child = spawn(python, [script], {
-        stdio: ['ignore', errFd, errFd],
+        stdio: useProtocol ? ['pipe', 'pipe', errFd] : ['ignore', errFd, errFd],
         detached: true,
         windowsHide: true,
         env: {
@@ -368,7 +418,21 @@ export async function openWindow({ force = false, log = () => {}, settleMs = 700
       continue;
     }
 
-    const dead = await waitExit(child, settleMs);
+    let record = null;
+    if (useProtocol) {
+      record = { child, state: 'starting', reason: null, exited: false, onCommand };
+      protocol = record;
+      let pending = '';
+      child.stdout.on('data', (chunk) => {
+        pending += chunk.toString();
+        const lines = pending.split(/\r?\n/);
+        pending = lines.pop() ?? '';
+        for (const line of lines) acceptWindowProtocol(record, line);
+      });
+      child.once('exit', () => { record.exited = true; if (record.state === 'starting' || record.state === 'ready') record.state = 'closed'; });
+      if (signal) signal.addEventListener('abort', () => closeWindow(), { once: true });
+    }
+    const dead = record ? await Promise.race([waitExit(child, settleMs), new Promise((resolve) => { record.ready = resolve; })]) : await waitExit(child, settleMs);
     if (typeof errFd === 'number') { try { closeSync(errFd); } catch { /* 已关 */ } }
     if (dead) {
       // code=1 且是"立刻退出"：八成是缺包。探测一次，把包名带进错误信息。
@@ -382,7 +446,7 @@ export async function openWindow({ force = false, log = () => {}, settleMs = 700
 
     child.unref?.();
     try { writeFileSync(pidPath(), String(child.pid ?? ''), 'utf8'); } catch { /* 写不了只是会多开一次 */ }
-    return { ok: true, script, from, python };
+    return { ok: true, script, from, python, protocol: Boolean(record), state: record?.state ?? 'legacy' };
   }
 
   let reason = `没有能用的解释器（要带 tkinter）：${tried.join(' / ') || '一个候选都没有'}`;
@@ -431,6 +495,13 @@ function waitExit(child, ms) {
 
 /** 关窗（读 pid 杀掉；用户自己点 × 的话这里什么也不用做） */
 export function closeWindow() {
+  if (protocol && !protocol.exited) {
+    protocol.state = 'closed';
+    try { protocol.child.kill(); } catch { /* 已经退出 */ }
+    protocol = null;
+    try { unlinkSync(pidPath()); } catch { /* 没有 pid 文件 */ }
+    return;
+  }
   try {
     const pid = Number(readFileSync(pidPath(), 'utf8').trim());
     if (Number.isInteger(pid) && pid > 0) process.kill(pid);
