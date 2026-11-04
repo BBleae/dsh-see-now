@@ -27,6 +27,21 @@ function frame({ r = 30, g = 40, b = 70, stripe = false, offset = 0 } = {}) {
   return buf;
 }
 
+/** 不周期性的纹理，整屏平移 off 格；用来验证 radius=4 对快速运镜的吸收。 */
+function shiftedFrame(off) {
+  const buf = Buffer.alloc(W * H * 3);
+  for (let y = 0; y < H; y += 1) {
+    for (let x = 0; x < W; x += 1) {
+      const i = (y * W + x) * 3;
+      const xx = x + off;
+      buf[i] = (xx * 37 + y * 91) % 256;
+      buf[i + 1] = (xx * 73 + y * 53) % 256;
+      buf[i + 2] = (xx * 19 + y * 113) % 256;
+    }
+  }
+  return buf;
+}
+
 /** 把 rgb24 转成 cuts.js 内部使用的 HSV 网格 */
 function hsvOf(buf) {
   const scorer = createScorer({ width: W, height: H });
@@ -53,6 +68,15 @@ test('mcRatioScore：整屏平移一格应被邻域吸收', () => {
   assert.ok(searched < 40, `半径 1 的搜索应吸收平移，实际 ${searched}`);
 });
 
+test('mcRatioScore：8 格快速平移 radius=2 误报、radius=4 吸收', () => {
+  const a = hsvOf(shiftedFrame(0));
+  const b = hsvOf(shiftedFrame(8));
+  const r2 = mcRatioScore(a, b, { radius: 2 });
+  const r4 = mcRatioScore(a, b, { radius: 4 });
+  assert.ok(r2 > 100, `radius=2 应误报大片变化，实际 ${r2}`);
+  assert.ok(r4 < 20, `radius=4 应吸收 8 格平移，实际 ${r4}`);
+});
+
 test('createScorer：默认口径不变，切到 mc 后同一对帧分数不同', () => {
   const abs = createScorer({ width: W, height: H });
   const mc = createScorer({ width: W, height: H, scoreMode: 'mc' });
@@ -63,4 +87,13 @@ test('createScorer：默认口径不变，切到 mc 后同一对帧分数不同'
   const sMc = mc(b).score;
   assert.ok(sAbs > 0, 'abs 口径下平移仍有分数（这正是缺点）');
   assert.ok(sMc < sAbs, `mc 应该更安静：abs=${sAbs} mc=${sMc}`);
+});
+
+test('createScorer：默认口径也同时产出 mcScore，换镜头时 mc 覆盖高', () => {
+  const scorer = createScorer({ width: W, height: H });
+  const first = scorer(frame());
+  assert.equal(first.mcScore, null, '第一帧没有前帧，mcScore 应为 null');
+  const changed = scorer(frame({ r: 240, g: 240, b: 30 }));
+  assert.ok(changed.mcScore > 240, `整屏换色应接近满格，实际 ${changed.mcScore}`);
+  assert.ok(changed.score > 0, 'abs 口径也应保留');
 });

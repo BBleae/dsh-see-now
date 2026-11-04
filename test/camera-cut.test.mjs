@@ -84,6 +84,20 @@ test('运动中切机位：117 分、前后 73/54，不能被 2.5 倍卡掉', ()
   assert.ok(cuts[0].score >= 80, `这应是强切点，实际 ${cuts[0].score}`);
 });
 
+/** 暗底 + 一个小白块：abs 约 13.6，但 mc 只有 16，用来模拟“低覆盖高尖峰”的过渡帧。 */
+function flashFrame(size = 20) {
+  const buf = Buffer.alloc(W * H * 3, 20);
+  for (let y = 10; y < 10 + size; y += 1) {
+    for (let x = 20; x < 20 + size; x += 1) {
+      const i = (y * W + x) * 3;
+      buf[i] = 255;
+      buf[i + 1] = 255;
+      buf[i + 2] = 255;
+    }
+  }
+  return buf;
+}
+
 /** 低对比块状纹理：换纹理时 abs 低（约 22），但 mc 覆盖高。 */
 function blockTexture(seed, block = 16) {
   const buf = Buffer.alloc(W * H * 3);
@@ -138,6 +152,53 @@ test('mc 切点：低 abs（约 22）但换纹理，不能只靠 80 分台阶', 
   assert.equal(cuts.length, 1, `应只留一个切点，实际 ${cuts.length}`);
   assert.ok(Math.abs(cuts[0].t - 2) < 0.01, `切点应在 2.0s，实际 ${cuts[0].t}s`);
   assert.ok(cuts[0].score < 80, `这应是低 abs 切点，实际 ${cuts[0].score}`);
+});
+
+test('cutMcAbs=0 时 mc 路径完全关闭：低 abs 换纹理不会再切', () => {
+  const p = createPipeline({
+    width: W, height: H, fps: 12, queueDepth: 0,
+    cutSpikeAbs: 999, cutJumpAbs: 0, cutIsolatedAbs: 0, cutMcAbs: 0,
+  });
+  let f = 0;
+  const a = blockTexture(1);
+  const b = blockTexture(2);
+  for (let i = 0; i < 24; i += 1) p.push({ t: f++ / 12, buf: a });
+  for (let i = 0; i < 24; i += 1) p.push({ t: f++ / 12, buf: b });
+  p.finish();
+  assert.equal(p.log.filter((x) => x.via === 'cut').length, 0);
+});
+
+test('尖峰 mc 门槛：低覆盖的过渡帧不能先切，等真正的换镜头', () => {
+  const p = createPipeline({ width: W, height: H, fps: 12, queueDepth: 0 });
+  let f = 0;
+  const dark = Buffer.alloc(W * H * 3, 20);
+  const a = blockTexture(1);
+  for (let i = 0; i < 12; i += 1) p.push({ t: f++ / 12, buf: dark });
+  // 两帧小面积高对比：abs 约 13.6、mc 约 16，尖峰成立但覆盖不够
+  for (let i = 0; i < 2; i += 1) p.push({ t: f++ / 12, buf: flashFrame() });
+  for (let i = 0; i < 36; i += 1) p.push({ t: f++ / 12, buf: a });
+  p.finish();
+
+  const cuts = p.log.filter((x) => x.via === 'cut');
+  assert.equal(cuts.length, 1, `过渡帧不该单独切，实际 ${cuts.length} 刀`);
+  assert.ok(cuts[0].t > 1.1, `应等到换纹理后再切，实际 ${cuts[0].t}s`);
+});
+
+test('尖峰 mc 门槛可以关掉：同一序列恢复旧行为，先切过渡帧', () => {
+  const p = createPipeline({
+    width: W, height: H, fps: 12, queueDepth: 0, cutSpikeMcAbs: 0,
+  });
+  let f = 0;
+  const dark = Buffer.alloc(W * H * 3, 20);
+  const a = blockTexture(1);
+  for (let i = 0; i < 12; i += 1) p.push({ t: f++ / 12, buf: dark });
+  for (let i = 0; i < 2; i += 1) p.push({ t: f++ / 12, buf: flashFrame() });
+  for (let i = 0; i < 36; i += 1) p.push({ t: f++ / 12, buf: a });
+  p.finish();
+
+  const cuts = p.log.filter((x) => x.via === 'cut');
+  assert.equal(cuts.length, 1, `应只留第一个尖峰，实际 ${cuts.length} 刀`);
+  assert.ok(cuts[0].t < 1.2, `关掉门槛后应在过渡帧切，实际 ${cuts[0].t}s`);
 });
 
 test('mc 不把快速平移当切点：radius=4 吸收整屏位移', () => {

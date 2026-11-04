@@ -122,6 +122,13 @@ test('三档节奏：越省门槛越高、叫醒越稀，逐帧用的是最密�
   assert.equal(DEFAULT_PACE, 'normal');
   // 逐帧模式用的是 dense 的门槛（7），且默认常量已经退到 12
   assert.equal(createPipeline({}).constants.cutAbs, PACES[DEFAULT_PACE].cutAbs);
+  // mc 切点默认开；calm 刻意关掉弱切点/mc，避免省电档反而变吵
+  const normal = createPipeline({}).constants;
+  assert.equal(normal.cutMcAbs, 60);
+  assert.equal(normal.cutMcRadius, 4);
+  assert.equal(normal.cutSpikeMcAbs, 20);
+  assert.equal(PACES.calm.pipeline.cutMcAbs, 0);
+  assert.equal(PACES.calm.pipeline.cutIsolatedAbs, 0);
 });
 
 test('game-economic 档：门槛比 calm 还高，并且靠 pipeline 把出帧密度一起压下来', () => {
@@ -135,9 +142,14 @@ test('game-economic 档：门槛比 calm 还高，并且靠 pipeline 把出帧�
   assert.ok(p.integralSeconds > 3, '积分阈值必须抬高');
   assert.ok(p.maxFrames < 40, '一张图的帧数要压下来，否则 40 格糊到看不清');
   assert.ok(p.cutSpike < 2.5 && p.cutSpikeAbs > 0, '动作画面凑不出 2.5 倍，必须降倍率 + 补绝对地板');
+  // 高速运动里 mc / 弱切点 / 台阶都会把运动当切点，必须全关
+  assert.equal(p.cutMcAbs, 0);
+  assert.equal(p.cutIsolatedAbs, 0);
+  assert.equal(p.cutJumpAbs, 0);
   // 覆盖要真的落进管线
   const c = createPipeline(p).constants;
   assert.equal(c.integralSeconds, p.integralSeconds);
   assert.equal(c.maxFrames, p.maxFrames);
   assert.equal(c.cutSpikeAbs, p.cutSpikeAbs);
+  assert.equal(c.cutMcAbs, 0);
 });
