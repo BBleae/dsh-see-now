@@ -160,6 +160,11 @@ export const DEFAULTS = Object.freeze({
   cutFutureLowStableMax: 700,
   /** 低/中分候选的 keep 门槛更宽：只有一部分旧背景回来就可能是前景/移动。 */
   cutFutureLowKeep: 210,
+  /** 稳定背景特别少的候选（大量前景占住画面）门槛再宽一点，避免 198/210 的薄余量。 */
+  cutFutureLowStableTight: 300,
+  cutFutureLowKeepTight: 220,
+  /** bg 很高但稳定背景极少时，也可能是整屏前景；仍然给一次未来帧确认。 */
+  cutFutureLowBgHigh: 220,
   /** 低分候选也要有参考背景模型才能做上面这次确认。 */
   cutFutureBuildMinScore: 12,
 
@@ -694,8 +699,10 @@ export function createPipeline(opts = {}) {
       || !entry.futureModel
       || entry.bg === null
       || entry.bg <= 0
-      || entry.bg >= o.cutFutureLowBgMax
       || (entry.bgStable ?? 0) > o.cutFutureLowStableMax) return false;
+    const stable = entry.bgStable ?? 0;
+    const highBg = entry.bg >= o.cutFutureLowBgHigh && stable <= o.cutFutureLowStableTight;
+    if (entry.bg >= o.cutFutureLowBgMax && !highBg) return false;
     const guardY = entry.guardY ?? entry.activeY ?? 0;
     if (!(guardY >= 0.25)) return false;
     // 外圈也被改变：可能是整屏前景，也可能是真切；只对这种情况做未来确认。
@@ -769,7 +776,10 @@ export function createPipeline(opts = {}) {
       const rk = entry.prevHsv
         ? bgKeep(entry.futureModel, entry.prevHsv, entry.hsv)
         : null;
-      const keepLimit = lowFuture ? o.cutFutureLowKeep : o.cutFutureKeep;
+      const keepLimit = lowFuture
+        ? ((entry.bgStable ?? 0) <= o.cutFutureLowStableTight
+          ? o.cutFutureLowKeepTight : o.cutFutureLowKeep)
+        : o.cutFutureKeep;
       const gone = (r) => r && r.score !== null
         && r.changed >= o.cutFutureMinChanged
         && r.score < keepLimit;
