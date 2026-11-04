@@ -24,19 +24,44 @@ import { pathToFileURL } from 'node:url';
 
 import { emitSpeech, emitSpoken, lastSpeech, onSpeech, speechSubscribers } from './speech.js';
 
-/**
- * 已挂载的适配器：specifier → { detach, subscriptions }。
- *
- * subscriptions 是这个适配器通过 `onSpeech` 建立的订阅。适配器自己返回 detach 也好、
- * 没返回也好，卸载时都必须清掉；否则 `speechSubscribers()` 会一直 > 0，
- * 我们会一直等一个永远不会来的 `spoken`。
- *
- * @type {Map<string, {detach: Function|null, subscriptions: Set<Function>}>}
- */
-const attached = new Map();
+/** 同一模块按 owner 隔离；未传 owner 时保留旧的全局复用方式。 */
+const adapters = new Set();
+const configuredRequests = new Map();
+const DETACH_TIMEOUT_MS = 1000;
+let lastError = null;
 
-/** 正在挂载中的 specifier → Promise，避免并发重复 attach。 */
-const pending = new Map();
+function adapterOwner({ owner, scope } = {}) {
+  return owner === undefined ? scope : owner;
+}
+
+/** 先退订和中止，再有界等待旧适配器返回的 detach。迟到的 attach 也走这里。 */
+function closeAdapter(record, cancel = true) {
+  if (record.closed && !record.detach) return record.closing ?? Promise.resolve();
+  record.closed = true;
+  if (cancel) record.cancel();
+  record.removeAbort?.();
+  for (const off of record.subscriptions) off();
+  record.subscriptions.clear();
+  record.controller.abort();
+  const detach = record.detach;
+  record.detach = null;
+  if (!detach) {
+    adapters.delete(record);
+    return Promise.resolve();
+  }
+  let timer;
+  const work = Promise.resolve().then(detach).catch((e) => {
+    try { record.log(`[voice] detach failed: ${record.name}: ${String(e?.message ?? e)}`); } catch { /* 日志不影响清理 */ }
+  });
+  record.closing = Promise.race([
+    work,
+    new Promise((resolve) => { timer = setTimeout(resolve, DETACH_TIMEOUT_MS); }),
+  ]).finally(() => {
+    clearTimeout(timer);
+    adapters.delete(record);
+  });
+  return record.closing;
+}
 
 /**
  * 读 `~/.dsh/voice.json` 里的 `adapter`，或者环境变量 `DSH_VOICE_ADAPTER`。
@@ -83,20 +108,28 @@ function toImportSpecifier(spec) {
   return s;
 }
 
-/** 在 attach 期间给 onSpeech 加一层记录，失败时才能精确回滚。 */
-function trackedApi(api, subscriptions) {
+/** 挂载失败或已卸载后，迟到的订阅和回执也不会重新接入总线。 */
+function trackedApi(record) {
+  const handlers = new WeakMap();
   return {
-    ...api,
+    signal: record.controller.signal,
+    speechSubscribers,
+    lastSpeech,
+    emitSpeech: (event) => record.closed ? 0 : emitSpeech(event),
+    emitSpoken: (event) => record.closed ? 0 : emitSpoken(event),
     onSpeech(handler, options) {
-      const off = onSpeech(handler, options);
+      if (record.closed) return () => false;
+      if (typeof handler !== 'function') throw new TypeError('onSpeech(handler) needs a function');
+      if (!handlers.has(handler)) handlers.set(handler, (event) => { if (!record.closed) handler(event); });
+      const off = onSpeech(handlers.get(handler), options);
       let active = true;
       const trackedOff = () => {
         if (!active) return false;
         active = false;
-        subscriptions.delete(trackedOff);
+        record.subscriptions.delete(trackedOff);
         return off();
       };
-      subscriptions.add(trackedOff);
+      record.subscriptions.add(trackedOff);
       return trackedOff;
     },
   };
@@ -109,81 +142,93 @@ function trackedApi(api, subscriptions) {
  * 现场只能靠猜（"是不是没重启？"），而真实原因往往是 import 路径写错了、
  * 或者适配器 `attach` 里探测引擎时抛了。
  */
-let lastError = null;
-
 export function lastVoiceError() {
   return lastError;
 }
 
 /**
- * 挂载一个外部适配器。**核心只做 dynamic import，不内置任何引擎**。
+ * 挂载外部适配器；owner（兼容别名 scope）隔离插件实例，signal 只中止本实例。
+ * options 透传给适配器 attach(api, options)。
+ * 旧的 attach(api) → detach 契约不变，api.signal 可供适配器提前取消播放。
  *
  * @param {string} spec 模块名或文件路径
- * @param {{ log?: (msg:string)=>void }} [o]
+ * @param {{log?: (msg:string)=>void, owner?: unknown, scope?: unknown, signal?: AbortSignal, options?: object|null}} [options]
  * @returns {Promise<{ok:boolean, reason?:string, cached?:boolean, name?:string}>}
  */
-export async function loadVoiceAdapter(spec, { log = () => {}, options = null } = {}) {
+export async function loadVoiceAdapter(spec, options = {}) {
+  const { log = () => {}, signal, options: voiceOptions = null } = options;
   const raw = String(spec ?? '').trim();
   if (!raw) { lastError = 'empty-specifier'; return { ok: false, reason: 'empty-specifier' }; }
-  if (attached.has(raw)) return { ok: true, cached: true, name: raw };
-  if (pending.has(raw)) return pending.get(raw);
+  if (signal?.aborted) return { ok: false, reason: 'aborted' };
+  const owner = adapterOwner(options);
+  let record = [...adapters].find((entry) => !entry.closed && entry.name === raw && entry.owner === owner);
+  if (record) {
+    bindAbort(record, signal);
+    return record.ready ? { ok: true, cached: true, name: raw } : record.result;
+  }
 
+  record = { name: raw, owner, log, subscriptions: new Set(), controller: new AbortController(), detach: null, closed: false };
+  const cancelled = new Promise((resolve) => { record.cancel = () => resolve({ ok: false, reason: 'aborted' }); });
+  adapters.add(record);
+  bindAbort(record, signal);
   const work = (async () => {
     let mod = null;
     try {
       mod = await import(toImportSpecifier(raw));
     } catch (e) {
       const reason = `import failed: ${String(e?.message ?? e).slice(0, 200)}`;
-      log(`[voice] ${raw}: ${reason}`);
+      try { log(`[voice] ${raw}: ${reason}`); } catch { /* ignore */ }
       lastError = reason; return { ok: false, reason };
     }
-
-    const attach = mod?.attach ?? mod?.default;
+    const attach = mod?.attach ?? mod?.default?.attach ?? mod?.default;
     if (typeof attach !== 'function') {
-      const reason = 'module does not export attach(api) (or a default function)';
-      log(`[voice] ${raw}: ${reason}`);
+      const reason = 'no attach function exported';
+      try { log(`[voice] ${raw}: ${reason}`); } catch { /* ignore */ }
       lastError = reason; return { ok: false, reason };
     }
 
-    const subscriptions = new Set();
     try {
-      const detach = await attach(trackedApi({
-        onSpeech, speechSubscribers, emitSpeech, emitSpoken, lastSpeech,
-      }, subscriptions), options ?? {});
-      attached.set(raw, {
-        detach: typeof detach === 'function' ? detach : null,
-        subscriptions,
-      });
-      // 模块没有自报名字时用路径末段 —— `attach.name` 永远是 "attach"，没有信息量
+      const detach = await attach(trackedApi(record), voiceOptions ?? {});
+      record.detach = typeof detach === 'function' ? detach : null;
+      if (record.closed) {
+        await closeAdapter(record);
+        return { ok: false, reason: 'aborted' };
+      }
+      record.ready = true;
       const name = String(mod?.adapterName ?? raw).split(/[\\/]/).filter(Boolean).pop() || raw;
-      log(`[voice] adapter attached: ${name}`);
-      lastError = null;                       // 成功了就别再报旧错
+      try { log(`[voice] adapter attached: ${name}`); } catch { /* ignore */ }
+      lastError = null;
       return { ok: true, name };
     } catch (e) {
-      // attach 可能已经订阅后才抛。只返回失败还不够：那些订阅还挂在总线上，
-      // 这里精确退订，不碰其他订阅者。
-      for (const off of [...subscriptions]) {
-        try { off(); } catch { /* 退订本身失败也要继续清 */ }
-      }
+      const cancelled = record.closed;
+      await closeAdapter(record, false);
+      if (cancelled) return { ok: false, reason: 'aborted' };
       const reason = `attach failed: ${String(e?.message ?? e).slice(0, 200)}`;
-      log(`[voice] ${raw}: ${reason}`);
-      lastError = reason; return { ok: false, reason };
+      try { log(`[voice] ${raw}: ${reason}`); } catch { /* ignore */ }
+      lastError = reason;
+      return { ok: false, reason };
     }
   })();
-
-  pending.set(raw, work);
-  try {
-    return await work;
-  } finally {
-    pending.delete(raw);
-  }
+  record.result = Promise.race([work, cancelled]);
+  return record.result;
 }
 
-/** 按配置挂载（没配就是 no-op）。**这是核心唯一碰声音的地方**。 */
-export async function attachConfiguredVoice({ env = process.env, log = () => {} } = {}) {
+/** 缓存命中时也接上当前生命周期的 signal。 */
+function bindAbort(record, signal) {
+  if (!signal) return;
+  record.removeAbort?.();
+  const onAbort = () => { void closeAdapter(record); };
+  if (signal.aborted) { onAbort(); return; }
+  signal.addEventListener('abort', onAbort, { once: true });
+  record.removeAbort = () => signal.removeEventListener('abort', onAbort);
+}
+
+/** 按配置挂载，透传 owner/scope 和 signal；没配就是 no-op。 */
+export async function attachConfiguredVoice({ env = process.env, ...options } = {}) {
   const spec = configuredVoiceAdapter(env);
   if (!spec) return { ok: false, reason: 'not-configured' };
-  return loadVoiceAdapter(spec, { log, options: configuredVoiceOptions(env) });
+  const voiceOptions = options.options ?? configuredVoiceOptions(env);
+  return loadVoiceAdapter(spec, { ...options, options: voiceOptions });
 }
 
 /**
@@ -211,48 +256,48 @@ export function voiceSignature(env = process.env) {
   return `${spec}|${stamp}|${opts}`;
 }
 
-/** 上一次成功挂载时的指纹。 */
-let attachedSig = null;
+/** 每次调用热读配置；换配置或删配置只卸本 owner，迟到请求不覆盖新配置。 */
+export async function ensureConfiguredVoice({ env = process.env, ...options } = {}) {
+  const owner = adapterOwner(options);
+  if (options.signal?.aborted) return { ok: false, reason: 'aborted' };
+  const spec = configuredVoiceAdapter(env);
+  const signature = voiceSignature(env);
+  const voiceOptions = options.options ?? configuredVoiceOptions(env);
+  const pending = configuredRequests.get(owner);
+  if (pending?.signature === signature) return pending.work;
+  const current = [...adapters].find((entry) => !entry.closed && entry.owner === owner && entry.name === spec && entry.signature === signature);
+  if (current && !pending) return loadVoiceAdapter(spec, { ...options, owner, options: voiceOptions });
 
-/**
- * **每次调用都过一遍**的挂载检查。
- *
- * - 没配 → 什么都不做（声音是可选能力）；
- * - 已挂且指纹没变 → 一次 stat 的代价，立刻返回；
- * - 配置变了（换了适配器，或者改了 `tts.json`）→ 卸掉重挂。
- *
- * 放在工具入口而不是启动时，是为了"改完配置下一句就生效"。
- */
-export async function ensureConfiguredVoice({ env = process.env, log = () => {} } = {}) {
-  const sig = voiceSignature(env);
-  if (!sig) return { ok: false, reason: 'not-configured' };
-  if (attachedSig === sig && attached.size > 0) return { ok: true, cached: true };
-  if (attached.size > 0) {
-    log('[voice] 配置变了，重挂适配器');
-    await detachAdapters();
-  }
-  const r = await attachConfiguredVoice({ env, log });
-  if (r.ok) attachedSig = sig;
-  return r;
+  const request = { signature };
+  configuredRequests.set(owner, request);
+  request.work = (async () => {
+    await Promise.all([...adapters].filter((entry) => entry.owner === owner).map((entry) => closeAdapter(entry)));
+    if (configuredRequests.get(owner) !== request || options.signal?.aborted) return { ok: false, reason: 'aborted' };
+    if (!spec) return { ok: false, reason: 'not-configured' };
+    const loading = loadVoiceAdapter(spec, { ...options, owner, options: voiceOptions });
+    const record = [...adapters].find((entry) => !entry.closed && entry.owner === owner && entry.name === spec);
+    if (record) record.signature = signature;
+    return loading;
+  })();
+  try { return await request.work; }
+  finally { if (configuredRequests.get(owner) === request) configuredRequests.delete(owner); }
 }
 
-/** 已挂载的适配器列表（排查用） */
+/** 已挂载的适配器列表（排查用）。 */
 export function attachedAdapters() {
-  return [...attached.keys()];
+  return [...new Set([...adapters].filter((entry) => entry.ready && !entry.closed).map((entry) => entry.name))];
 }
 
-/**
- * 全部卸载（测试/热重载用）。
- *
- * **只卸载适配器自己的订阅**，不调用 `__resetSpeech()`：其他订阅者可能还活着，
- * 一次热重载不该让它们一起消失。
- */
-export async function detachAdapters() {
-  for (const [, entry] of attached) {
-    try { await entry.detach?.(); } catch { /* 卸不掉也继续 */ }
-    for (const off of [...entry.subscriptions]) {
-      try { off(); } catch { /* 已经退订 */ }
+/** 先退订匹配实例，再并行有界等待 detach；不传 owner/scope 时兼容旧的全部卸载。 */
+export async function detachAdapters(options = {}) {
+  const scoped = Object.hasOwn(options, 'owner') || Object.hasOwn(options, 'scope');
+  const owner = adapterOwner(options);
+  const targets = [...adapters].filter((entry) => !scoped || entry.owner === owner);
+  for (const [key, req] of [...configuredRequests]) {
+    if (!scoped || key === owner) {
+      configuredRequests.delete(key);
+      req.work?.catch(() => {});
     }
   }
-  attached.clear();
+  return Promise.all(targets.map((entry) => closeAdapter(entry)));
 }
