@@ -118,6 +118,20 @@ export const DEFAULTS = Object.freeze({
   cutIsolatedFill: 0.2,
 
   /**
+   * 背景模型 / 前景运动抑制。
+   * 稳定背景格被改掉的比例（bgStats 的 score，0–255）低于 `cutBgAbs`，
+   * 且变化区域没有盖满有效画面高度（`mcSpanY / activeY < cutBgMaxSpanY`，上下黑边不计）时，
+   * 视为手/勺子/遮挡物这类前景运动，不切。只在分数低于 `cutBgMaxScore`
+   * 且不是孤立弱切点时启用；真正切镜头会把稳定背景整片换掉（几百），
+   * 前景运动只换一部分（几十）。`cutBgMinCells` 太少时不可信，直接不启用。
+   */
+  cutBgAbs: 100,
+  cutBgMaxScore: 60,
+  cutBgMinCells: 128,
+  cutBgMaxSpanY: 0.85,
+  cutBgWindow: 6,
+
+  /**
    * 运动中的切机位。
    *
    * 原 spike 要求 `s > 2.5 × max(前,后)`；机位切换前后都有人在动/镜头在摇时，
@@ -256,7 +270,7 @@ export function createPipeline(opts = {}) {
 
   const scorer = createScorer({
     width, height, scoreMode: o.scoreMode, mcTau: o.mcTau, mcRadius: o.mcRadius,
-    gateMcRadius: o.cutMcRadius,
+    gateMcRadius: o.cutMcRadius, bgWindow: o.cutBgWindow,
   });
   const tiers = createTiers({
     fps, dtFrames: o.dtFrames, smoothFrames: o.smoothFrames,
@@ -589,7 +603,23 @@ export function createPipeline(opts = {}) {
       && s >= o.cutIsolatedAbs
       && s < o.cutAbs
       && s > o.cutIsolatedSpike * base;
+    // 前景运动不是切镜头：稳定背景大部分还在，且变化区域没盖满高度。
+    // 只看低/中分事件；孤立弱切点另有区域门槛，不在这里误伤。
+    const bg = entry.bg;
+    const fgMotion = o.cutBgAbs > 0
+      && s < o.cutBgMaxScore
+      && !isolated
+      && (o.cutBgMinCells <= 0 || (entry.bgStable ?? 0) >= o.cutBgMinCells)
+      && bg !== null
+      && bg > 0
+      && bg < o.cutBgAbs
+      && (entry.activeY ?? 0) >= 0.25
+      && (o.cutBgMaxSpanY <= 0
+        || (entry.activeY > 0
+          ? (entry.mcSpanY ?? 1) / entry.activeY
+          : (entry.mcSpanY ?? 1)) < o.cutBgMaxSpanY);
     if (entry.t - lastCut >= o.cutMinGap
+      && !fgMotion
       && (mcCut || (s >= o.cutAbs && (spike || step)) || isolated)) {
       lastCut = entry.t;
       acc = 0;                      // 切点之后重新攒（那一帧的分属于跨刀，不算运动）
@@ -622,7 +652,7 @@ export function createPipeline(opts = {}) {
       // `wall` 是这一帧被处理时的墙上时间（epoch ms）。台词（ASR）只有时间码没有帧号，
       // 对齐只能靠同一个时钟 —— `t` 是"第几秒"，掉帧就漂，不能拿来对字幕。
       const entry = {
-        t, buf, score: s, mc: r.mcScore, mcBox: r.mcBox, mcFill: r.mcFill, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
+        t, buf, score: s, mc: r.mcScore, mcBox: r.mcBox, mcFill: r.mcFill, mcSpanY: r.mcSpanY, activeY: r.activeY, bg: r.bgScore, bgStable: r.bgStable, bgChanged: r.bgChanged, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
       };
       lastSeen = entry;
       lastScore = s;

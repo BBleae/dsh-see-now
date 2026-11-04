@@ -38,6 +38,28 @@ function objectAt(pos, size = 10) {
   return buf;
 }
 
+/** 同背景 + 一个可移动的大块；用于前景运动/遮挡。 */
+function blockAt(x, y, w, h) {
+  const buf = Buffer.alloc(W * H * 3);
+  for (let yy = 0; yy < H; yy += 1) {
+    for (let xx = 0; xx < W; xx += 1) {
+      const i = (yy * W + xx) * 3;
+      buf[i] = 30;
+      buf[i + 1] = 60;
+      buf[i + 2] = 110;
+    }
+  }
+  for (let yy = y; yy < y + h; yy += 1) {
+    for (let xx = x; xx < x + w; xx += 1) {
+      const i = (yy * W + xx) * 3;
+      buf[i] = 240;
+      buf[i + 1] = 220;
+      buf[i + 2] = 30;
+    }
+  }
+  return buf;
+}
+
 /** 整屏条纹，每帧平移 off；用于“运镜中切机位”。 */
 function stripes(kind, off) {
   const buf = Buffer.alloc(W * H * 3);
@@ -81,6 +103,25 @@ test('弱切点 mc 地板：同背景 UI 条（abs 10 / mc 5）不能收', () =>
   for (let i = 0; i < 24; i += 1) p.push({ t: f++ / 12, buf: b });
   p.finish();
   assert.equal(p.log.filter((x) => x.via === 'cut').length, 0, '局部 UI 变化不应算换镜头');
+});
+
+test('前景运动（手/勺子/遮挡）不算切镜头：稳定背景还在，变化区域没盖满高度', () => {
+  const feed = (opts) => {
+    const p = createPipeline({ width: W, height: H, fps: 12, queueDepth: 0, ...opts });
+    let f = 0;
+    for (let i = 0; i < 48; i += 1) {
+      p.push({ t: f++ / 12, buf: blockAt(10 + (i % 8) * 5, 6, 30, 16) });
+    }
+    p.finish();
+    return p.log.filter((x) => x.via === 'cut');
+  };
+
+  const guarded = feed({});
+  assert.equal(guarded.length, 0, `前景运动不应切，实际 ${guarded.length} 刀`);
+
+  // 关掉背景模型后同一序列会误切，证明测的是新守卫，而不是序列本身没变化。
+  const raw = feed({ cutBgAbs: 0 });
+  assert.ok(raw.length > 0, '关掉背景模型后应能复现旧误切');
 });
 
 test('运动中切机位：117 分、前后 73/54，不能被 2.5 倍卡掉', () => {

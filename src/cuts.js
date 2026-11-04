@@ -125,6 +125,8 @@ export function mcStats(prev, cur, { tau = 15, radius = 2 } = {}) {
     count: changed,
     bbox: ((w * h) / n) * 255,
     fill: changed === 0 ? 0 : changed / (w * h),
+    spanX: w / SCAN_W,
+    spanY: h / SCAN_H,
     box: changed === 0 ? null : { x: minX, y: minY, w, h },
   };
 }
@@ -133,11 +135,74 @@ export function mcRatioScore(prev, cur, opts = {}) {
   return mcStats(prev, cur, opts).score;
 }
 
+/**
+ * 背景模型：在最近 `history.length` 帧里找**一直没怎么动**的格子，
+ * 再看当前帧把这些稳定背景格改掉了多少。
+ *
+ * 前景运动（手、勺子、遮挡物）只盖住一部分背景，稳定背景格大部分还在；
+ * 真正切镜头会把旧背景整片换掉。返回值里的 `score` 是稳定背景格的变化占比（0–255），
+ * `stable` 少的时候不要用它下结论。
+ */
+export function bgStats(history, cur, { stableRange = 24, tau = 15 } = {}) {
+  const n = SCAN_W * SCAN_H;
+  const m = history.length;
+  if (m === 0) return { score: null, stable: 0, changed: 0, stablePct: 0 };
+  const vals = new Float32Array(m);
+  let stable = 0;
+  let changed = 0;
+  for (let c = 0; c < n; c += 1) {
+    const p = c * 3;
+    let range = 0;
+    const med = [0, 0, 0];
+    for (let ch = 0; ch < 3; ch += 1) {
+      for (let j = 0; j < m; j += 1) vals[j] = history[j][p + ch];
+      vals.sort();
+      med[ch] = vals[m >> 1];
+      const r = vals[m - 1] - vals[0];
+      if (r > range) range = r;
+    }
+    if (range > stableRange) continue;
+    stable += 1;
+    const dh = Math.abs(cur[p] - med[0]);
+    const hd = Math.min(dh, 255 - dh);
+    const w = Math.min(cur[p + 1], med[1]) / 255;
+    const d = (hd * w + Math.abs(cur[p + 1] - med[1]) + Math.abs(cur[p + 2] - med[2])) / 3;
+    if (d > tau) changed += 1;
+  }
+  return {
+    score: stable === 0 ? null : (changed / stable) * 255,
+    stable,
+    changed,
+    stablePct: (stable / n) * 255,
+  };
+}
+
+/** 画面有效高度占比：去掉上下黑边（宽银幕 letterbox），全黑帧返回 0。 */
+export function contentHeightRatio(hsv) {
+  const darkRow = (y) => {
+    let maxV = 0;
+    let sum = 0;
+    for (let x = 0; x < SCAN_W; x += 1) {
+      const v = hsv[(y * SCAN_W + x) * 3 + 2];
+      if (v > maxV) maxV = v;
+      sum += v;
+    }
+    return maxV < 24 && sum / SCAN_W < 12;
+  };
+  let top = 0;
+  let bottom = 0;
+  while (top < SCAN_H && darkRow(top)) top += 1;
+  while (top + bottom < SCAN_H && darkRow(SCAN_H - 1 - bottom)) bottom += 1;
+  return (SCAN_H - top - bottom) / SCAN_H;
+}
+
 export function createScorer({
   width, height, scoreMode = 'abs', mcTau = 15, mcRadius = 2, gateMcRadius = mcRadius,
+  bgWindow = 6, bgStableRange = 24, bgTau = 15,
 }) {
   const n = SCAN_W * SCAN_H;
   const rgb = new Float32Array(n * 3);
+  const bgHistory = [];
   let prev = null;
   let cur = new Float32Array(n * 3);
 
@@ -148,11 +213,23 @@ export function createScorer({
     let mcScore = null;
     let mcBox = null;
     let mcFill = null;
+    let mcSpanY = 0;
+    let bgScore = null;
+    let bgStable = 0;
+    let bgChanged = 0;
+    const activeY = contentHeightRatio(cur);
+    if (bgWindow > 0 && bgHistory.length >= bgWindow) {
+      const bg = bgStats(bgHistory, cur, { stableRange: bgStableRange, tau: bgTau });
+      bgScore = bg.score;
+      bgStable = bg.stable;
+      bgChanged = bg.changed;
+    }
     if (prev) {
       const mc = mcStats(prev, cur, { tau: mcTau, radius: gateMcRadius });
       mcScore = mc.score;
       mcBox = mc.bbox;
       mcFill = mc.fill;
+      mcSpanY = mc.spanY;
       if (scoreMode === 'mc') {
         s = gateMcRadius === mcRadius
           ? mcScore
@@ -164,6 +241,12 @@ export function createScorer({
     const tmp = prev ?? new Float32Array(n * 3);
     tmp.set(cur);
     prev = tmp;
-    return { score: s, mcScore, mcBox, mcFill, hsv: cur };
+    if (bgWindow > 0) {
+      const snapshot = new Float32Array(n * 3);
+      snapshot.set(cur);
+      bgHistory.push(snapshot);
+      if (bgHistory.length > bgWindow) bgHistory.shift();
+    }
+    return { score: s, mcScore, mcBox, mcFill, mcSpanY, activeY, bgScore, bgStable, bgChanged, hsv: cur };
   };
 }

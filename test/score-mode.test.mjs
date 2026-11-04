@@ -6,7 +6,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createScorer, mcRatioScore, mcStats, SCAN_W, SCAN_H } from '../src/cuts.js';
+import {
+  bgStats, contentHeightRatio, createScorer, mcRatioScore, mcStats, SCAN_W, SCAN_H,
+} from '../src/cuts.js';
 
 const W = SCAN_W;
 const H = SCAN_H;
@@ -37,6 +39,21 @@ function shiftedFrame(off) {
       buf[i] = (xx * 37 + y * 91) % 256;
       buf[i + 1] = (xx * 73 + y * 53) % 256;
       buf[i + 2] = (xx * 19 + y * 113) % 256;
+    }
+  }
+  return buf;
+}
+
+/** 上下各 8 行黑边的宽银幕帧。 */
+function letterboxFrame({ r = 30, g = 40, b = 70 } = {}) {
+  const buf = Buffer.alloc(W * H * 3);
+  for (let y = 0; y < H; y += 1) {
+    for (let x = 0; x < W; x += 1) {
+      const i = (y * W + x) * 3;
+      const black = y < 8 || y >= H - 8;
+      buf[i] = black ? 0 : r;
+      buf[i + 1] = black ? 0 : g;
+      buf[i + 2] = black ? 0 : b;
     }
   }
   return buf;
@@ -88,6 +105,26 @@ test('mcStats：整屏换色返回覆盖率、包围盒与填充率；同一帧�
   assert.equal(same.score, 0);
   assert.equal(same.bbox, 0);
   assert.equal(same.fill, 0);
+});
+
+test('bgStats：稳定背景整片换色才 255，同一帧为 0', () => {
+  const a = hsvOf(frame({ r: 30, g: 40, b: 70 }));
+  const hist = [a, a, a, a, a, a];
+  const same = bgStats(hist, a);
+  assert.equal(same.stable, N);
+  assert.equal(same.score, 0);
+
+  const b = hsvOf(frame({ r: 240, g: 240, b: 30 }));
+  const all = bgStats(hist, b);
+  assert.equal(all.stable, N);
+  assert.equal(all.score, 255);
+});
+
+test('contentHeightRatio：宽银幕只算有效画面高度，全黑为 0', () => {
+  assert.equal(contentHeightRatio(hsvOf(frame())), 1);
+  assert.ok(Math.abs(contentHeightRatio(hsvOf(letterboxFrame())) - 20 / H) < 1e-6);
+  const black = Buffer.alloc(W * H * 3);
+  assert.equal(contentHeightRatio(hsvOf(black)), 0);
 });
 
 test('createScorer：默认口径不变，切到 mc 后同一对帧分数不同', () => {
