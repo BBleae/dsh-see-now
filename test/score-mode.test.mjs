@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  bgKeep, bgStats, contentHeightRatio, createScorer, mcRatioScore, mcStats, SCAN_W, SCAN_H,
+  bgBorderChanged, bgKeep, bgStats, contentHeightRatio, createScorer, mcRatioScore, mcStats, SCAN_W, SCAN_H,
 } from '../src/cuts.js';
 
 const W = SCAN_W;
@@ -152,6 +152,24 @@ test('bgKeep：未来帧回到旧背景为 0，留在新画面为 255', () => {
   assert.equal(returned.score, 0);
   const stayed = bgKeep(model, patch, patch);
   assert.equal(stayed.score, 255);
+});
+
+test('bgBorderChanged：中间大块前景外圈不变为 0，整屏换画面为 255', () => {
+  const base = frame();
+  const baseHsv = hsvOf(base);
+  const model = bgStats([baseHsv, baseHsv, baseHsv, baseHsv, baseHsv, baseHsv], baseHsv, { withModel: true }).model;
+  const block = frame();
+  for (let y = 4; y < H - 4; y += 1) {
+    for (let x = 4; x < W - 4; x += 1) {
+      const i = (y * W + x) * 3;
+      block[i] = 240;
+      block[i + 1] = 240;
+      block[i + 2] = 30;
+    }
+  }
+  assert.equal(bgBorderChanged(model, hsvOf(block), 1).score, 0);
+  const full = frame({ r: 240, g: 240, b: 30 });
+  assert.equal(bgBorderChanged(model, hsvOf(full), 1).score, 255);
 });
 
 test('contentHeightRatio：宽银幕只算有效画面高度，全黑为 0', () => {

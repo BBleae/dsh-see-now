@@ -82,6 +82,17 @@ function highBlockAt(x, y, w, h) {
   return buf;
 }
 
+/** 整屏单色；用于真正换到完全不同的场景。 */
+function solidFrame(r, g, b) {
+  const buf = Buffer.alloc(W * H * 3);
+  for (let i = 0; i < W * H; i += 1) {
+    buf[i * 3] = r;
+    buf[i * 3 + 1] = g;
+    buf[i * 3 + 2] = b;
+  }
+  return buf;
+}
+
 /** 整屏条纹，每帧平移 off；用于“运镜中切机位”。 */
 function stripes(kind, off) {
   const buf = Buffer.alloc(W * H * 3);
@@ -163,6 +174,43 @@ test('高分前景运动：未来帧确认大面积前景离开后不切', () =>
   const raw = feed({ cutFutureDelay: 0 });
   assert.ok(raw.length > 0, '关掉未来帧确认后应能复现旧误切');
   assert.ok(raw[0].score >= 60, `这一条要覆盖高分边界，实际 ${raw[0].score}`);
+});
+
+test('高分前景停住超过 0.5 秒：外圈还是旧背景时不切', () => {
+  const feed = (opts) => {
+    const p = createPipeline({ width: W, height: H, fps: 12, queueDepth: 0, ...opts });
+    let f = 0;
+    for (let i = 0; i < 18; i += 1) p.push({ t: f++ / 12, buf: highBlockAt(0, 0, 0, 0) });
+    for (let i = 0; i < 12; i += 1) p.push({ t: f++ / 12, buf: highBlockAt(4, 4, 56, 28) });
+    p.finish();
+    return p.log.filter((x) => x.via === 'cut');
+  };
+
+  assert.equal(feed({}).length, 0, '外圈没动的大面积前景不应切');
+  assert.equal(feed({ cutFutureBorderMax: 0 }).length, 1, '关掉外圈保护后应复现误切');
+});
+
+test('前景长期占住画面后离开：参考背景没被它带跑', () => {
+  const p = createPipeline({ width: W, height: H, fps: 12, queueDepth: 0 });
+  let f = 0;
+  for (let i = 0; i < 18; i += 1) p.push({ t: f++ / 12, buf: highBlockAt(0, 0, 0, 0) });
+  for (let i = 0; i < 36; i += 1) p.push({ t: f++ / 12, buf: highBlockAt(4, 4, 56, 28) });
+  for (let i = 0; i < 24; i += 1) p.push({ t: f++ / 12, buf: highBlockAt(0, 0, 0, 0) });
+  p.finish();
+  const cuts = p.log.filter((x) => x.via === 'cut');
+  assert.equal(cuts.length, 0, `前景离开不是切镜头，实际 ${cuts.length} 刀`);
+});
+
+test('前景长期占住参考背景后，真正整屏换镜头仍切', () => {
+  const p = createPipeline({ width: W, height: H, fps: 12, queueDepth: 0 });
+  let f = 0;
+  for (let i = 0; i < 18; i += 1) p.push({ t: f++ / 12, buf: highBlockAt(0, 0, 0, 0) });
+  for (let i = 0; i < 36; i += 1) p.push({ t: f++ / 12, buf: highBlockAt(4, 4, 56, 28) });
+  for (let i = 0; i < 24; i += 1) p.push({ t: f++ / 12, buf: solidFrame(20, 120, 240) });
+  p.finish();
+  const cuts = p.log.filter((x) => x.via === 'cut');
+  assert.equal(cuts.length, 1, `长期前景后整屏换镜头应保留 1 刀，实际 ${cuts.length}`);
+  assert.ok(Math.abs(cuts[0].t - 4.5) < 0.05, `切点应在 4.5s，实际 ${cuts[0].t}`);
 });
 
 test('运动中切机位：117 分、前后 73/54，不能被 2.5 倍卡掉', () => {

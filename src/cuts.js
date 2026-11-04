@@ -210,6 +210,31 @@ export function bgKeep(model, candidate, future, { tau = 15 } = {}) {
   };
 }
 
+/**
+ * 候选帧改掉了多少外圈（去掉上下黑边）：大面积前景停住时外圈通常还是旧背景；
+ * 真正换镜头外圈也会被新画面替换。activeY < 0.25 或全黑时返回 null，保守不判。
+ */
+export function bgBorderChanged(model, candidate, activeY = 1, { thick = 4, tau = 15 } = {}) {
+  if (!model || !(activeY >= 0.25)) return null;
+  const bar = activeY >= 0.999 ? 0 : Math.round((1 - activeY) * SCAN_H / 2);
+  const t = Math.max(1, Math.min(thick, Math.floor((SCAN_H - bar * 2) / 4)));
+  const y0 = bar + t;
+  const y1 = SCAN_H - bar - t;
+  if (y1 <= y0) return null;
+  let total = 0;
+  let changed = 0;
+  for (let y = bar; y < SCAN_H - bar; y += 1) {
+    const edgeRow = y < y0 || y >= y1;
+    for (let x = 0; x < SCAN_W; x += 1) {
+      if (!(edgeRow || x < t || x >= SCAN_W - t)) continue;
+      total += 1;
+      if (hsvDiff(candidate, model.med, (y * SCAN_W + x) * 3) > tau) changed += 1;
+    }
+  }
+  if (!total) return null;
+  return { score: (changed / total) * 255, changed, total };
+}
+
 /** 画面有效高度占比：去掉上下黑边（宽银幕 letterbox），全黑帧返回 0。 */
 export function contentHeightRatio(hsv) {
   const darkRow = (y) => {

@@ -17,7 +17,7 @@
  *    只数切点会让档位永远 1 档、一张图只放 4 帧。见 tiers.js 的推导。
  */
 
-import { bgKeep, createScorer, scorePair } from './cuts.js';
+import { bgBorderChanged, bgKeep, createScorer, scorePair } from './cuts.js';
 import { createTiers, applyStrategy } from './tiers.js';
 import { solve, toRects, splitOneBin } from './pack.js';
 import { composePacked, SEAM } from './sheet.js';
@@ -140,6 +140,8 @@ export const DEFAULTS = Object.freeze({
    * 再看候选帧改掉的格子有多少还没回到参考背景（最近 `cutFutureRefWindow` 帧）。
    * 低于 `cutFutureKeep` 的判为短暂前景运动，不切。真正换镜头在新场景里稳定下来，
    * keep 很高；候选帧前的前景离开（画面回到旧背景）也会被 `bgKeep` 抓到。
+   * 高分前景停住时，外圈通常还是旧背景（`bgBorderChanged`），
+   * 背景变化不算整片且外圈几乎不动时也判为前景。
    * 0 = 关闭未来帧确认。
    */
   cutFutureDelay: 0.5,
@@ -147,6 +149,8 @@ export const DEFAULTS = Object.freeze({
   cutFutureKeep: 100,
   cutFutureMinChanged: 64,
   cutFutureRefWindow: 24,
+  /** 外圈变化低于这个值（0–255）且背景仍稳定时，判为停住的大面积前景。 */
+  cutFutureBorderMax: 10,
 
   /**
    * 运动中的切机位。
@@ -586,6 +590,17 @@ export function createPipeline(opts = {}) {
     return solve(seqOf(batch), { binCost: o.binCost });
   }
 
+  /** 停住的大面积前景：外圈还是旧背景，且背景变化不到整片。 */
+  function stillForeground(entry) {
+    if (!entry.futureModel
+      || !(entry.activeY >= 0.25)
+      || entry.bg === null
+      || entry.bg <= 0
+      || entry.bg >= 220) return false;
+    const border = bgBorderChanged(entry.futureModel, entry.hsv, entry.activeY);
+    return border !== null && border.score < o.cutFutureBorderMax;
+  }
+
   function decide(entry, nextScore, nextMc = null, future = null) {
     const s = entry.score;
     if (s === null) { keep(entry, 'start'); return; }
@@ -653,7 +668,9 @@ export function createPipeline(opts = {}) {
       const gone = (r) => r && r.score !== null
         && r.changed >= o.cutFutureMinChanged
         && r.score < o.cutFutureKeep;
-      futureFg = gone(fk) || gone(rk);
+      // 前景停住时外圈通常还是旧背景：背景变化不算整片，外圈几乎没动，
+      // 就不要等未来帧回来。真正换镜头 bg 很高，不会被这条挡住。
+      futureFg = gone(fk) || gone(rk) || stillForeground(entry);
     }
     if (entry.t - lastCut >= o.cutMinGap
       && !fgMotion
@@ -702,7 +719,9 @@ export function createPipeline(opts = {}) {
           q.shift();
           continue;
         }
-        const needFuture = o.cutFutureDelay > 0 && front.score >= o.cutFutureMinScore;
+        const needFuture = o.cutFutureDelay > 0
+          && front.score >= o.cutFutureMinScore
+          && !stillForeground(front);
         const future = o.cutFutureDelay > 0
           ? q.find((e) => e !== front && e.t - front.t >= o.cutFutureDelay) ?? null
           : null;
