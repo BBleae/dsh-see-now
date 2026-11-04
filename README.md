@@ -320,6 +320,31 @@ see_now({ scene: true, say: "好，接下来每换一个画面我就说一句" }
 它是粘性的，一直生效到 `scene:false` 或停止。
 单帧铺满靠的是 `strategy: 'single'`（档位固定压到 1），不然场景一密，格子会缩到 1/4、1/9，中间全是灰条。
 
+### 自己的节奏：`~/.dsh/see-now.json`
+
+有三件事是"每次会话都一样的偏好"，不该让模型每次传参：多久自己收工、
+默认用哪一档节奏。写进这个文件（**改完重开 DSH 生效**，不进 profile，
+`dsh plugin update` 不会覆盖）：
+
+```json
+{
+  "maxAutonomousWakes": 24,
+  "idleStopMin": 10,
+  "defaultPace": "calm"
+}
+```
+
+| 字段 | 默认 | 说明 |
+|---|---:|---|
+| `maxAutonomousWakes` | 8 | 连续这么多次自动叫醒都没人理 → 收工。**悬浮窗开着时，这条就是实际的最长陪看时长**（normal 15 秒一次 ≈ 2 分钟）。1–200 |
+| `idleStopMin` | 3 | 没开悬浮窗时，用户这么久没说话 → 收工。`0` = 关掉这条 |
+| `defaultPace` | `normal` | 新会话/重开采集时的默认节奏：`calm` / `normal` / `dense` / `game-economic`。调用里显式传 `pace` 仍然优先 |
+
+`see_now({action:"status"})` 的「收工线」那一行会显示当前生效的值，
+改过配置会带上文件路径 —— 否则"怎么陪一会儿就自己停了"很难查。
+
+非法值会退回默认并在日志里留一条 warning，不会把插件弄挂。
+
 ---
 
 ## 它是怎么判断"变了"的

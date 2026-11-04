@@ -71,10 +71,16 @@ export function idleAction({ idle = false, windowOpen = false } = {}) {
   return windowOpen ? 'listen' : 'stop';
 }
 
-export function shouldGoIdle({ wakesSinceUser = 0, now = Date.now(), lastUserAt = now, windowOpen = false } = {}) {
-  if (wakesSinceUser >= MAX_AUTONOMOUS_WAKES) return true;
+export function shouldGoIdle({
+  wakesSinceUser = 0, now = Date.now(), lastUserAt = now, windowOpen = false,
+  maxWakes = MAX_AUTONOMOUS_WAKES, idleStopMs = IDLE_STOP_MS,
+} = {}) {
+  // 两条线都能由 ~/.dsh/see-now.json 覆盖（#8）：写死的 8 次在悬浮窗开着时
+  // 就是实际的最长陪看时长，想陪久一点的人只能改源码。
+  if (maxWakes > 0 && wakesSinceUser >= maxWakes) return true;
   // 悬浮窗开着 = 有人在陪看，中途不说话是正常的，只靠"叫太多次"兜底
-  if (!windowOpen && now - lastUserAt > IDLE_STOP_MS) return true;
+  // idleStopMs <= 0 = 用户主动关掉这条（愿意一直陪着）
+  if (!windowOpen && idleStopMs > 0 && now - lastUserAt > idleStopMs) return true;
   return false;
 }
 
@@ -138,6 +144,8 @@ export function startLoop({
   log = () => {}, onStop = () => {}, wakeMinGapSec = WAKE_MIN_GAP_MS / 1000,
   // 逐帧模式：唤醒文案要说"换画面了，说一句这是什么"，而不是"有新画面了"。
   scene = false,
+  // `~/.dsh/see-now.json` 的节奏参数（readTuning()）；不传就用写死的默认值。
+  tuning = null,
 } = {}) {
   let disposed = false;
   let lastWakeAt = 0;
@@ -355,7 +363,11 @@ export function startLoop({
       //      把循环整个拆掉等于把他的输入扔进黑洞（见 mode 的说明）。
       const winOpenNow = windowAlive();
       const act = idleAction({
-        idle: shouldGoIdle({ wakesSinceUser, lastUserAt, windowOpen: winOpenNow }),
+        idle: shouldGoIdle({
+          wakesSinceUser, lastUserAt, windowOpen: winOpenNow,
+          maxWakes: tuning?.maxAutonomousWakes,
+          idleStopMs: tuning?.idleStopMs,
+        }),
         windowOpen: winOpenNow,
       });
       if (act === 'listen') { enterListen(); return; }

@@ -15,6 +15,8 @@
 关键点：
 - Windows 10 2004+ 的 SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)：让本窗口
   从屏幕捕获里消失，于是抓自己所在区域时抓到的是「背后的桌面」，不会递归。
+  代价是远程桌面/录屏/截图里整窗也看不见；用 `glass: solid` 切纯色底板，
+  不抓屏、不设 WDA，任何捕获方式都能看到。
 - 抓到的背景按需重合成（静止时跳帧），所以是实时模糊，不是静态截图。
 - 这不是 DWM Acrylic；Acrylic 需要系统「透明效果」开启，这里是软件实时模糊。
 
@@ -145,6 +147,84 @@ def capturable() -> bool:
         return False
 
 
+# 远程控制软件不一定置 SM_REMOTESESSION；它们的窗口/类名是最稳的旁证。
+# 命中任意一个就按 remote 处理，用 solid 底板，保证对面能看到整窗。
+REMOTE_MARKS = (
+    "gameviewer", "todesk", "sunlogin", "anydesk", "teamviewer",
+    "rustdesk", "parsec", "uu远程", "向日葵",
+)
+
+
+def remote_capture_likely() -> bool:
+    """当前是不是远程/捕获环境：RDP 标志位 + 常见远程软件窗口。"""
+    try:
+        if ctypes.windll.user32.GetSystemMetrics(0x1000):  # SM_REMOTESESSION
+            return True
+    except Exception:
+        pass
+    try:
+        u = ctypes.windll.user32
+        u.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        u.GetWindowTextLengthW.restype = ctypes.c_int
+        u.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        u.GetWindowTextW.restype = ctypes.c_int
+        u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        u.GetClassNameW.restype = ctypes.c_int
+        u.IsWindowVisible.argtypes = [wintypes.HWND]
+        u.IsWindowVisible.restype = wintypes.BOOL
+        hit = [False]
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def visit(hwnd, _lparam):
+            if not u.IsWindowVisible(hwnd):
+                return True
+            n = u.GetWindowTextLengthW(hwnd)
+            title = ""
+            if n > 0:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                u.GetWindowTextW(hwnd, buf, n + 1)
+                title = buf.value
+            cls = ctypes.create_unicode_buffer(256)
+            u.GetClassNameW(hwnd, cls, 256)
+            hay = (title + " " + cls.value).lower()
+            if any(mark in hay for mark in REMOTE_MARKS):
+                hit[0] = True
+                return False
+            return True
+
+        u.EnumWindows(visit, 0)
+        return hit[0]
+    except Exception:
+        return False
+
+
+def glass_mode() -> str:
+    """玻璃背景模式：live（实时抓屏，默认）/ solid（纯色底板）。
+
+    `WDA_EXCLUDEFROMCAPTURE` 会让窗口在远程桌面、OBS、截图工具里**整窗消失**
+    （微软文档：“Everywhere else, the window does not appear at all”）。
+    本机看起来正常，因为 mss 抓到的是窗口背后的像素；远程端却连文字都看不到。
+
+    - `{ "glass": "solid" }`：不抓屏、不设 WDA，用纯色底板；任何捕获方式都能看到；
+    - `{ "glass": "live" }`：原来的实时玻璃；
+    - 不写 / `auto`：检测 `SM_REMOTESESSION` 和常见远程软件窗口，命中就用 solid。
+    """
+    if os.environ.get("DSH_GLASS_SOLID") == "1":
+        return "solid"
+    if os.environ.get("DSH_GLASS_LIVE") == "1":
+        return "live"
+    try:
+        mode = str(read_config().get("glass") or "").strip().lower()
+    except Exception:
+        mode = ""
+    if mode in ("solid", "live"):
+        return mode
+    # 空值 / auto：RDP 标志位或常见远程软件窗口任一命中，就用 solid。
+    if remote_capture_likely():
+        return "solid"
+    return "live"
+
+
 def append_user(text: str) -> None:
     CHAT_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(CHAT_FILE, "a", encoding="utf-8") as f:
@@ -175,6 +255,31 @@ def display_hz() -> int:
 
 # ---------------------------------------------------------------- 窗口
 
+# 虚拟桌面 = 所有显示器拼起来的物理像素范围。主屏固定从 (0,0) 起算，
+# 第二块屏可能在它左边 / 上面，那时坐标本来就是负的 —— 只拿
+# winfo_screenwidth()（= 主屏宽度）当边界，窗口就永远离不开主屏（#8）。
+SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
+SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
+
+
+def virtual_bounds(fallback_w=0, fallback_h=0):
+    """(x, y, w, h)：虚拟桌面左上角与尺寸，物理像素。
+
+    取不到（非 Windows / 远程会话偶尔返回 0）就退回主屏 (0, 0, w, h)。
+    """
+    try:
+        u = ctypes.windll.user32
+        vx = int(u.GetSystemMetrics(SM_XVIRTUALSCREEN))
+        vy = int(u.GetSystemMetrics(SM_YVIRTUALSCREEN))
+        vw = int(u.GetSystemMetrics(SM_CXVIRTUALSCREEN))
+        vh = int(u.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+        if vw > 0 and vh > 0:
+            return vx, vy, vw, vh
+    except Exception:
+        pass
+    return 0, 0, int(fallback_w or 0), int(fallback_h or 0)
+
+
 class LiveGlass:
     def __init__(self):
         cfg = read_config()
@@ -204,6 +309,8 @@ class LiveGlass:
         self.fonts = Fonts(self.root)
 
         self._sw, self._sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        # 主屏尺寸只用来算默认位置；能拖到哪、抓屏能抓到哪，看虚拟桌面（多显示器）
+        self._vx, self._vy, self._vw, self._vh = virtual_bounds(self._sw, self._sh)
         w, h, x, y = self._initial_geometry(cfg.get("geometry"))
         self._x, self._y = x, y
         self._geo = Geometry.for_size(w, h)
@@ -233,6 +340,8 @@ class LiveGlass:
         # 录屏模式（capturable）下 mss 会抓到窗口自己，必须每帧挖掉，见 fill_own_rect。
         # 缓存起来：读配置是磁盘 IO，不能每帧做。
         self._cappable = capturable()
+        # solid：远程/录屏下 WDA 会让整窗在对面消失；不抓屏、不设 WDA。
+        self._solid = glass_mode() == "solid"
         self._drag = None
         self._resize = None
         self._preview_at = 0.0
@@ -241,7 +350,10 @@ class LiveGlass:
         self._stop = threading.Event()
         self._pause = threading.Event()
         self._geo_lock = threading.Lock()
-        self._source = CaptureSource((self._sw, self._sh), cappable=self._cappable)
+        self._source = CaptureSource((self._sw, self._sh), cappable=self._cappable,
+                                     solid=self._solid,
+                                     # 窗口落在副屏时，抓屏范围要按虚拟桌面钳
+                                     bounds=(self._vx, self._vy, self._vw, self._vh))
         self._renderer = self._make_renderer(self._geo)
         self._worker = threading.Thread(target=self._work, daemon=True)
 
@@ -256,7 +368,7 @@ class LiveGlass:
         self.root.deiconify()
         self.root.update_idletasks()
         self.text.refresh()
-        self._set_exclude(not capturable())
+        self._set_exclude(not capturable() and not self._solid)
         self._worker.start()
         self.root.lift()
         self.root.after(80, self.root.lift)
@@ -284,6 +396,8 @@ class LiveGlass:
     def _initial_geometry(self, geo):
         sw, sh = self._sw, self._sh
         w, h = DEFAULT_W, DEFAULT_H
+        # 默认位置仍是主屏居中偏右下（和以前一致）；恢复位置按虚拟桌面钳位，
+        # 否则上次存在第二块屏上的坐标（负数）会被拉回主屏左上角。
         x, y = max(40, sw - w - 80), max(40, (sh - h) // 2 - 40)
         try:
             size, rest = geo.split("+", 1)
@@ -291,11 +405,23 @@ class LiveGlass:
             px, py = (int(v) for v in rest.split("+")[:2])
             w = max(MIN_W, min(sw - 40, pw))
             h = max(MIN_H, min(sh - 40, ph))
-            x = max(0, min(sw - w, px))
-            y = max(0, min(sh - h, py))
+            x = max(self._vx, min(self._vx + self._vw - w, px))
+            y = max(self._vy, min(self._vy + self._vh - h, py))
         except Exception:
             pass
         return w, h, x, y
+
+    def _sync_screens(self):
+        """刷新虚拟桌面范围：接/拔显示器、改分辨率后不用重开窗口。
+
+        拖动/缩放开始前调一次就够（GetSystemMetrics 很便宜，但没必要每帧问）。
+        """
+        vx, vy, vw, vh = virtual_bounds(self._sw, self._sh)
+        if vw > 0 and vh > 0:
+            self._vx, self._vy, self._vw, self._vh = vx, vy, vw, vh
+            if getattr(self, "_source", None) is not None:
+                self._source.bounds = (vx, vy, vw, vh)
+        return self._vx, self._vy, self._vw, self._vh
 
     def _set_geometry(self, geo: Geometry) -> None:
         """换一套几何：渲染器跟着换，静态跳帧的签名作废。"""
@@ -966,7 +1092,7 @@ class LiveGlass:
         if self._resize or self._collapsed:
             self.root.after(INTERVAL_MS, self._tick)
             return
-        if not self._excluded and not self._cappable:
+        if not self._excluded and not self._cappable and not self._solid:
             self._set_exclude(True)
         self._pause.clear()
 
@@ -1136,6 +1262,8 @@ class LiveGlass:
             self.canvas.config(cursor="")
 
     def _press(self, e):
+        # 每次按下先把屏幕布局重新读一遍：拖动前插/拔显示器也能立刻生效
+        self._sync_screens()
         # 麦克风图标画在玻璃里，不在 Canvas 上单独建控件；点它不能当拖窗
         mx, my = self._geo.mic_pos
         if abs(e.x - (mx + MIC_SIZE // 2)) <= 22 and abs(e.y - (my + MIC_SIZE // 2)) <= 22:
@@ -1161,18 +1289,20 @@ class LiveGlass:
             mode, sx, sy, x0, y0, w0, h0 = self._resize
             dx, dy = e.x_root - sx, e.y_root - sy
             nw, nh, nx, ny = w0, h0, x0, y0
+            # 缩放边界 = 虚拟桌面（多显示器），不是主屏
+            vx, vy, vw, vh = self._vx, self._vy, self._vw, self._vh
             if "e" in mode:
-                nw = max(MIN_W, min(max(MIN_W, self._sw - x0), w0 + dx))
+                nw = max(MIN_W, min(max(MIN_W, vx + vw - x0), w0 + dx))
             if "w" in mode:
-                nw = max(MIN_W, min(max(MIN_W, x0 + w0), w0 - dx))
+                nw = max(MIN_W, min(max(MIN_W, x0 + w0 - vx), w0 - dx))
                 nx = x0 + w0 - nw
             if "s" in mode:
-                nh = max(MIN_H, min(max(MIN_H, self._sh - y0), h0 + dy))
+                nh = max(MIN_H, min(max(MIN_H, vy + vh - y0), h0 + dy))
             if "n" in mode:
-                nh = max(MIN_H, min(max(MIN_H, y0 + h0), h0 - dy))
+                nh = max(MIN_H, min(max(MIN_H, y0 + h0 - vy), h0 - dy))
                 ny = y0 + h0 - nh
-            nx = max(0, min(nx, max(0, self._sw - nw)))
-            ny = max(0, min(ny, max(0, self._sh - nh)))
+            nx = max(vx, min(nx, max(vx, vx + vw - nw)))
+            ny = max(vy, min(ny, max(vy, vy + vh - nh)))
             self.root.geometry(f"{nw}x{nh}+{nx}+{ny}")
             now = time.time()
             if now - self._preview_at >= 0.04:
@@ -1182,10 +1312,13 @@ class LiveGlass:
         if self._drag:
             # 拖到屏幕外时窗口坐标会变负，抓屏区域随之越界（高度算出负数），
             # 背景永远画不出来 —— 表现为花屏。必须钳位。
-            nx = max(0, min(max(0, self._sw - self.root.winfo_width()),
-                            e.x_root - self._drag[0]))
-            ny = max(0, min(max(0, self._sh - self.root.winfo_height()),
-                            e.y_root - self._drag[1]))
+            # 边界是虚拟桌面而不是主屏：第二块屏在主屏左边时坐标本来就是负的，
+            # 老代码 max(0, …) 等于把窗口钉死在一块屏里。
+            vx, vy, vw, vh = self._vx, self._vy, self._vw, self._vh
+            nx = e.x_root - self._drag[0]
+            ny = e.y_root - self._drag[1]
+            nx = max(vx, min(nx, max(vx, vx + vw - self.root.winfo_width())))
+            ny = max(vy, min(ny, max(vy, vy + vh - self.root.winfo_height())))
             self.root.geometry(f"+{nx}+{ny}")
 
     def _release(self, e):

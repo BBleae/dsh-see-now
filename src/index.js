@@ -16,6 +16,7 @@ import { ensureConfiguredVoice, detachAdapters, attachedAdapters, configuredVoic
 import { speechSubscribers, onSpeech } from './speech.js';
 import { markSpeaking } from './listen.js';
 import { startLoop, HANGUP_NOTE } from './loop.js';
+import { readTuning } from './tuning.js';
 import { windowAlive, windowHidden, setWindowHidden, windowReport, windowLine } from './window.js';
 import { pickRegion, loadRegion, clearRegion, regionText } from './region.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -315,8 +316,15 @@ async function registerAll(ctx) {
    * 忘一次就退回多帧拼图，演示当场露馅。所以开一次管到 `scene:false` 或 `stop` 为止。
    */
   let sceneMode = false;
+  /**
+   * 用户自己的节奏参数（`~/.dsh/see-now.json`）。在 apply 时读一次：
+   * 改配置要重开 DSH，和 voice.json 的热读不同 —— 这些值影响的是循环的收工线，
+   * 每拍读盘不值得。
+   */
+  const tuning = readTuning();
+  if (tuning.warnings.length) log?.(`[see-now] ${tuning.warnings.join('；')}`);
   /** 节奏：calm / normal / dense（粘性）。**这是"省点钱"唯一能真的生效的旋钮。** */
-  let paceMode = DEFAULT_PACE;
+  let paceMode = PACES[tuning.defaultPace] ? tuning.defaultPace : DEFAULT_PACE;
   /**
    * **上一次真正生效的 source 类型**。`cutAbs` 的自动选择要靠它，不能看本次请求的 `src`：
    * 第二次 `watch` 通常不带 path（接着看同一段），那时 `src` 是 undefined，判定就会从
@@ -439,6 +447,8 @@ async function registerAll(ctx) {
       // 逐帧模式出图最密，4 秒是"一句短话念得完"的下限；
       // 常规按节奏走（normal 15 秒 / calm 30 秒）—— 8 秒一次太吵，实报过。
       wakeMinGapSec: sceneMode ? 4 : PACES[paceMode].wakeGapSec,
+      // 收工线（叫醒次数上限 / 空闲分钟）可由 ~/.dsh/see-now.json 覆盖
+      tuning,
       onStop: (reason) => {
         if (reason === 'window-closed') {
           // 用户关窗 = 不看了。**落进待领说明**，下一次工具结果带走。
@@ -872,6 +882,10 @@ function listenLine(l) {
             + ` · 节奏：${sceneMode ? 'dense（跟逐帧走）' : paceMode}`
             + `（切点门槛 ${(sceneMode ? PACES.dense : PACES[paceMode]).cutAbs}，`
             + `最多 ${sceneMode ? 4 : PACES[paceMode].wakeGapSec} 秒叫一次）`
+            // 收工线：用户改过 see-now.json 时要能看出来，否则"怎么陪我一会儿就停了"查不到
+            + `\n收工线：连续 ${tuning.maxAutonomousWakes} 次叫醒没人理`
+            + ` · ${tuning.idleStopMin > 0 ? `没开窗时 ${tuning.idleStopMin} 分钟没说话` : '空闲线已关闭'}`
+            + `${tuning.path && tuning.maxAutonomousWakes === 8 && tuning.idleStopMin === 3 ? '（默认）' : `（${tuning.path}）`}`
             // 区域：只看一小块时，模型得知道自己看到的不是整屏
             + `\n区域：${regionText(s.lastSource?.region ?? loadRegion()) ?? '整屏'}`
             // 声音单独一行：听不到声音时第一个要看的就是这里
