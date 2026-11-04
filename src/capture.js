@@ -105,8 +105,10 @@ export function sourceArgs(
         // 名字和索引都能用。`-framerate` 在这里是**设备侧采样率**，必须给。
         return ['-f', 'avfoundation', '-framerate', String(fps), '-i', `${device}:none`];
       }
-      return ['-rtbufsize', '256M', '-thread_queue_size', '512',
-        '-f', 'dshow', '-i', `video=${device}`];
+      // **不要加 `-thread_queue_size`**：部分 ffmpeg build（gyan.dev 2026-10-29 full）
+      // 会把放在 `-i` 前的它判成输出选项，直接报 "cannot be applied to input url"，
+      // 设备源一帧都出不来（#17 用 bisect 定位）。dshow 的缓冲由 `-rtbufsize` 给，够用。
+      return ['-rtbufsize', '256M', '-f', 'dshow', '-i', `video=${device}`];
     }
     case 'screen': {
       if (mac || s.engine === 'avfoundation' || engine === 'avfoundation') {

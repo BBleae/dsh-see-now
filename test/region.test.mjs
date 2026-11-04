@@ -121,13 +121,14 @@ test('回归：screen + gdigrab 无 region 参数不变', () => {
 });
 
 test('regression: obs / camera / file 不变', () => {
+  // 设备源只带 -rtbufsize：`-thread_queue_size` 会被某些 ffmpeg build 判成输出选项（#17）
   assert.deepEqual(
     sourceArgs({ kind: 'obs' }, { fps: 12, platform: 'win32' }),
-    ['-rtbufsize', '256M', '-thread_queue_size', '512', '-f', 'dshow', '-i', 'video=OBS Virtual Camera'],
+    ['-rtbufsize', '256M', '-f', 'dshow', '-i', 'video=OBS Virtual Camera'],
   );
   assert.deepEqual(
     sourceArgs({ kind: 'camera', device: 'HD Webcam' }, { fps: 12, platform: 'win32' }),
-    ['-rtbufsize', '256M', '-thread_queue_size', '512', '-f', 'dshow', '-i', 'video=HD Webcam'],
+    ['-rtbufsize', '256M', '-f', 'dshow', '-i', 'video=HD Webcam'],
   );
   assert.deepEqual(
     sourceArgs({ kind: 'file', path: 'C:\\a.mp4', realtime: true }, { platform: 'win32' }),
