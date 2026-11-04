@@ -254,6 +254,25 @@ export function contentHeightRatio(hsv) {
   return (SCAN_H - top - bottom) / SCAN_H;
 }
 
+/**
+ * 前景守卫用的有效高度：正常情况等同 contentHeightRatio；
+ * 全黑帧仍为 0，但“上下暗、中间有亮内容”的暗场不再被当成没有画面。
+ */
+export function guardHeightRatio(hsv) {
+  const ratio = contentHeightRatio(hsv);
+  if (ratio >= 0.25) return ratio;
+  let maxV = 0;
+  const y0 = Math.floor(SCAN_H * 0.25);
+  const y1 = Math.ceil(SCAN_H * 0.75);
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = 0; x < SCAN_W; x += 1) {
+      const v = hsv[(y * SCAN_W + x) * 3 + 2];
+      if (v > maxV) maxV = v;
+    }
+  }
+  return maxV >= 48 ? 1 : ratio;
+}
+
 export function createScorer({
   width, height, scoreMode = 'abs', mcTau = 15, mcRadius = 2, gateMcRadius = mcRadius,
   bgWindow = 6, bgStableRange = 24, bgTau = 15, bgModel = false,
@@ -280,6 +299,7 @@ export function createScorer({
     let bgModelOut = null;
     let futureModel = null;
     const activeY = contentHeightRatio(cur);
+    const guardY = guardHeightRatio(cur);
     if (bgWindow > 0 && bgHistory.length >= bgWindow) {
       const bg = bgStats(bgHistory, cur, { stableRange: bgStableRange, tau: bgTau, withModel: bgModel });
       bgScore = bg.score;
@@ -325,7 +345,7 @@ export function createScorer({
       if (refHistory.length > bgRefWindow) refHistory.shift();
     }
     return {
-      score: s, mcScore, mcBox, mcFill, mcSpanY, activeY, bgScore, bgStable, bgChanged,
+      score: s, mcScore, mcBox, mcFill, mcSpanY, activeY, guardY, bgScore, bgStable, bgChanged,
       bgModel: bgModelOut, futureModel, prevHsv, hsv: cur,
     };
   };

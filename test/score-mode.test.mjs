@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  bgBorderChanged, bgKeep, bgStats, contentHeightRatio, createScorer, mcRatioScore, mcStats, SCAN_W, SCAN_H,
+  bgBorderChanged, bgKeep, bgStats, contentHeightRatio, createScorer, guardHeightRatio, mcRatioScore, mcStats, SCAN_W, SCAN_H,
 } from '../src/cuts.js';
 
 const W = SCAN_W;
@@ -177,6 +177,24 @@ test('contentHeightRatio：宽银幕只算有效画面高度，全黑为 0', () 
   assert.ok(Math.abs(contentHeightRatio(hsvOf(letterboxFrame())) - 20 / H) < 1e-6);
   const black = Buffer.alloc(W * H * 3);
   assert.equal(contentHeightRatio(hsvOf(black)), 0);
+});
+
+test('guardHeightRatio：暗场中间有内容时不跳过，全黑仍为 0', () => {
+  const black = Buffer.alloc(W * H * 3);
+  assert.equal(guardHeightRatio(hsvOf(black)), 0);
+
+  const darkEdge = Buffer.alloc(W * H * 3);
+  for (let y = 14; y < 22; y += 1) {
+    for (let x = 16; x < 48; x += 1) {
+      const i = (y * W + x) * 3;
+      darkEdge[i] = 90;
+      darkEdge[i + 1] = 90;
+      darkEdge[i + 2] = 90;
+    }
+  }
+  const h = hsvOf(darkEdge);
+  assert.ok(contentHeightRatio(h) < 0.25);
+  assert.equal(guardHeightRatio(h), 1);
 });
 
 test('createScorer：默认口径不变，切到 mc 后同一对帧分数不同', () => {

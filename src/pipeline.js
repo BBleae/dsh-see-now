@@ -592,12 +592,13 @@ export function createPipeline(opts = {}) {
 
   /** 停住的大面积前景：外圈还是旧背景，且背景变化不到整片。 */
   function stillForeground(entry) {
+    const guardY = entry.guardY ?? entry.activeY ?? 0;
     if (!entry.futureModel
-      || !(entry.activeY >= 0.25)
+      || !(guardY >= 0.25)
       || entry.bg === null
       || entry.bg <= 0
       || entry.bg >= 220) return false;
-    const border = bgBorderChanged(entry.futureModel, entry.hsv, entry.activeY);
+    const border = bgBorderChanged(entry.futureModel, entry.hsv, guardY);
     return border !== null && border.score < o.cutFutureBorderMax;
   }
 
@@ -640,6 +641,7 @@ export function createPipeline(opts = {}) {
     // 前景运动不是切镜头：稳定背景大部分还在，且变化区域没盖满高度。
     // 只看低/中分事件；孤立弱切点另有区域门槛，不在这里误伤。
     const bg = entry.bg;
+    const guardY = entry.guardY ?? entry.activeY ?? 0;
     const fgMotion = o.cutBgAbs > 0
       && s < o.cutBgMaxScore
       && !isolated
@@ -648,10 +650,10 @@ export function createPipeline(opts = {}) {
       && bg > 0
       && bg < o.cutBgAbs
       && (o.cutBgMaxChanged <= 0 || (entry.bgChanged ?? 0) <= o.cutBgMaxChanged)
-      && (entry.activeY ?? 0) >= 0.25
+      && guardY >= 0.25
       && (o.cutBgMaxSpanY <= 0
-        || (entry.activeY > 0
-          ? (entry.mcSpanY ?? 1) / entry.activeY
+        || (guardY > 0
+          ? (entry.mcSpanY ?? 1) / guardY
           : (entry.mcSpanY ?? 1)) < o.cutBgMaxSpanY);
     // 高分候选不能只靠当前帧：等 0.5 秒，看候选帧改掉的稳定背景有没有回来。
     // 大面积前景运动离开/移开 -> keep 低；真正换镜头 -> 新场景还在，keep 高。
@@ -707,7 +709,7 @@ export function createPipeline(opts = {}) {
       // `wall` 是这一帧被处理时的墙上时间（epoch ms）。台词（ASR）只有时间码没有帧号，
       // 对齐只能靠同一个时钟 —— `t` 是"第几秒"，掉帧就漂，不能拿来对字幕。
       const entry = {
-        t, buf, score: s, mc: r.mcScore, mcBox: r.mcBox, mcFill: r.mcFill, mcSpanY: r.mcSpanY, activeY: r.activeY, bg: r.bgScore, bgStable: r.bgStable, bgChanged: r.bgChanged, bgModel: r.bgModel, futureModel: r.futureModel, prevHsv: r.prevHsv, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
+        t, buf, score: s, mc: r.mcScore, mcBox: r.mcBox, mcFill: r.mcFill, mcSpanY: r.mcSpanY, activeY: r.activeY, guardY: r.guardY, bg: r.bgScore, bgStable: r.bgStable, bgChanged: r.bgChanged, bgModel: r.bgModel, futureModel: r.futureModel, prevHsv: r.prevHsv, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
       };
       lastSeen = entry;
       lastScore = s;
