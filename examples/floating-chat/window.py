@@ -384,6 +384,15 @@ class LiveGlass:
         self._drag = None
         self._resize = None
         self._preview_at = 0.0
+        # Entry 的真光标被关掉（insertwidth=0），画面上那条线是自己画的，
+        # 所以闪烁也得自己来。_caret_job 存 after 的 id，重排时取消，避免叠定时器。
+        self._caret_on = True
+        self._caret_job = None
+        # 长消息展开：被截断的气泡点一下独占整个消息区，再点收起。
+        # 存的是消息身份 (role, text, at) 而不是槽位下标 —— 新消息进来会让
+        # 同一条消息换槽，存下标会变成"展开的是另一条"。
+        self._expanded = None
+        self._fit_clipped = False
 
         self._q: queue.Queue = queue.Queue(maxsize=1)
         self._stop = threading.Event()
@@ -565,6 +574,7 @@ class LiveGlass:
                 self.feed.status = ""
                 self._refresh_feed()
             if self.feed.poll():
+                self._collapse_expanded()
                 self._refresh_feed()
         except Exception as exc:
             print("chat poll error", exc, flush=True)
@@ -623,6 +633,7 @@ class LiveGlass:
 
     def _wheel(self, e):
         if self.feed.scroll(1 if e.delta > 0 else -1):
+            self._collapse_expanded()
             self._refresh_feed()
 
     def _toggle_mic(self):
@@ -655,6 +666,36 @@ class LiveGlass:
                 pass
         self._refresh_feed()
 
+    CARET_MS = 530          # 和 Windows 默认的光标闪烁周期一致
+    CARET_PAD = 3           # 光标右边至少留几个字符，别让它贴着可见段右缘
+
+    def _visible_input(self, text: str, maxw: int, caret: int):
+        """返回能放进 maxw 的那一段，以及光标在这一段里的字符下标。
+
+        原来只从左边砍（`text = text[1:]`），等于永远把尾巴留在视野里：光标移到
+        句首时会被推到看不见的地方。改成以光标为锚点开窗 —— 先保证光标可见，
+        再尽量往两边补字。
+
+        光标右边留 CARET_PAD 个字符：不留的话往左移动时光标会一直贴着右缘，
+        看不出右边还有内容（20 字符文本 / 10 字符窗口实测，caret=10 和 caret=17
+        的可见段右端都正好停在光标上）。
+        """
+        font = self.fonts.get(11)
+        if font.measure(text) <= maxw:
+            return text, caret
+        lo = min(caret, len(text))
+        hi = min(len(text), lo + self.CARET_PAD)
+        # 右边余量优先：先确保 caret..caret+PAD 进得去，再往左补已经打出来的内容
+        while hi > lo and font.measure(text[lo:hi]) > maxw:
+            hi -= 1
+        while lo > 0 and font.measure(text[lo - 1:hi]) <= maxw:
+            lo -= 1
+        while hi < len(text) and font.measure(text[lo:hi + 1]) <= maxw:
+            hi += 1
+        while lo > 0 and font.measure(text[lo - 1:hi]) <= maxw:
+            lo -= 1
+        return text[lo:hi], caret - lo
+
     def _render_input(self) -> None:
         """输入文字画在 Canvas 上；Entry 只负责 IME/键盘，永远不可见。"""
         if self._entry is None:
@@ -664,30 +705,62 @@ class LiveGlass:
         try:
             text = self._entry.get()
             focused = self.root.focus_get() is self._entry
+            # 光标位置必须读 Entry 的真实插入点：原来按整段文字宽度算，等于把
+            # 线永远钉在末尾，左右键移动时画面上的光标根本不动。
+            caret = self._entry.index("insert")
         except Exception:
-            text, focused = "", False
+            text, focused, caret = "", False, 0
         x0, y0, x1, y1, _r = self._geo.input_shape
         x, y = x0 + 84, y0 + 27
         maxw = max(60, x1 - x0 - 100)
+        cx = None
         if not text and not focused:
             self.text.draw(x, y, "在这里跟它说话…", anchor="w", fill="#8e9db2",
                            size=11, tags=("inputtext", "inputzone"))
         elif text:
             font = self.fonts.get(11)
-            while text and font.measure(text) > maxw:
-                text = text[1:]
-            self.text.draw(x, y, text, anchor="w", fill="#eef6ff",
+            shown, caret_in = self._visible_input(text, maxw, caret)
+            self.text.draw(x, y, shown, anchor="w", fill="#eef6ff",
                            size=11, tags=("inputtext", "inputzone"))
             if focused:
-                cx = x + font.measure(text)
-                c.create_line(cx + 1, y - 9, cx + 1, y + 9,
-                              fill="#b9d7ff", width=1, tags=("inputcursor",))
+                cx = x + font.measure(shown[:max(0, caret_in)])
         elif focused:
-            c.create_line(x + 1, y - 9, x + 1, y + 9,
+            cx = x
+        if cx is not None and self._caret_on:
+            c.create_line(cx + 1, y - 9, cx + 1, y + 9,
                           fill="#b9d7ff", width=1, tags=("inputcursor",))
+        self._schedule_caret(cx is not None)
         self.text.refresh()
 
+    def _schedule_caret(self, active: bool) -> None:
+        """只有输入框拿着焦点时才跑闪烁定时器；失焦就停，不白烧 after。"""
+        if self._caret_job is not None:
+            try:
+                self.root.after_cancel(self._caret_job)
+            except Exception:
+                pass
+            self._caret_job = None
+        if not active:
+            self._caret_on = True
+            return
+        self._caret_job = self.root.after(self.CARET_MS, self._blink_caret)
+
+    def _blink_caret(self) -> None:
+        self._caret_job = None
+        if self._entry is None:
+            return
+        try:
+            if self.root.focus_get() is not self._entry:
+                self._caret_on = True
+                return
+        except Exception:
+            return
+        self._caret_on = not self._caret_on
+        self._render_input()
+
     def _on_input_key(self, _e=None):
+        # 打字期间光标恒亮：这时闪烁反而碍事，和系统输入框一致
+        self._caret_on = True
         self._render_input()
         return None
 
@@ -697,6 +770,7 @@ class LiveGlass:
             self._entry.icursor("end")
         except Exception:
             pass
+        self._caret_on = True
         self._render_input()
 
     # ---- 改名 ----
@@ -795,13 +869,39 @@ class LiveGlass:
                     lines.append(cur)
                     cur = ch
             lines.append(cur)
-        if len(lines) > max_lines:
+        # 调用方要知道这条到底被砍了没有：省略号自己看不出是"全文正好以…结尾"
+        # 还是"被截断了"，而展开入口只该给真被砍的那几条。
+        self._fit_clipped = len(lines) > max_lines
+        if self._fit_clipped:
             lines = lines[:max_lines]
             last = lines[-1]
             while last and measure(last + "…") > max_width:
                 last = last[:-1]
             lines[-1] = (last + "…") if last else "…"
         return lines or [""]
+
+    @staticmethod
+    def _msg_key(msg):
+        """消息身份：(role, text, at)，和 ChatFeed.add 的去重键一致。"""
+        return (msg.get("role"), msg.get("text"), msg.get("at"))
+
+    def _expanded_index(self, shown):
+        """当前展开的那条在 shown 里的下标；已经滚出视野就返回 None。"""
+        if self._expanded is None:
+            return None
+        for i, msg in enumerate(shown):
+            if self._msg_key(msg) == self._expanded:
+                return i
+        return None
+
+    def _toggle_expand(self, key) -> None:
+        """点截断的气泡：展开成独占整个消息区；再点收起。"""
+        self._expanded = None if self._expanded == key else key
+        self._layout()
+
+    def _collapse_expanded(self) -> None:
+        """新消息进来或翻页时自动收起：否则盯着一条老消息，新消息看不见。"""
+        self._expanded = None
 
     def _message_shapes(self, shown):
         """四个固定大框换成按正文文字测量的聊天气泡。
@@ -819,12 +919,21 @@ class LiveGlass:
         fstamp = self.fonts.get(9)
         ls = max(1, fbody.metrics("linespace"))
         shapes, infos = [], []
+        # 展开态：这条独占 4 个槽位的纵向范围，其余三条让位。槽位网格本身不动
+        # （chat_layout 仍是 h 的纯函数），只是把"4 槽各放 1 条"换成"1 条占满"，
+        # 气泡边界照样受 base 约束，不会压到输入框。
+        expanded_at = self._expanded_index(shown)
         for i in range(MESSAGE_SLOTS):
+            if expanded_at is not None and i != expanded_at:
+                shapes.append((0, 0, 0, 0, 0))     # 展开态下其他消息让位
+                continue
             if i >= len(shown):
                 shapes.append((0, 0, 0, 0, 0))     # 没有这条消息：不画框
                 continue
             msg = shown[i]
             x0, y0, x1, y1, _r = base[i]
+            if expanded_at is not None:
+                y0, y1 = base[0][1], base[MESSAGE_SLOTS - 1][3]
             slot_h = y1 - y0
             is_user = str(msg.get("role") or "").lower() in ("user", "me", "human")
             stamp = str(msg.get("stamp") or "")
@@ -852,6 +961,10 @@ class LiveGlass:
                 "tx": tx, "ta": ta, "lines": lines,
                 "ty": by0 + max(4, (bh - len(lines) * ls) // 2),
                 "stamp_y": y0, "ls": ls,
+                # 截断的气泡要能点开，也要看得出"这还没完"
+                "clipped": self._fit_clipped,
+                "expanded": expanded_at == i,
+                "key": self._msg_key(msg),
             })
         shapes.extend(base[MESSAGE_SLOTS:])
         return shapes, infos
@@ -869,6 +982,10 @@ class LiveGlass:
         self._entry.bind("<Return>", self._send)
         self._entry.bind("<FocusIn>", lambda _e: self._render_input())
         self._entry.bind("<FocusOut>", lambda _e: self._render_input())
+        # 插入点还能被鼠标和选择改动，这些不发 KeyRelease：不补这几个，点一下
+        # 输入框中间，画面上的光标就跟不过去。after_idle 等 Entry 自己先处理完。
+        for seq in ("<ButtonRelease-1>", "<B1-Motion>", "<<Selection>>"):
+            self._entry.bind(seq, lambda _e: self.root.after_idle(self._on_input_key), add="+")
 
     def _layout(self, seed: bool = False) -> None:
         """整窗重排：标题栏 + 气泡 + 输入区 + 滚动条，然后把上一帧贴回去。
@@ -967,7 +1084,8 @@ class LiveGlass:
             with self._geo_lock:
                 self._set_geometry(self._geo.with_shapes(shapes, plate=bool(shown)))
         # 每条消息只按正文占一块；时间戳贴在气泡上方，不进框
-        for info in infos:
+        c = self.canvas
+        for idx, info in enumerate(infos):
             if info["stamp"]:
                 self.text.draw(info["tx"], info["stamp_y"], info["stamp"],
                                anchor=info["ta"], fill="#a8b7c9", size=9, tags=("feed",))
@@ -976,6 +1094,18 @@ class LiveGlass:
                 self.text.draw(info["tx"], info["ty"] + li * info["ls"], line,
                                anchor=info["ta"], fill="#edf6ff", size=11, tags=("feed",),
                                shadow=PLATE, adapt=not PLATE)
+            if not (info["clipped"] or info["expanded"]):
+                continue
+            # 截断/展开的气泡给一块透明热区（fill="" 只占事件、不画像素）和一个
+            # 角标：光靠省略号看不出是被砍了，更没有入口把剩下的读出来。
+            bx0, by0, bx1, by1, _r = info["shape"]
+            tag = f"bubble{idx}"
+            c.create_rectangle(bx0, by0, bx1, by1, fill="", outline="",
+                               tags=("feed", "bubblehit", tag))
+            self.text.draw(bx1 - 12, by1 - 11, "▴" if info["expanded"] else "▾",
+                           anchor="center", fill="#9fc7ff", size=9, tags=("feed", tag))
+            c.tag_bind(tag, "<Button-1>",
+                       lambda _e, k=info["key"]: self._toggle_expand(k))
         if not shown:
             slot = self._geo.shapes[0]
             self.text.draw(w // 2, slot[1] + (slot[3] - slot[1]) // 2,
