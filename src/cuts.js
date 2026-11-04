@@ -82,9 +82,13 @@ export function scorePair(prev, cur) {
  * 返回 0–255 的占比刻度（×255 与旧口径同量级，便于复用现有阈值经验）。
  * 出处：Nagasaka & Tanaka 1992（像素变化计数）、Shahraray 1995（邻域匹配）；独立实现，未取代码。
  */
-export function mcRatioScore(prev, cur, { tau = 15, radius = 2 } = {}) {
+export function mcStats(prev, cur, { tau = 15, radius = 2 } = {}) {
   const n = SCAN_W * SCAN_H;
   let changed = 0;
+  let minX = SCAN_W;
+  let minY = SCAN_H;
+  let maxX = -1;
+  let maxY = -1;
   for (let y = 0; y < SCAN_H; y += 1) {
     for (let x = 0; x < SCAN_W; x += 1) {
       const p3 = (y * SCAN_W + x) * 3;
@@ -105,10 +109,28 @@ export function mcRatioScore(prev, cur, { tau = 15, radius = 2 } = {}) {
           if (d <= tau) { matched = true; break; }
         }
       }
-      if (!matched) changed += 1;
+      if (!matched) {
+        changed += 1;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
     }
   }
-  return (changed / n) * 255;
+  const w = changed === 0 ? 0 : maxX - minX + 1;
+  const h = changed === 0 ? 0 : maxY - minY + 1;
+  return {
+    score: (changed / n) * 255,
+    count: changed,
+    bbox: ((w * h) / n) * 255,
+    fill: changed === 0 ? 0 : changed / (w * h),
+    box: changed === 0 ? null : { x: minX, y: minY, w, h },
+  };
+}
+
+export function mcRatioScore(prev, cur, opts = {}) {
+  return mcStats(prev, cur, opts).score;
 }
 
 export function createScorer({
@@ -124,8 +146,13 @@ export function createScorer({
     rgbToHsv(rgb, cur);
     let s = null;
     let mcScore = null;
+    let mcBox = null;
+    let mcFill = null;
     if (prev) {
-      mcScore = mcRatioScore(prev, cur, { tau: mcTau, radius: gateMcRadius });
+      const mc = mcStats(prev, cur, { tau: mcTau, radius: gateMcRadius });
+      mcScore = mc.score;
+      mcBox = mc.bbox;
+      mcFill = mc.fill;
       if (scoreMode === 'mc') {
         s = gateMcRadius === mcRadius
           ? mcScore
@@ -137,6 +164,6 @@ export function createScorer({
     const tmp = prev ?? new Float32Array(n * 3);
     tmp.set(cur);
     prev = tmp;
-    return { score: s, mcScore, hsv: cur };
+    return { score: s, mcScore, mcBox, mcFill, hsv: cur };
   };
 }

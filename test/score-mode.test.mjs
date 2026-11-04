@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createScorer, mcRatioScore, SCAN_W, SCAN_H } from '../src/cuts.js';
+import { createScorer, mcRatioScore, mcStats, SCAN_W, SCAN_H } from '../src/cuts.js';
 
 const W = SCAN_W;
 const H = SCAN_H;
@@ -75,6 +75,19 @@ test('mcRatioScore：8 格快速平移 radius=2 误报、radius=4 吸收', () =>
   const r4 = mcRatioScore(a, b, { radius: 4 });
   assert.ok(r2 > 100, `radius=2 应误报大片变化，实际 ${r2}`);
   assert.ok(r4 < 20, `radius=4 应吸收 8 格平移，实际 ${r4}`);
+});
+
+test('mcStats：整屏换色返回覆盖率、包围盒与填充率；同一帧全为 0', () => {
+  const a = hsvOf(frame({ r: 240, g: 240, b: 30 }));
+  const b = hsvOf(frame({ r: 20, g: 30, b: 220 }));
+  const st = mcStats(a, b);
+  assert.ok(st.score > 240, `覆盖率应接近满格，实际 ${st.score}`);
+  assert.ok(st.bbox > 240, `包围盒应接近满屏，实际 ${st.bbox}`);
+  assert.ok(st.fill > 0.95, `填充率应接近 1，实际 ${st.fill}`);
+  const same = mcStats(a, a);
+  assert.equal(same.score, 0);
+  assert.equal(same.bbox, 0);
+  assert.equal(same.fill, 0);
 });
 
 test('createScorer：默认口径不变，切到 mc 后同一对帧分数不同', () => {

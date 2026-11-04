@@ -72,6 +72,17 @@ test('相似构图：7.3 分的孤立切点要留下', () => {
     `这应是弱切点（6~12 分），实际 ${cuts[0].score}`);
 });
 
+test('弱切点 mc 地板：同背景 UI 条（abs 10 / mc 5）不能收', () => {
+  const p = createPipeline({ width: W, height: H, fps: 12, queueDepth: 0 });
+  let f = 0;
+  const a = objectAt(10);
+  const b = uiChangeFrame();
+  for (let i = 0; i < 24; i += 1) p.push({ t: f++ / 12, buf: a });
+  for (let i = 0; i < 24; i += 1) p.push({ t: f++ / 12, buf: b });
+  p.finish();
+  assert.equal(p.log.filter((x) => x.via === 'cut').length, 0, '局部 UI 变化不应算换镜头');
+});
+
 test('运动中切机位：117 分、前后 73/54，不能被 2.5 倍卡掉', () => {
   const p = createPipeline({ width: W, height: H, fps: 12, queueDepth: 0 });
   let f = 0;
@@ -83,6 +94,20 @@ test('运动中切机位：117 分、前后 73/54，不能被 2.5 倍卡掉', ()
   assert.ok(Math.abs(cuts[0].t - 3) < 0.01, `切点应在 3.0s，实际 ${cuts[0].t}s`);
   assert.ok(cuts[0].score >= 80, `这应是强切点，实际 ${cuts[0].score}`);
 });
+
+/** 同背景 + 底部一块低覆盖 UI 条：abs 约 10，但 mc 只有 5。 */
+function uiChangeFrame() {
+  const buf = objectAt(10);
+  for (let y = 22; y < 34; y += 1) {
+    for (let x = 20; x < 40; x += 1) {
+      const i = (y * W + x) * 3;
+      buf[i] = Math.min(255, 30 + 180);
+      buf[i + 1] = Math.min(255, 60 + 180);
+      buf[i + 2] = Math.min(255, 110 + 180);
+    }
+  }
+  return buf;
+}
 
 /** 暗底 + 一个小白块：abs 约 13.6，但 mc 只有 16，用来模拟“低覆盖高尖峰”的过渡帧。 */
 function flashFrame(size = 20) {

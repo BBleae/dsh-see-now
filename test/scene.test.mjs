@@ -127,6 +127,9 @@ test('三档节奏：越省门槛越高、叫醒越稀，逐帧用的是最密�
   assert.equal(normal.cutMcAbs, 60);
   assert.equal(normal.cutMcRadius, 4);
   assert.equal(normal.cutSpikeMcAbs, 20);
+  assert.equal(normal.cutIsolatedMcAbs, 8);
+  assert.equal(normal.cutIsolatedMcBBox, 20);
+  assert.equal(normal.cutIsolatedFill, 0.2);
   assert.equal(PACES.calm.pipeline.cutMcAbs, 0);
   assert.equal(PACES.calm.pipeline.cutIsolatedAbs, 0);
 });

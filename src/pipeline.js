@@ -106,11 +106,16 @@ export const DEFAULTS = Object.freeze({
    *
    * 这类切点整屏平均分只有 7~8（低于 cutAbs=12），但前后邻居接近 0 ——
    * 不是“运动”，而是孤立的一下子。给一个更低、但要求**更尖**的绝对地板：
-   * 6 分以上、且高于前后邻居 3 倍才算。只改亮度（约 5.3 分）不会被误判。
+   * 6 分以上、高于前后邻居 3 倍，且 mc 覆盖率 ≥8、变化包围盒 ≥20、包围盒填充率 ≥0.2。
+   * 只改亮度（约 5.3 分）不会被误判；B 站 UI 小面板 mc 只有 1~18，bbox 虽大但很稀
+   * （填充率 0.01~0.11），会被填充率挡掉；真正的相似构图主体占 20×10，填充率约 0.4。
    * 0 = 关闭。
    */
   cutIsolatedAbs: 6,
   cutIsolatedSpike: 3.0,
+  cutIsolatedMcAbs: 8,
+  cutIsolatedMcBBox: 20,
+  cutIsolatedFill: 0.2,
 
   /**
    * 运动中的切机位。
@@ -569,6 +574,8 @@ export function createPipeline(opts = {}) {
     // 运动补偿：整屏在动但邻域里找得到对应 → 运镜；找不到对应 → 换镜头。
     // 半径 4 的 mc 比“绝对台阶”更直接：真实运动切机位 abs 只有 23 也能过。
     const mc = entry.mc ?? 0;
+    const mcBox = entry.mcBox ?? 0;
+    const mcFill = entry.mcFill ?? 0;
     const mcCut = o.cutMcAbs > 0
       && s >= o.cutMcMinScore
       && mc >= o.cutMcAbs;
@@ -576,6 +583,9 @@ export function createPipeline(opts = {}) {
     const isolated = o.cutIsolatedAbs > 0
       && nextScore !== null
       && (o.cutMcAbs <= 0 || nextMc === null || nextMc < o.cutMcAbs)
+      && (o.cutIsolatedMcAbs <= 0 || mc >= o.cutIsolatedMcAbs)
+      && (o.cutIsolatedMcBBox <= 0 || mcBox >= o.cutIsolatedMcBBox)
+      && (o.cutIsolatedFill <= 0 || mcFill >= o.cutIsolatedFill)
       && s >= o.cutIsolatedAbs
       && s < o.cutAbs
       && s > o.cutIsolatedSpike * base;
@@ -612,7 +622,7 @@ export function createPipeline(opts = {}) {
       // `wall` 是这一帧被处理时的墙上时间（epoch ms）。台词（ASR）只有时间码没有帧号，
       // 对齐只能靠同一个时钟 —— `t` 是"第几秒"，掉帧就漂，不能拿来对字幕。
       const entry = {
-        t, buf, score: s, mc: r.mcScore, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
+        t, buf, score: s, mc: r.mcScore, mcBox: r.mcBox, mcFill: r.mcFill, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
       };
       lastSeen = entry;
       lastScore = s;
