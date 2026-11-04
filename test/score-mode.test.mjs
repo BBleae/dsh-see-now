@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  bgStats, contentHeightRatio, createScorer, mcRatioScore, mcStats, SCAN_W, SCAN_H,
+  bgKeep, bgStats, contentHeightRatio, createScorer, mcRatioScore, mcStats, SCAN_W, SCAN_H,
 } from '../src/cuts.js';
 
 const W = SCAN_W;
@@ -141,6 +141,17 @@ test('bgStats：同时返回绝对变化格数，供“稳定背景很多”的�
   assert.equal(st.stable, N);
   assert.equal(st.changed, W * 20);
   assert.equal(st.score, (W * 20 / N) * 255);
+});
+
+test('bgKeep：未来帧回到旧背景为 0，留在新画面为 255', () => {
+  const base = hsvOf(frame());
+  const model = bgStats([base, base, base, base, base, base], base, { withModel: true }).model;
+  const patch = hsvOf(topPatchFrame(20));
+  const returned = bgKeep(model, patch, base);
+  assert.equal(returned.changed, W * 20);
+  assert.equal(returned.score, 0);
+  const stayed = bgKeep(model, patch, patch);
+  assert.equal(stayed.score, 255);
 });
 
 test('contentHeightRatio：宽银幕只算有效画面高度，全黑为 0', () => {

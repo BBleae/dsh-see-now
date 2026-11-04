@@ -17,7 +17,7 @@
  *    只数切点会让档位永远 1 档、一张图只放 4 帧。见 tiers.js 的推导。
  */
 
-import { createScorer, scorePair } from './cuts.js';
+import { bgKeep, createScorer, scorePair } from './cuts.js';
 import { createTiers, applyStrategy } from './tiers.js';
 import { solve, toRects, splitOneBin } from './pack.js';
 import { composePacked, SEAM } from './sheet.js';
@@ -133,6 +133,20 @@ export const DEFAULTS = Object.freeze({
   cutBgMaxChanged: 600,
   cutBgMaxSpanY: 0.85,
   cutBgWindow: 6,
+
+  /**
+   * 未来帧确认（只用于高分候选）：
+   * 高分镜头可能把大面积前景运动当切点；等 `cutFutureDelay` 秒后，
+   * 再看候选帧改掉的格子有多少还没回到参考背景（最近 `cutFutureRefWindow` 帧）。
+   * 低于 `cutFutureKeep` 的判为短暂前景运动，不切。真正换镜头在新场景里稳定下来，
+   * keep 很高；候选帧前的前景离开（画面回到旧背景）也会被 `bgKeep` 抓到。
+   * 0 = 关闭未来帧确认。
+   */
+  cutFutureDelay: 0.5,
+  cutFutureMinScore: 60,
+  cutFutureKeep: 100,
+  cutFutureMinChanged: 64,
+  cutFutureRefWindow: 24,
 
   /**
    * 运动中的切机位。
@@ -273,13 +287,15 @@ export function createPipeline(opts = {}) {
 
   const scorer = createScorer({
     width, height, scoreMode: o.scoreMode, mcTau: o.mcTau, mcRadius: o.mcRadius,
-    gateMcRadius: o.cutMcRadius, bgWindow: o.cutBgWindow,
+    gateMcRadius: o.cutMcRadius, bgWindow: o.cutBgWindow, bgModel: o.cutFutureDelay > 0,
+    bgRefWindow: o.cutFutureDelay > 0 ? o.cutFutureRefWindow : 0,
+    futureMinScore: o.cutFutureMinScore,
   });
   const tiers = createTiers({
     fps, dtFrames: o.dtFrames, smoothFrames: o.smoothFrames,
   });
 
-  let q = [];                  // 待判的帧（最多 2）
+  let q = [];                  // 待判的帧（未来帧确认时最多 ~delay*fps 帧）
   let lastScore = null;
   let acc = 0;                 // 积分累加
   let lastCut = -Infinity;
@@ -570,7 +586,7 @@ export function createPipeline(opts = {}) {
     return solve(seqOf(batch), { binCost: o.binCost });
   }
 
-  function decide(entry, nextScore, nextMc = null) {
+  function decide(entry, nextScore, nextMc = null, future = null) {
     const s = entry.score;
     if (s === null) { keep(entry, 'start'); return; }
 
@@ -622,8 +638,26 @@ export function createPipeline(opts = {}) {
         || (entry.activeY > 0
           ? (entry.mcSpanY ?? 1) / entry.activeY
           : (entry.mcSpanY ?? 1)) < o.cutBgMaxSpanY);
+    // 高分候选不能只靠当前帧：等 0.5 秒，看候选帧改掉的稳定背景有没有回来。
+    // 大面积前景运动离开/移开 -> keep 低；真正换镜头 -> 新场景还在，keep 高。
+    let futureFg = false;
+    if (o.cutFutureDelay > 0
+      && s >= o.cutFutureMinScore
+      && entry.futureModel) {
+      const fk = future && future.hsv
+        ? bgKeep(entry.futureModel, entry.hsv, future.hsv)
+        : null;
+      const rk = entry.prevHsv
+        ? bgKeep(entry.futureModel, entry.prevHsv, entry.hsv)
+        : null;
+      const gone = (r) => r && r.score !== null
+        && r.changed >= o.cutFutureMinChanged
+        && r.score < o.cutFutureKeep;
+      futureFg = gone(fk) || gone(rk);
+    }
     if (entry.t - lastCut >= o.cutMinGap
       && !fgMotion
+      && !futureFg
       && (mcCut || (s >= o.cutAbs && (spike || step)) || isolated)) {
       lastCut = entry.t;
       acc = 0;                      // 切点之后重新攒（那一帧的分属于跨刀，不算运动）
@@ -656,13 +690,24 @@ export function createPipeline(opts = {}) {
       // `wall` 是这一帧被处理时的墙上时间（epoch ms）。台词（ASR）只有时间码没有帧号，
       // 对齐只能靠同一个时钟 —— `t` 是"第几秒"，掉帧就漂，不能拿来对字幕。
       const entry = {
-        t, buf, score: s, mc: r.mcScore, mcBox: r.mcBox, mcFill: r.mcFill, mcSpanY: r.mcSpanY, activeY: r.activeY, bg: r.bgScore, bgStable: r.bgStable, bgChanged: r.bgChanged, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
+        t, buf, score: s, mc: r.mcScore, mcBox: r.mcBox, mcFill: r.mcFill, mcSpanY: r.mcSpanY, activeY: r.activeY, bg: r.bgScore, bgStable: r.bgStable, bgChanged: r.bgChanged, bgModel: r.bgModel, futureModel: r.futureModel, prevHsv: r.prevHsv, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
       };
       lastSeen = entry;
       lastScore = s;
       q.push(entry);
       while (q.length >= 2) {
-        decide(q[0], q[1].score, q[1].mc);
+        const front = q[0];
+        if (front.score === null) {
+          decide(front, q[1].score, q[1].mc, null);
+          q.shift();
+          continue;
+        }
+        const needFuture = o.cutFutureDelay > 0 && front.score >= o.cutFutureMinScore;
+        const future = o.cutFutureDelay > 0
+          ? q.find((e) => e !== front && e.t - front.t >= o.cutFutureDelay) ?? null
+          : null;
+        if (needFuture && !future) break;
+        decide(front, q[1].score, q[1].mc, future);
         q.shift();
       }
     },
@@ -670,7 +715,11 @@ export function createPipeline(opts = {}) {
     /** 流结束：把还剩的那一帧判掉，再把最后一张发出去。 */
     finish() {
       while (q.length) {
-        decide(q[0], q.length > 1 ? q[1].score : null, q.length > 1 ? q[1].mc : null);
+        const front = q[0];
+        const future = o.cutFutureDelay > 0
+          ? q.find((e) => e !== front && e.t - front.t >= o.cutFutureDelay) ?? null
+          : null;
+        decide(front, q.length > 1 ? q[1].score : null, q.length > 1 ? q[1].mc : null, future);
         q.shift();
       }
       // 收尾这批也要**一段一箱**：多箱多半出现在最后（帧都攒在尾部），

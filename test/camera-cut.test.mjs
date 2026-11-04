@@ -60,6 +60,28 @@ function blockAt(x, y, w, h) {
   return buf;
 }
 
+/** 高对比度的移动大块；用于覆盖 score ≥60 的未来帧确认边界。 */
+function highBlockAt(x, y, w, h) {
+  const buf = Buffer.alloc(W * H * 3);
+  for (let yy = 0; yy < H; yy += 1) {
+    for (let xx = 0; xx < W; xx += 1) {
+      const i = (yy * W + xx) * 3;
+      buf[i] = 20;
+      buf[i + 1] = 40;
+      buf[i + 2] = 80;
+    }
+  }
+  for (let yy = y; yy < y + h; yy += 1) {
+    for (let xx = x; xx < x + w; xx += 1) {
+      const i = (yy * W + xx) * 3;
+      buf[i] = 250;
+      buf[i + 1] = 240;
+      buf[i + 2] = 20;
+    }
+  }
+  return buf;
+}
+
 /** 整屏条纹，每帧平移 off；用于“运镜中切机位”。 */
 function stripes(kind, off) {
   const buf = Buffer.alloc(W * H * 3);
@@ -122,6 +144,25 @@ test('前景运动（手/勺子/遮挡）不算切镜头：稳定背景还在，
   // 关掉背景模型后同一序列会误切，证明测的是新守卫，而不是序列本身没变化。
   const raw = feed({ cutBgAbs: 0 });
   assert.ok(raw.length > 0, '关掉背景模型后应能复现旧误切');
+});
+
+test('高分前景运动：未来帧确认大面积前景离开后不切', () => {
+  const feed = (opts) => {
+    const p = createPipeline({ width: W, height: H, fps: 12, queueDepth: 0, ...opts });
+    let f = 0;
+    for (let i = 0; i < 18; i += 1) p.push({ t: f++ / 12, buf: highBlockAt(0, 0, 0, 0) });
+    for (let i = 0; i < 4; i += 1) p.push({ t: f++ / 12, buf: highBlockAt(4, 4, 56, 28) });
+    for (let i = 0; i < 12; i += 1) p.push({ t: f++ / 12, buf: highBlockAt(0, 0, 0, 0) });
+    p.finish();
+    return p.log.filter((x) => x.via === 'cut');
+  };
+
+  const confirmed = feed({});
+  assert.equal(confirmed.length, 0, `前景离开后的高分变化不应切，实际 ${confirmed.length} 刀`);
+
+  const raw = feed({ cutFutureDelay: 0 });
+  assert.ok(raw.length > 0, '关掉未来帧确认后应能复现旧误切');
+  assert.ok(raw[0].score >= 60, `这一条要覆盖高分边界，实际 ${raw[0].score}`);
 });
 
 test('运动中切机位：117 分、前后 73/54，不能被 2.5 倍卡掉', () => {

@@ -59,6 +59,13 @@ export function rgbToHsv(rgb, out) {
 }
 
 /** 两帧 HSV 的加权绝对差均值，0–255。色相按环形处理，低饱和像素的色相降权。 */
+function hsvDiff(a, b, pa, pb = pa) {
+  const dh = Math.abs(a[pa] - b[pb]);
+  const hd = Math.min(dh, 255 - dh);
+  const w = Math.min(a[pa + 1], b[pb + 1]) / 255;
+  return (hd * w + Math.abs(a[pa + 1] - b[pb + 1]) + Math.abs(a[pa + 2] - b[pb + 2])) / 3;
+}
+
 export function scorePair(prev, cur) {
   let sum = 0;
   for (let i = 0; i < cur.length; i += 3) {
@@ -143,11 +150,14 @@ export function mcRatioScore(prev, cur, opts = {}) {
  * 真正切镜头会把旧背景整片换掉。返回值里的 `score` 是稳定背景格的变化占比（0–255），
  * `stable` 少的时候不要用它下结论。
  */
-export function bgStats(history, cur, { stableRange = 24, tau = 15 } = {}) {
+export function bgStats(history, cur, { stableRange = 24, tau = 15, withModel = false } = {}) {
   const n = SCAN_W * SCAN_H;
   const m = history.length;
-  if (m === 0) return { score: null, stable: 0, changed: 0, stablePct: 0 };
+  if (m === 0) return { score: null, stable: 0, changed: 0, stablePct: 0, model: null };
   const vals = new Float32Array(m);
+  const model = withModel
+    ? { med: new Float32Array(n * 3), stable: new Uint8Array(n), tau }
+    : null;
   let stable = 0;
   let changed = 0;
   for (let c = 0; c < n; c += 1) {
@@ -161,19 +171,42 @@ export function bgStats(history, cur, { stableRange = 24, tau = 15 } = {}) {
       const r = vals[m - 1] - vals[0];
       if (r > range) range = r;
     }
+    if (model) {
+      model.med[p] = med[0];
+      model.med[p + 1] = med[1];
+      model.med[p + 2] = med[2];
+    }
     if (range > stableRange) continue;
     stable += 1;
-    const dh = Math.abs(cur[p] - med[0]);
-    const hd = Math.min(dh, 255 - dh);
-    const w = Math.min(cur[p + 1], med[1]) / 255;
-    const d = (hd * w + Math.abs(cur[p + 1] - med[1]) + Math.abs(cur[p + 2] - med[2])) / 3;
-    if (d > tau) changed += 1;
+    if (model) model.stable[c] = 1;
+    if (hsvDiff(cur, med, p, 0) > tau) changed += 1;
   }
   return {
     score: stable === 0 ? null : (changed / stable) * 255,
     stable,
     changed,
     stablePct: (stable / n) * 255,
+    model,
+  };
+}
+
+/** 用候选帧后的画面确认：候选帧改掉的格子，有多少到未来帧还没回到参考背景。 */
+export function bgKeep(model, candidate, future, { tau = 15 } = {}) {
+  if (!model) return { score: null, changed: 0, kept: 0 };
+  const n = SCAN_W * SCAN_H;
+  let changed = 0;
+  let kept = 0;
+  for (let c = 0; c < n; c += 1) {
+    const p = c * 3;
+    if (hsvDiff(candidate, model.med, p) > tau) {
+      changed += 1;
+      if (hsvDiff(future, model.med, p) > tau) kept += 1;
+    }
+  }
+  return {
+    score: changed === 0 ? null : (kept / changed) * 255,
+    changed,
+    kept,
   };
 }
 
@@ -198,11 +231,13 @@ export function contentHeightRatio(hsv) {
 
 export function createScorer({
   width, height, scoreMode = 'abs', mcTau = 15, mcRadius = 2, gateMcRadius = mcRadius,
-  bgWindow = 6, bgStableRange = 24, bgTau = 15,
+  bgWindow = 6, bgStableRange = 24, bgTau = 15, bgModel = false,
+  bgRefWindow = 0, futureMinScore = Infinity,
 }) {
   const n = SCAN_W * SCAN_H;
   const rgb = new Float32Array(n * 3);
   const bgHistory = [];
+  const refHistory = [];
   let prev = null;
   let cur = new Float32Array(n * 3);
 
@@ -217,12 +252,15 @@ export function createScorer({
     let bgScore = null;
     let bgStable = 0;
     let bgChanged = 0;
+    let bgModelOut = null;
+    let futureModel = null;
     const activeY = contentHeightRatio(cur);
     if (bgWindow > 0 && bgHistory.length >= bgWindow) {
-      const bg = bgStats(bgHistory, cur, { stableRange: bgStableRange, tau: bgTau });
+      const bg = bgStats(bgHistory, cur, { stableRange: bgStableRange, tau: bgTau, withModel: bgModel });
       bgScore = bg.score;
       bgStable = bg.stable;
       bgChanged = bg.changed;
+      bgModelOut = bg.model;
     }
     if (prev) {
       const mc = mcStats(prev, cur, { tau: mcTau, radius: gateMcRadius });
@@ -238,6 +276,14 @@ export function createScorer({
         s = scorePair(prev, cur);
       }
     }
+    if (bgRefWindow > 0
+      && s !== null
+      && s >= futureMinScore
+      && refHistory.length >= Math.min(bgRefWindow, 8)) {
+      const ref = bgStats(refHistory, cur, { stableRange: bgStableRange, tau: bgTau, withModel: true });
+      futureModel = ref.model;
+    }
+    const prevHsv = prev ? Float32Array.from(prev) : null;
     const tmp = prev ?? new Float32Array(n * 3);
     tmp.set(cur);
     prev = tmp;
@@ -247,6 +293,15 @@ export function createScorer({
       bgHistory.push(snapshot);
       if (bgHistory.length > bgWindow) bgHistory.shift();
     }
-    return { score: s, mcScore, mcBox, mcFill, mcSpanY, activeY, bgScore, bgStable, bgChanged, hsv: cur };
+    if (bgRefWindow > 0) {
+      const snapshot = new Float32Array(n * 3);
+      snapshot.set(cur);
+      refHistory.push(snapshot);
+      if (refHistory.length > bgRefWindow) refHistory.shift();
+    }
+    return {
+      score: s, mcScore, mcBox, mcFill, mcSpanY, activeY, bgScore, bgStable, bgChanged,
+      bgModel: bgModelOut, futureModel, prevHsv, hsv: cur,
+    };
   };
 }
