@@ -205,7 +205,7 @@ test('mc 不把快速平移当切点：radius=4 吸收整屏位移', () => {
   const p = createPipeline({ width: W, height: H, fps: 12, queueDepth: 0 });
   let f = 0;
   for (let i = 0; i < 48; i += 1) p.push({ t: f++ / 12, buf: pattern(i * 4) });
-  // 收尾静止两帧：最后帧没有 nextScore，旧逻辑会用 null 当尖峰；这里隔离掉收尾效应
+  // 收尾静止一段：最后帧没有 nextScore，旧逻辑会用 null 当尖峰；这里隔离掉收尾效应
   for (let i = 0; i < 12; i += 1) p.push({ t: f++ / 12, buf: pattern(47 * 4) });
   p.finish();
   assert.equal(p.log.filter((x) => x.via === 'cut').length, 0);
