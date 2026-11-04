@@ -377,6 +377,17 @@ export function createPipeline(opts = {}) {
       flush(t, 'time');
       return;
     }
+    /**
+     * **两帧也要有时间出口**。
+     *
+     * 静止画面只有兜底帧：第一帧在 0s、第二个兜底帧在 20s，若继续等第三帧，
+     * 首图会拖到 40s（README 写的是“静止 20 秒给一张”）。这里到 `maxWaitSec`
+     * 就发两帧：token/帧比三帧贵，但“一直不回来”比贵更不能接受。
+     */
+    if (frames.length >= 2 && t - sheetStart >= o.maxWaitSec) {
+      flush(t, 'time');
+      return;
+    }
     if (frames.length === 1 && t - sheetStart >= o.maxWaitSec * 2) {
       flush(t, 'time');
       return;
