@@ -25,12 +25,22 @@ import { noteInterjected } from './interject.js';
 import { openWindow, pidStamp, windowAlive, setWindowHidden } from './window.js';
 import { createListener } from './listen.js';
 
-/** 四档清晰度。数字是画布像素，实际 token 见 src/tokens.js（42px patch 网格）。 */
+/**
+ * 四档清晰度。数字是画布像素（**不含**底部音轨条），实际 token 见 src/tokens.js。
+ *
+ * **宽度全部向下对齐到 42**（800→798、1066→1050…）。原因和 storyboard 那边一样：
+ * 800 会被 pad 到 812 = 19.3 格，白白多算一整列（20 列）；798 正好 19 列，
+ * 面积只少 0.25%，token 每张省 11~24。这是整个插件里唯一**零代价**的降本点。
+ *
+ * **音轨条不额外收费**：条高取"这一档画面本来就没占满的那点行余量"
+ * （450 高占 11 行、上界 462，白空 12px）—— 见 `sheet.js` 的 `stripHeight()`。
+ * 所以这里写的 token 就是**带条之后**的实价。
+ */
 export const SIZES = Object.freeze({
-  low: [800, 450],        // 233 token/张 · 4 帧时每格 400×225 —— 看视频/场景够
-  standard: [1066, 600],  // 407 token/张 · 每格 533×300 —— 屏幕上的中号字能认
-  high: [1280, 720],      // 578 token/张 · 每格 640×360 —— 文件名/小字能认
-  ultra: [1600, 900],     // 882 token/张 · 单帧时几乎等于原屏 —— 真要读字才用（仍低于 1024 封顶）
+  low: [798, 450],        // 222 token/张（12px 条）· 4 帧时每格 399×225 —— 看视频/场景够
+  standard: [1050, 600],  // 392 token/张（30px 条）· 每格 525×300 —— 屏幕上的中号字能认
+  high: [1260, 720],      // 560 token/张（36px 条）· 每格 630×360 —— 文件名/小字能认
+  ultra: [1596, 900],     // 860 token/张（24px 条）· 单帧时几乎等于原屏 —— 真要读字才用
 });
 export const DEFAULT_QUALITY = 'low';
 
@@ -38,9 +48,12 @@ export const DEFAULT_QUALITY = 'low';
  * 档位长边（`region` 模式用）。
  *
  * 为什么单独列一张表，而不是继续读 `SIZES[q][0]`：region 模式下 `width/height`
- * 的语义变成**单格**尺寸，只有长边才对应档位；`SIZES` 里的 800×450 是整张画布的
- * 尺寸（16:9），两者不能混用。数值与 `SIZES` 的长边一致，只是把「哪个数才是尺度」
- * 显式写出来 —— 以后调 `SIZES` 时不会漏掉另一边。
+ * 的语义变成**单格**尺寸，只有长边才对应档位；`SIZES` 里的 798×450 是整张画布的
+ * 尺寸（16:9），两者不能混用。
+ *
+ * **故意不跟着 42 对齐**：整屏模式对齐是因为画布一定被 pad 到 42 的整数倍；
+ * region 的格子是 `cellSize()` 按区域比例算出来的（竖屏 9:16 → 800×450），
+ * 本来就不是 42 的倍数，改了只会连带 2/4 帧拼图的尺寸，收益是个位数 token。
  */
 export const LONG_EDGE = Object.freeze({
   low: 800, standard: 1066, high: 1280, ultra: 1600,
@@ -319,9 +332,20 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
       // 继承它 —— 上限只该由 region 自己说，不能靠 preferFrames 去掩盖。
       maxFrames: Math.min(4, Math.max(1, Number(opts.maxFrames) || 4)),
       preferFrames: Math.min(Math.max(1, Number(opts.maxFrames) || 4), 2),
+      /**
+       * **region 不出音轨条**。那里的画布是"一小块窗口"（竖屏 9:16 时 800×450、
+       * 更窄的可能只有 200 宽），按宽度比例算的条会吃掉 10% 以上的画面，
+       * 而 region 的用途是"把这块看清楚"，不是看视频节奏。
+       */
+      audioStrip: false,
     } : {};
     // oneShot 由调用方（watch）决定：**只有换清晰度**时置 true（缓冲区刚扔，等攒满等于白等一个窗口）
-    const p = createPipeline({ ...opts, width: w, height: h, ...regionOpts });
+    const p = createPipeline({
+      ...opts, width: w, height: h, ...regionOpts,
+      // 音量条：直接问听声音那条链要 —— 那边已经在算 RMS 了（断句要用），
+      // 这里只是把它按时间窗取出来画成柱子，**不额外解码一次音频**。
+      audio: { levels: (a, b) => listener.levelsBetween(a, b) },
+    });
     // 记下"这次建管线用的调用方参数"（不含 oneShot）——watch 靠它发现"模式变了"。
     runOpts = { ...opts };
     delete runOpts.oneShot;

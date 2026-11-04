@@ -125,8 +125,11 @@ async function loadDefineTool() {
  * 台词清单。**只在真有台词时出现** —— 转写没开/没听见的时候，凭空来一行
  * "台词："只会让模型以为转写坏了，然后去猜。
  *
- * 时间码是相对采集起点的秒数，和上面每帧那个 `24.1s` 是同一个坐标系 ——
- * 模型才能把"这句话"和"第几格画面"对上。算法见 runner 的 `attachLines()`。
+ * 两个时间都给：
+ *  - **本机时钟**（`15:57:32`）：用户回头找"那句话是什么时候说的"只能靠它 ——
+ *    实时看屏幕没有"视频进度"这个东西，浏览器放第几秒我们根本不知道；
+ *  - **相对秒**（`9.3s`）：和上面每帧那个 `24.1s` 是同一个坐标系，模型才能把
+ *    "这句话"对到"第几格画面"。
  */
 export function linesText(sheet) {
   const got = sheet.lines;
@@ -135,10 +138,14 @@ export function linesText(sheet) {
   // frame.wall 是 epoch ms、frame.t 是相对秒 → 两者相减就是"t=0 那一刻的 epoch"
   const origin = f0?.wall != null ? f0.wall - f0.t * 1000 : null;
   const rows = got.map((l) => {
-    const rel = origin === null ? '—' : `${((l.t0 - origin) / 1000).toFixed(1)}s`;
-    return `  ${rel}  ${l.text}`;
+    const rel = origin === null ? null : `${((l.t0 - origin) / 1000).toFixed(1)}s`;
+    let clock = null;
+    try { clock = new Date(l.t0).toLocaleTimeString('zh-CN', { hour12: false }); } catch { /* 时区数据缺失 */ }
+    const stamp = [clock, rel].filter(Boolean).join(' / ');
+    return `  ${stamp || '—'}  ${l.text}`;
   });
-  return `\n台词（这段时间里视频里在说的，机器转写，可能有错字/听岔）：\n${rows.join('\n')}`;
+  return `\n台词（这段时间里视频里在说的，机器转写，可能有错字/听岔；`
+    + `时间码是本机时钟 / 相对这张图起点的秒数）：\n${rows.join('\n')}`;
 }
 
 /** 一张图 → 模型看得懂的清单。数字都是「这张图里第几格」，不是抽象指标。 */
@@ -310,7 +317,7 @@ async function registerAll(ctx) {
    *
    * 开了之后：每留下 1 帧就单独出一张满幅图 → 每换一次场景模型就收到一张图 + 一次唤醒。
    * 这是给演示用的（"每换一个场景就告诉我这是什么"），**平时别开**：
-   * 2 秒换一张画面就是每分钟 30 次唤醒，每次一张图（233 token）+ 一轮模型往返。
+   * 2 秒换一张画面就是每分钟 30 次唤醒，每次一张图（222 token，含音轨条）+ 一轮模型往返。
    *
    * 之所以做成"会话级粘性开关"而不是每次 watch 传参：模型很容易忘，
    * 忘一次就退回多帧拼图，演示当场露馅。所以开一次管到 `scene:false` 或 `stop` 为止。

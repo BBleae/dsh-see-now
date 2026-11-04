@@ -20,13 +20,15 @@
 import { bgBorderChanged, bgKeep, createScorer, scorePair } from './cuts.js';
 import { createTiers, applyStrategy } from './tiers.js';
 import { solve, toRects, splitOneBin } from './pack.js';
-import { composePacked, SEAM } from './sheet.js';
+import { composePacked, addAudioStrip, SEAM } from './sheet.js';
 import { coverInto } from './scale.js';
 import { encodePng } from './png.js';
 import { gridRects } from './layout.js';
 
 export const DEFAULTS = Object.freeze({
-  width: 800,
+  // 798 而不是 800：宽度向下对齐 42（patch 格），面积只少 0.25%，每张省 11 token。
+  // runner 总会显式传 SIZES 里的值，这三个只是单独用 pipeline（测试/离线）时的兜底。
+  width: 798,
   height: 450,
   fps: 12,
 
@@ -260,7 +262,7 @@ export const DEFAULTS = Object.freeze({
   maxFrames: 40,
   /**
    * 箱子代价。**实时场景必须远大于 1**：
-   * storyboard 是批量出图，多开一张只是多花一张图（默认 233 token）；实时一次只发一张，
+   * storyboard 是批量出图，多开一张只是多花一张图（默认 222 token）；实时一次只发一张，
    * 「排成两张」等于把半张图扔掉。默认 1.02 会让「两个 1 档帧」直接判成两张各 100%
    * （实测：25 秒素材出 9 张，每张 1 帧）。给到 1000，DP 就只会往一个箱子里压。
    */
@@ -269,6 +271,16 @@ export const DEFAULTS = Object.freeze({
   queueDepth: 1,
   /** 只发一帧就截断。刚开/刚换清晰度时用：让模型马上拿到"现在是什么"，不用等攒满一张。 */
   oneShot: false,
+  /**
+   * 图底下那条音轨（响度柱 + 切点刻度）。
+   *
+   * `audio` 是取数回调 `{levels(wallFrom, wallTo) → {step, db[]}}`，由 runner 从
+   * 听声音那条链接过来；没有它就只能画刻度、画不出柱子。`false` = 彻底不要。
+   *
+   * 代价：条高 = 画面占行后剩下的余量（450 余 12、600 余 30），**不跨行**所以 token 不涨。
+   */
+  audioStrip: true,
+  audio: null,
 });
 
 /**
@@ -326,6 +338,11 @@ export function createPipeline(opts = {}) {
   let frames = [];             // 本张待发
   let sheets = [];
   let dropped = 0;
+  /**
+   * 切点时刻（相对秒）。只在图上画刻度用 —— `log` 里也有，但那个是离线标定用的全量记录，
+   * 长期跑会一直涨；这里只留切点，几百个顶天了。
+   */
+  const cutTimes = [];
   const log = [];              // 每一帧为什么留下（离线标定用）
 
   const stats = {
@@ -377,6 +394,7 @@ export function createPipeline(opts = {}) {
       dup: dup === null ? null : +dup.toFixed(1),
     });
     lastBound = entry.t;
+    if (via === 'cut') cutTimes.push(+entry.t.toFixed(2));
     if (lastKeepT !== null) {
       const g = entry.t - lastKeepT;
       gapEwma = gapEwma === 0 ? g : gapEwma + (g - gapEwma) * 0.3;
@@ -460,11 +478,11 @@ export function createPipeline(opts = {}) {
 
     // 时间：从**这一张的第一帧**算起，不是从上一张算起。
     // 从上一张算的话，一张刚 flush 完 12 秒后来的那一帧会立刻被单独发出去（实测 3 张单帧图）。
-    // 只有一帧时不按时间发：静态画面下等于每 15 秒扔一张单帧图（233 token 换一个没变）。
+    // 只有一帧时不按时间发：静态画面下等于每 15 秒扔一张单帧图（222 token 换一个没变）。
     // 等下一帧（兜底帧最晚 20 秒到）再走这张，两帧还能并排铺一半。
     // 单帧也有封顶：等满两倍 maxWait 还没等到第二帧，那就是没人来看了，发出去收工。
     //
-    // **门槛是 3 帧不是 2 帧**：一张图固定 233 token，2 帧等于每帧 116 token，
+    // **门槛是 3 帧不是 2 帧**：一张图固定 222 token，2 帧等于每帧 121 token，
     // 4 帧只有 58 —— 差一倍。少发一张、等第三帧，性价比直接翻倍（实测 0273 这类
     // 静止素材 2 帧/张 → 3 帧/张，token/帧 116 → 78）。
     if (frames.length >= 3 && t - sheetStart >= o.maxWaitSec) {
@@ -491,6 +509,28 @@ export function createPipeline(opts = {}) {
   }
 
   /**
+   * 给一张已经拼好的图接上音轨条（响度柱 + 切点刻度）。
+   *
+   * **尺寸必须恒定**：只要 `audioStrip` 没关就画，哪怕这一刻还没有音量数据
+   * （刚启动、或者用户根本没开音频）。否则同一档清晰度的图会时高时低，
+   * 模型那边的 token 预算就没法估了 —— 而省下这 20 token 远比"尺寸不可预测"不值。
+   * 没有响度时条上只剩切点刻度，那也是有用的信息。
+   *
+   * 时间轴：条上的 x 用 `from..to`（相对秒，和格子里烧的编号同一套），
+   * 响度序列用 `wall` 去取 —— 音频只有墙上时间，`t` 掉帧会漂。
+   */
+  function withAudioStrip(img, first, last) {
+    // region 模式永远不加条：那里的画布是"一小块窗口"（竖屏时 800×450、更窄的只有 200 宽），
+    // 按宽度比例算的条会吃掉 10% 以上，而 region 的用途是"把这块看清"，不是看视频节奏。
+    if (o.audioStrip === false || regionAspect) return img;
+    const lv = (first.wall && last.wall && o.audio?.levels)
+      ? o.audio.levels(first.wall, last.wall)
+      : null;
+    const cuts = cutTimes.filter((c) => c >= first.t && c <= last.t);
+    return addAudioStrip(img, { loudness: lv, cuts, window: { from: first.t, to: last.t } });
+  }
+
+  /**
    * region 模式的出图：一帧一格，按 `gridRects` 摆成网格（2 帧 2×1 / 4 帧 2×2）。
    *
    * **源帧尺寸 === 单格尺寸**：采集时 ffmpeg 的 `scale=cellW:cellH` 已经按 region
@@ -502,22 +542,24 @@ export function createPipeline(opts = {}) {
     const n = batch.length;
     const g = gridRects(n, width, height, regionAspect);
     const cells = batch.map((f) => ({ buffer: f.buf, w: width, h: height }));
-    const img = composePacked({
+    let img = composePacked({
       frames: cells, rects: g.rects, width: g.width, height: g.height, burn: 'index',
     });
-    const png = encodePng(img.buffer, g.width, g.height, { level: 3 });
+    img = withAudioStrip(img, batch[0], batch[n - 1]);
+    const png = encodePng(img.buffer, img.width, img.height, { level: 3 });
     if (o.queueDepth > 0 && sheets.length >= o.queueDepth) { sheets.shift(); dropped += 1; }
     const sheet = {
       at: t,
       from: batch[0].t,
       to: batch[n - 1].t,
       png,
-      w: g.width,
-      h: g.height,
+      w: img.width,
+      h: img.height,
       fill: 1,
       area: 1,
       bins: 1,
       why,
+      strip: img.stripH ?? 0,
       wallFrom: batch[0].wall ?? null,
       wallTo: batch[n - 1].wall ?? null,
       frames: batch.map((f) => ({
@@ -560,8 +602,10 @@ export function createPipeline(opts = {}) {
       coverInto(used[i].buf, width, height, buffer, cw, ch);
       return { buffer, w: cw, h: ch };
     });
-    const img = composePacked({ frames: cells, rects, width, height, burn: 'index' });
-    const png = encodePng(img.buffer, width, height, { level: 3 });
+    let img = composePacked({ frames: cells, rects, width, height, burn: 'index' });
+    // 音轨条：响度 + 切点刻度。**在编码之前接**，所以是一次编码，不额外烧 CPU。
+    img = withAudioStrip(img, used[0], used[used.length - 1]);
+    const png = encodePng(img.buffer, img.width, img.height, { level: 3 });
     // 占用率按**这张图上真有的格子**算：单箱时与 `p.area / p.bins` 完全等价
     const area = kept.reduce((acc, c) => acc + c.w * c.h, 0);
 
@@ -572,12 +616,13 @@ export function createPipeline(opts = {}) {
       from: used[0].t,
       to: used[used.length - 1].t,
       png,
-      w: width,
-      h: height,
+      w: img.width,
+      h: img.height,
       fill: area,
       area,
       bins: 1,
       why,
+      strip: img.stripH ?? 0,
       // 台词对齐用的墙上时间窗（epoch ms）。`from/to` 是相对秒，掉帧会漂；这两个不会。
       wallFrom: used[0].wall ?? null,
       wallTo: used[used.length - 1].wall ?? null,

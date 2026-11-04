@@ -15,6 +15,9 @@
 
 
 
+// 条带高度要算"这画面占了几行 patch" —— 从 tokens.js 拿常量，别在这里再写一遍 42。
+import { IMAGE_CELL, IMAGE_DOWNSAMPLE, IMAGE_PATCH } from './tokens.js';
+
 export const BACKGROUND = [18, 18, 20];
 export const PAD_FILL = [42, 42, 46];
 export const PAD_GLYPH = [110, 110, 116];
@@ -253,4 +256,124 @@ export function blit(dst, dstW, dstH, x, y, cellW, cellH, src, srcW = cellW) {
 }
 
 /* ---------------------------------------------------------------- 音频条带 */
+
+/**
+ * 条带配色。和 `dsh-video-storyboard` 逐字节一致 —— 两个插件的图会出现在同一个会话里，
+ * 同一件事（响度）用同一个颜色，用户不用重新学一遍怎么看。
+ */
+export const STRIP_BG = [11, 11, 13];
+export const STRIP_BAR = [63, 184, 175];
+export const STRIP_SILENCE = [42, 42, 46];
+export const STRIP_TICK = [255, 235, 59];
+export const STRIP_SEP = [60, 60, 66];
+
+/**
+ * 条带高度。**取"这画面本来就没用满的那点余量"**，不跨行。
+ *
+ * token 是阶梯函数：每 42px 一行。450 高的画面占 11 行（上界 462），下面**空着 12px 白算钱**。
+ * 所以条的高度不该按宽度比例硬算（44px 会让总高 494 跨进第 12 行，每张多 20 token），
+ * 而应该把这段余量用起来 —— 画面一点不少，条也有了，token 还是 11 行。
+ *
+ * | 画面高 | 占几行 | 行边界 | 免费余量 |
+ * |---|---|---|---|
+ * | 450 | 11 | 462 | **12** |
+ * | 600 | 15 | 630 | 30 |
+ * | 720 | 18 | 756 | 36 |
+ * | 900 | 22 | 924 | 24 |
+ *
+ * 余量小于 10px（画面正好卡在行边界上）时退回按宽度算的 22px —— 那种情况条必然跨行，
+ * 只能认；但要保证它至少看得清。
+ */
+export function stripHeight(width, frameHeight = 450) {
+  const rows = Math.ceil(Math.ceil(Math.max(1, frameHeight) / IMAGE_PATCH) / IMAGE_DOWNSAMPLE);
+  const room = rows * IMAGE_CELL - frameHeight;
+  const cap = Math.max(22, Math.round(width * 0.055));
+  if (room < 10) return Math.min(cap, 22);
+  return Math.min(room, cap);
+}
+
+/**
+ * 在图**底下**接一条音轨：响度柱 + 静音底 + 切点刻度。
+ *
+ * 三件事各自解决一个具体问题：
+ *  - **响度柱**：只看图看不出"这段是安静的旁白还是配乐轰鸣"，而音量决定了该不该说话。
+ *  - **静音灰块**：没人说话的地方铺一层深灰，柱子压在上面 —— 早先试过"静音不画柱子"，
+ *    灰块变成一根根实心竖条把波形切断，很难读。
+ *  - **切点刻度**（顶部黄色短线）：和宫格里的编号对应，一眼看出"这一刀切在第几格附近"。
+ *
+ * 图变高 = 画面占行后剩下的余量（450 余 12 → 总高 462，仍是 11 行）—— **token 不涨**。
+ *
+ * @param {{buffer:Buffer,width:number,height:number}} sheet composePacked 的产物
+ * @param {{loudness?:{step:number,db:number[]}, cuts?:number[],
+ *          window:{from:number,to:number}, stripH?:number}} opts
+ */
+export function addAudioStrip(sheet, opts) {
+  const { buffer, width, height } = sheet;
+  const { loudness, cuts = [], window: win } = opts;
+  const stripH = opts.stripH ?? stripHeight(width, height);
+  const out = Buffer.alloc(width * (height + stripH) * 3);
+  buffer.copy(out, 0, 0, buffer.length);
+
+  const base = height * width * 3;
+  for (let i = base; i < out.length; i += 3) {
+    out[i] = STRIP_BG[0]; out[i + 1] = STRIP_BG[1]; out[i + 2] = STRIP_BG[2];
+  }
+
+  const db = loudness?.db ?? [];
+  const span = Math.max(0.001, win.to - win.from);
+  const t2x = (t) => Math.round(((t - win.from) / span) * (width - 1));
+
+  // 静音铺底：整格都是背景色，柱子压上去之后只在柱顶上方露出来
+  for (let x = 0; x < width; x += 1) {
+    const k = Math.min(db.length - 1, Math.floor((x / width) * db.length));
+    if (db.length && (db[k] ?? -120) > -55) continue;
+    for (let y = 0; y < stripH; y += 1) {
+      const i = ((height + y) * width + x) * 3;
+      out[i] = STRIP_SILENCE[0]; out[i + 1] = STRIP_SILENCE[1]; out[i + 2] = STRIP_SILENCE[2];
+    }
+  }
+
+  if (db.length > 1) {
+    // 归一化：参照上限取 97 分位、下限至少 hi-12dB。
+    // 不这么做的话，"全程恒定响度"的素材（测试音、压得很平的成片）会被归一化成一条贴底细线，
+    // 看起来像坏了（storyboard 那边实测过）。
+    const audible = db.filter((v) => v > -70).sort((a, b) => a - b);
+    const hi = audible.length ? audible[Math.floor(audible.length * 0.97)] : -10;
+    const lo = Math.min(audible.length ? audible[Math.floor(audible.length * 0.1)] : -60, hi - 12);
+    const range = Math.max(6, hi - lo);
+    for (let x = 0; x < width; x += 1) {
+      // 每一列取它覆盖的那几个采样点的峰值 —— 600 列里丢细节就等于作弊
+      const i0 = Math.floor((x / width) * db.length);
+      const i1 = Math.max(i0 + 1, Math.ceil(((x + 1) / width) * db.length));
+      let peak = -120;
+      for (let i = i0; i < i1 && i < db.length; i += 1) peak = Math.max(peak, db[i]);
+      const norm = Math.max(0, Math.min(1, (peak - lo) / range));
+      const barH = Math.round(norm * (stripH - 3));
+      for (let y = 0; y < barH; y += 1) {
+        const py = height + stripH - 1 - y;
+        const i = (py * width + x) * 3;
+        out[i] = STRIP_BAR[0]; out[i + 1] = STRIP_BAR[1]; out[i + 2] = STRIP_BAR[2];
+      }
+    }
+  }
+
+  // 切点刻度：顶部短竖线（黄）
+  for (const t of cuts) {
+    if (t < win.from || t > win.to) continue;
+    const x = Math.max(0, Math.min(width - 1, t2x(t)));
+    const tickH = Math.max(3, Math.round(stripH * 0.35));
+    for (let y = 0; y < tickH; y += 1) {
+      const i = ((height + y) * width + x) * 3;
+      out[i] = STRIP_TICK[0]; out[i + 1] = STRIP_TICK[1]; out[i + 2] = STRIP_TICK[2];
+    }
+  }
+
+  // 和宫格之间的分隔线
+  for (let x = 0; x < width; x += 1) {
+    const i = (height * width + x) * 3;
+    out[i] = STRIP_SEP[0]; out[i + 1] = STRIP_SEP[1]; out[i + 2] = STRIP_SEP[2];
+  }
+
+  return { buffer: out, width, height: height + stripH, stripH };
+}
 

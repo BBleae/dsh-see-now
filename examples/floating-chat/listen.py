@@ -267,6 +267,64 @@ def write_wav(path, audio):
     os.replace(tmp, path)
 
 
+class LevelMeter:
+    """每 `step` 秒一个格子的响度（dBFS），给图底下的音量条用。
+
+    **按时间格子存，不按"有数据才写"**：WASAPI loopback 静音时一个字节都不推，
+    照数据写出来的序列在时间轴上是断的 —— 画成条就是"柱子之间一片黑"。
+    所以静音格子显式补 -120dB，时间轴才连续。
+
+    顺手做的理由：这段音频**本来就要过一遍**（算 RMS 断句），
+    再加一次 `20log10` 几乎没有成本。不用像 storyboard 那样再开一次 ffmpeg 跑 ebur128。
+    """
+
+    def __init__(self, step=0.1, keep=180.0):
+        self.step = step
+        self.keep = keep
+        self.t0 = None
+        self.grid = {}
+
+    def push(self, wall, block):
+        if self.t0 is None:
+            self.t0 = wall
+        if len(block) == 0:
+            return
+        idx = int((wall - self.t0) / self.step)
+        peak = float(np.sqrt(np.mean(block.astype(np.float32) ** 2)))
+        if peak > self.grid.get(idx, 0.0):
+            self.grid[idx] = peak
+        # 修剪：只留 keep 秒
+        span = int(self.keep / self.step)
+        if len(self.grid) > span + 40:
+            cut = idx - span
+            for k in [k for k in list(self.grid) if k < cut]:
+                del self.grid[k]
+
+    def snapshot(self):
+        if self.t0 is None or not self.grid:
+            return None
+        lo, hi = min(self.grid), max(self.grid)
+        db = []
+        for i in range(lo, hi + 1):
+            v = self.grid.get(i)
+            db.append(-120.0 if v is None else round(20.0 * np.log10(max(v, 1e-6)), 1))
+        return {"step": self.step, "from": int((self.t0 + lo * self.step) * 1000), "db": db}
+
+
+def write_levels(path, meter):
+    """原子写。读的一方（Node）随时可能在读，不能让它看到半个 JSON。"""
+    snap = meter.snapshot()
+    if not snap:
+        return
+    tmp = f"{path}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(snap, f, separators=(",", ":"))
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser(description="抓系统回环声音，按静音断句落成 16k wav")
     ap.add_argument("--out", required=False, help="wav 输出目录（seg-<epochMs>.wav）")
@@ -316,7 +374,10 @@ def main():
                         pre=args.pre, min_seg=args.min_seg, thr=args.thr)
 
         carry = np.zeros(0, dtype=np.float32)   # 48k → 16k 的余数（3 个凑 1 个）
+        meter = LevelMeter()
+        levels_path = os.path.join(args.out, "levels.json")
         last_beat = time.time()
+        last_levels = 0.0
         dropped = 0
         written = 0
 
@@ -352,9 +413,14 @@ def main():
                 wall, raw = None, None
             if raw is not None:
                 x = raw.reshape(-1, ch).mean(axis=1) if ch > 1 else raw
-                land(seg.push(wall, drop_ratio(x)))
+                block = drop_ratio(x)
+                meter.push(wall, block)          # 音量条：顺手记，不额外解码
+                land(seg.push(wall, block))
             # 静音期没有数据，靠这里把"说完了"判出来
             land(seg.tick(time.time()))
+            if time.time() - last_levels > 1.0:
+                last_levels = time.time()
+                write_levels(levels_path, meter)
             if time.time() - last_beat > 30:
                 last_beat = time.time()
                 emit({"event": "beat", "written": written, "skipped": dropped})
@@ -363,6 +429,10 @@ def main():
     finally:
         try:
             land(seg.flush())      # 退出时把没说完的半句也交出去（够长才要）
+        except Exception:
+            pass
+        try:
+            write_levels(levels_path, meter)   # 最后一帧音量条也要落下去
         except Exception:
             pass
         try:

@@ -227,3 +227,66 @@ test('quietFile：默认和陪看共用同一个路径（麦克风那条也靠�
   delete env.DSH_QUIET_FILE;
   assert.equal(quietFile(env).replace(/\\/g, '/'), 'C:/fake-home/watch/out/quiet-until.json');
 });
+
+test('addAudioStrip：图变高 stripH，切点刻度画在对应的 x 上', async () => {
+  const { addAudioStrip, stripHeight } = await import('../src/sheet.js');
+  const w = 800; const h = 450;
+  const img = { buffer: Buffer.alloc(w * h * 3, 10), width: w, height: h };
+  const db = Array.from({ length: 100 }, (_, i) => (i < 50 ? -60 : -20));  // 前半静音后半有声
+  const out = addAudioStrip(img, {
+    loudness: { step: 0.1, db }, cuts: [5], window: { from: 0, to: 10 },
+  });
+  const stripH = stripHeight(w, h);
+  assert.equal(out.height, h + stripH);
+  assert.equal(out.height, 450 + 12, '450 高只占 11 行、余 12px，条就用这 12px');
+  assert.equal(out.buffer.length, w * (h + stripH) * 3);
+
+  // 切点 5s 在窗口 [0,10] 的中点 → x ≈ 400，顶上那几行是黄的
+  const x = Math.round((5 / 10) * (w - 1));
+  const at = (px, py) => {
+    const i = (py * w + px) * 3;
+    return [out.buffer[i], out.buffer[i + 1], out.buffer[i + 2]];
+  };
+  assert.deepEqual(at(x, h + 2), [255, 235, 59], '切点刻度必须是黄色');
+  // 没有切点的地方不能也是黄的
+  assert.notDeepEqual(at(x + 20, h + 2), [255, 235, 59]);
+});
+
+test('addAudioStrip：没有响度数据也能只画刻度（不能因此不出图）', async () => {
+  const { addAudioStrip } = await import('../src/sheet.js');
+  const img = { buffer: Buffer.alloc(800 * 450 * 3, 10), width: 800, height: 450 };
+  const out = addAudioStrip(img, { cuts: [1, 9], window: { from: 0, to: 10 } });
+  assert.equal(out.height, 462);
+});
+
+test('levelsBetween：按时间窗切片，窗口外/没数据填 -120dB', async () => {
+  const { createListener } = await import('../src/listen.js');
+  const dir = mkdtempSync(join(tmpdir(), 'see-levels-'));
+  try {
+    // 10 秒、0.1 秒一格；只有前 5 秒有声音
+    const db = Array.from({ length: 100 }, (_, i) => (i < 50 ? -20 : -120));
+    writeFileSync(join(dir, 'levels.json'), JSON.stringify({ step: 0.1, from: 1_000_000, db }));
+    const l = createListener({ dir, env: { ...process.env, DSH_HOME: dir }, log: () => {} });
+    const got = l.levelsBetween(1_000_000, 1_010_000);
+    assert.ok(got, '应该有数据');
+    assert.equal(got.db.length, 100, '长度 = 时长 / step');
+    assert.equal(got.db[0], -20);
+    assert.equal(got.db[99], -120, '后半段没声音，必须是 -120 而不是断掉');
+    // 完全在数据之外的窗口 → 全 -120，但不能返回 null
+    const far = l.levelsBetween(1_100_000, 1_110_000);
+    assert.ok(far.db.every((v) => v === -120));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('linesText：台词同时给本机时钟和相对秒', async () => {
+  const { linesText } = await import('../src/index.js');
+  const t0 = 1_700_000_000_000;
+  const sheet = {
+    frames: [{ t: 10, wall: t0 + 10_000 }],
+    lines: [{ t0: t0 + 2_000, t1: t0 + 4_000, text: '第一句' }],
+  };
+  const out = linesText(sheet);
+  assert.match(out, /\d{2}:\d{2}:\d{2}/, `要有本机时钟，实际：${out}`);
+  assert.match(out, /2\.0s/, `要有相对秒，实际：${out}`);
+  assert.match(out, /第一句/);
+});

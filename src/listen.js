@@ -360,6 +360,9 @@ export function createListener({
   let transcriber = null;
   let lastSegAt = 0;
   let total = 0;
+  /** 音量条数据：`{step, from, db[]}`，Python 那边每秒原子重写一次 levels.json */
+  let levels = null;
+  let levelsAt = 0;
 
   function state() {
     return {
@@ -374,11 +377,53 @@ export function createListener({
     };
   }
 
+  /**
+   * 读音量序列（每秒最多读一次 —— Python 那边就是这么写的，读更勤只是白扫盘）。
+   *
+   * 这东西**和转写是两条独立的线**：转写要等一整句说完，音量条是即时的。
+   * 所以哪怕转写服务挂了、或者全是纯音乐没人说话，音量条照样有。
+   */
+  function pollLevels() {
+    if (Date.now() - levelsAt < 900) return;
+    levelsAt = Date.now();
+    try {
+      const raw = JSON.parse(readFileSync(join(audioDir, 'levels.json'), 'utf8'));
+      if (Array.isArray(raw?.db) && raw.db.length) levels = raw;
+    } catch { /* 还没写出来 / 正在 rename，下一次再说 */ }
+  }
+
+  /**
+   * 取某段时间窗的音量序列，**对齐到 `wallFrom`**（第一格就是这一秒的声音）。
+   *
+   * 返回的 `db` 长度按 `span/step` 算死 —— 画条时按列聚合，长度不对就整体错位
+   * （图上的柱子比声音晚半秒，看着像卡带）。
+   *
+   * @returns {null | {step:number, db:number[]}}
+   */
+  function levelsBetween(wallFrom, wallTo, { maxPoints = 900 } = {}) {
+    pollLevels();     // 自己读一次：转写那条线挂了（或者全是纯音乐）也照样有音量条
+    if (!levels || !(wallTo > wallFrom)) return null;
+    const stepMs = (Number(levels.step) || 0.1) * 1000;
+    const span = wallTo - wallFrom;
+    const n = Math.round(span / stepMs);
+    if (n < 2) return null;
+    const count = Math.min(n, maxPoints);
+    const out = [];
+    for (let i = 0; i < count; i += 1) {
+      const t = wallFrom + (i * span) / count;
+      const k = Math.round((t - levels.from) / stepMs);
+      const v = k >= 0 && k < levels.db.length ? levels.db[k] : -120;
+      out.push(Number.isFinite(v) ? v : -120);
+    }
+    return { step: span / count / 1000, db: out };
+  }
+
   /** 扫目录，处理没见过的 wav。一次一条，串行 —— 并发打同一个模型只会互相排队。 */
   async function drain() {
     if (busy || !transcriber) return;
     busy = true;
     try {
+      pollLevels();       // 音量条和转写共用这一拍，但它自己节流到 1 秒一次
       let names = [];
       try { names = readdirSync(audioDir); } catch { names = []; }
       const segs = names
@@ -529,5 +574,5 @@ export function createListener({
     return buffer.between(fromMs, toMs, opts);
   }
 
-  return { start, stop, state, between, drain };
+  return { start, stop, state, between, levelsBetween, drain };
 }

@@ -118,15 +118,15 @@ test('切清晰度：quality 一换，回来的图分辨率就跟着变', { skip
       action: 'watch', source: 'file', path: clip, seconds: 20, quality: 'low',
     });
     assert.ok(lo.images?.length === 1, 'low 要出图');
-    assert.deepEqual(dims(saved[0].data), [800, 450], 'low 应该是 800×450');
+    assert.deepEqual(dims(saved[0].data), [798, 462], 'low = 798×450 画面 + 12px 音轨条（正好占满 11 行）');
 
     const hi = await registered[0].execute({ action: 'watch', quality: 'high' });
     assert.ok(hi.images?.length === 1, 'high 要出图（换了清晰度要立刻给一帧）');
-    assert.deepEqual(dims(saved[1].data), [1280, 720], 'high 应该是 1280×720');
+    assert.deepEqual(dims(saved[1].data), [1260, 756], 'high = 1260×720 + 36px 音轨条');
     assert.equal(hi.meta.quality, 'high');
 
     const back = await registered[0].execute({ action: 'watch', quality: 'standard' });
-    assert.deepEqual(dims(saved[2].data), [1066, 600], 'standard 应该是 1066×600');
+    assert.deepEqual(dims(saved[2].data), [1050, 630], 'standard = 1050×600 + 30px 音轨条');
     assert.ok(back.meta.frames >= 1);
   } finally {
     dispose();

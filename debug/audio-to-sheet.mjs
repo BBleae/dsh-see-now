@@ -54,6 +54,12 @@ for (let i = 1; i <= 2; i += 1) {
   const r = await runner.watch({ seconds: 8 });
   console.log(`\n== watch #${i} ==`);
   console.log('→', { ok: r.ok, frames: r.sheet?.frames?.length, from: r.sheet?.from, to: r.sheet?.to });
+  console.log('尺寸 →', `${r.sheet?.w}×${r.sheet?.h}`, '音轨条高', r.sheet?.strip);
+  if (r.sheet?.png) {
+    const out = join(process.env.TEMP || tmpdir(), `see-sheet-${i}.png`);
+    writeFileSync(out, r.sheet.png);
+    console.log('图 →', out);
+  }
   console.log('wallFrom/wallTo →', r.sheet?.wallFrom, r.sheet?.wallTo);
   console.log('lines →', JSON.stringify(r.sheet?.lines ?? null, null, 1));
   console.log('listen →', runner.status().listen);

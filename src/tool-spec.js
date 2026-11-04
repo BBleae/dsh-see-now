@@ -166,12 +166,13 @@ export function seeNowToolSpec() {
       },
       quality: {
         type: 'string',
-        description: 'How sharp the image is. "low" (default, 800×450, ≈233 tokens) — 4 frames are 400×225 each, '
-          + 'enough for faces/scenes/video but small text is unreadable. '
-          + '"standard" (1066×600, ≈407 tokens) — 533×300 per frame, medium text readable. '
-          + '"high" (1280×720, ≈578 tokens) — 640×360 per frame, filenames readable. '
-          + '"ultra" (1600×900, ≈882 tokens) — a single frame is nearly the real screen; use it only when '
-          + '"high" is still not enough.\n'
+        description: 'How sharp the image is. "low" (default, 798×462 = 450px of frames + a 12px audio '
+          + 'strip, ≈222 tokens) — 4 frames are 399×225 each, enough for faces/scenes/video but small text '
+          + 'is unreadable. '
+          + '"standard" (1050×630, ≈392 tokens) — 525×300 per frame, medium text readable. '
+          + '"high" (1260×756, ≈560 tokens) — 630×360 per frame, filenames readable. '
+          + '"ultra" (1596×924, ≈860 tokens) — a single frame is nearly the real screen; use it only '
+          + 'when "high" is still not enough.\n'
           + 'Switch it UP as soon as you cannot read something — do not guess from a blurry image. '
           + 'Changing quality restarts the capture (~0.6s) and immediately returns ONE frame of the current '
           + 'screen, so you get the sharp view right away; the following calls stay at that quality.',
