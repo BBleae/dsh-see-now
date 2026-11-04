@@ -151,6 +151,16 @@ export const DEFAULTS = Object.freeze({
   cutFutureRefWindow: 24,
   /** 外圈变化低于这个值（0–255）且背景仍稳定时，判为停住的大面积前景。 */
   cutFutureBorderMax: 10,
+  /** 低/中分候选若背景仍有一块没变，也做未来帧确认。 */
+  cutFutureLowBgMax: 160,
+  /** 低/中分候选的外圈被改掉多少（大面积前景盖到边缘）才值得未来确认。 */
+  cutFutureLowBorderMin: 60,
+  /** 稳定背景格数太少时，优先怀疑大面积前景，而不是整屏新场景。 */
+  cutFutureLowStableMax: 700,
+  /** 低/中分候选的 keep 门槛更宽：只有一部分旧背景回来就可能是前景/移动。 */
+  cutFutureLowKeep: 200,
+  /** 低分候选也要有参考背景模型才能做上面这次确认。 */
+  cutFutureBuildMinScore: 12,
 
   /**
    * 运动中的切机位。
@@ -293,7 +303,9 @@ export function createPipeline(opts = {}) {
     width, height, scoreMode: o.scoreMode, mcTau: o.mcTau, mcRadius: o.mcRadius,
     gateMcRadius: o.cutMcRadius, bgWindow: o.cutBgWindow, bgModel: o.cutFutureDelay > 0,
     bgRefWindow: o.cutFutureDelay > 0 ? o.cutFutureRefWindow : 0,
-    futureMinScore: o.cutFutureMinScore,
+    futureMinScore: o.cutFutureDelay > 0
+      ? Math.min(o.cutFutureMinScore, o.cutFutureBuildMinScore)
+      : o.cutFutureMinScore,
   });
   const tiers = createTiers({
     fps, dtFrames: o.dtFrames, smoothFrames: o.smoothFrames,
@@ -613,6 +625,24 @@ export function createPipeline(opts = {}) {
     return border !== null && border.score < o.cutFutureBorderMax;
   }
 
+  /** 低/中分但背景还有一块没被换掉、外圈也没动：可能是大手/产品挡住，也可能是真切。 */
+  function lowAmbiguousFuture(entry) {
+    if (o.cutFutureDelay <= 0
+      || o.cutBgAbs <= 0
+      || entry.score === null
+      || entry.score >= o.cutFutureMinScore
+      || !entry.futureModel
+      || entry.bg === null
+      || entry.bg <= 0
+      || entry.bg >= o.cutFutureLowBgMax
+      || (entry.bgStable ?? 0) > o.cutFutureLowStableMax) return false;
+    const guardY = entry.guardY ?? entry.activeY ?? 0;
+    if (!(guardY >= 0.25)) return false;
+    // 外圈也被改变：可能是整屏前景，也可能是真切；只对这种情况做未来确认。
+    const border = bgBorderChanged(entry.futureModel, entry.hsv, guardY);
+    return border !== null && border.score >= o.cutFutureLowBorderMin;
+  }
+
   function decide(entry, nextScore, nextMc = null, future = null) {
     const s = entry.score;
     if (s === null) { keep(entry, 'start'); return; }
@@ -669,21 +699,25 @@ export function createPipeline(opts = {}) {
     // 高分候选不能只靠当前帧：等 0.5 秒，看候选帧改掉的稳定背景有没有回来。
     // 大面积前景运动离开/移开 -> keep 低；真正换镜头 -> 新场景还在，keep 高。
     let futureFg = false;
+    const lowFuture = lowAmbiguousFuture(entry);
     if (o.cutFutureDelay > 0
-      && s >= o.cutFutureMinScore
-      && entry.futureModel) {
+      && entry.futureModel
+      && (s >= o.cutFutureMinScore || lowFuture)) {
       const fk = future && future.hsv
         ? bgKeep(entry.futureModel, entry.hsv, future.hsv)
         : null;
       const rk = entry.prevHsv
         ? bgKeep(entry.futureModel, entry.prevHsv, entry.hsv)
         : null;
+      const keepLimit = lowFuture ? o.cutFutureLowKeep : o.cutFutureKeep;
       const gone = (r) => r && r.score !== null
         && r.changed >= o.cutFutureMinChanged
-        && r.score < o.cutFutureKeep;
+        && r.score < keepLimit;
       // 前景停住时外圈通常还是旧背景：背景变化不算整片，外圈几乎没动，
       // 就不要等未来帧回来。真正换镜头 bg 很高，不会被这条挡住。
-      futureFg = gone(fk) || gone(rk) || stillForeground(entry);
+      futureFg = gone(fk)
+        || (!lowFuture && gone(rk))
+        || (s >= o.cutFutureMinScore && stillForeground(entry));
     }
     if (entry.t - lastCut >= o.cutMinGap
       && !fgMotion
@@ -733,8 +767,8 @@ export function createPipeline(opts = {}) {
           continue;
         }
         const needFuture = o.cutFutureDelay > 0
-          && front.score >= o.cutFutureMinScore
-          && !stillForeground(front);
+          && ((front.score >= o.cutFutureMinScore && !stillForeground(front))
+            || lowAmbiguousFuture(front));
         const future = o.cutFutureDelay > 0
           ? q.find((e) => e !== front && e.t - front.t >= o.cutFutureDelay) ?? null
           : null;
