@@ -35,8 +35,14 @@ import { noteInterjected } from './interject.js';
 import { onSpeech, speechSubscribers } from './speech.js';
 import { estimateSpeechMs, nextProactiveAt } from './pacing.js';
 
-/** 两次叫醒之间至少隔这么久（叫醒一次 = 模型跑一轮，很贵） */
-const WAKE_COOLDOWN_MS = 3000;
+/**
+ * 用户插话的"同一拍"判定（毫秒）。
+ *
+ * **不是冷却**：插话本身不做节流（人不会一秒钟发十条）。这 500ms 只用来挡住
+ * "同一拍里连着来两条"——那种情况下面模型这一轮刚开头，`followup` 投进去
+ * 必定变成排队消息。放回队里等下一拍再投，话不丢。
+ */
+const INTERJECT_GAP_MS = 500;
 
 /**
  * 两张图之间至少隔这么久才叫醒模型。
@@ -379,15 +385,23 @@ export function startLoop({
       //    `followup` 投进去只会排队到这一轮之后，纯属插队无效还容易串话。
       if (waiting) return;
 
-      // ④ 用户插话 —— **优先于一切**，不等攒满一张、不看队列深度
+      // ④ 用户插话 —— **优先于一切**，不等攒满一张、不看队列深度，
+      //    **也不受自动唤醒的冷却限制**。
+      //
+      //    3 秒冷却本来是给"机器自己叫醒"防刷屏用的。套在人的输入上就是画蛇添足：
+      //    你说完一句、3 秒内又补一句，第二句被静默吞掉，用户侧的感受是"它聋了"，
+      //    然后那句话以"排队消息"的形式堆在宿主里 —— 比不叫醒还糟。
+      //
+      //    唯一的例外是**同一拍连发**（500ms 内刚叫醒过）。那种情况下面必然在排队，
+      //    放回队里等下一拍，不丢。
       if (queue.length) {
-        if (Date.now() - lastWakeAt < WAKE_COOLDOWN_MS) return;
+        if (Date.now() - lastWakeAt < INTERJECT_GAP_MS) return;
         const said = queue.shift();
         noteInterjected(said);          // 记待回执：没带 say 回的话下一轮会被顶
         const text = `[看屏幕·用户插话] 「${said}」\n`
           + '**先说话，再干活** —— 用 `say` 回他（普通回复他一个字都看不到，也不会被念）。'
           + '要同时看一眼就调 `see_now({action:"peek"})`，图马上给你。';
-        await wake(text, { cooldownMs: WAKE_COOLDOWN_MS });
+        await wake(text);
         return;
       }
 

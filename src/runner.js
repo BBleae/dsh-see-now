@@ -167,7 +167,11 @@ export function guardReason({ hungUp = false, fileEnded = false, explicitSrc = f
   return null;
 }
 
-export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec = 60, ctx = null } = {}) {
+export function createRunner({
+  ffmpegPath = 'ffmpeg', log = () => {}, graceSec = 60, ctx = null,
+  /** 「听声音」的延迟参数（`~/.dsh/see-now.json` 的 `listen` 段，见 tuning.js） */
+  listen = null,
+} = {}) {
   let pipeline = null;   // 当前（或刚停的）引擎 —— 停采集后仍留着，好把队列里剩的图发完
   let running = false;
   let run = null;
@@ -187,7 +191,7 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
    * 为什么在 runner 里而不是在工具层：它的生命周期和采集是同一个 ——
    * 开始看就开听，收工就停，中途换清晰度/换 region 也不用重启（音频跟画面无关）。
    */
-  const listener = createListener({ ctx, log });
+  const listener = createListener({ ctx, log, listen });
   /**
    * 上一张图的时间窗末尾（epoch ms）。台词按"上一张到现在"取，
    * 不能按这一张自己的 from/to —— 静止屏幕上两张之间隔 60 秒，中间说的话会整段漏掉。
@@ -374,7 +378,8 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
     });
     run.done.then((r) => {
       if (pipeline === p) {
-        lastError ??= `ffmpeg 退出（${r.frames} 帧 / ${Math.round(r.ms / 1000)}s）`;
+        // **文件正常放完（`ended`）不是错误** —— 别写进 lastError，status 里会显示成故障
+        if (!r?.ended) lastError ??= `ffmpeg 退出（${r.frames} 帧 / ${Math.round(r.ms / 1000)}s）`;
         // 文件源放完 = 这一次看完了。记下来，别让下一条 watch 又从头放一遍。
         if (s.kind === 'file') endedSource = s;
         teardown('ffmpeg-exit');
@@ -530,7 +535,17 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
         log('悬浮窗被重新打开过 —— 解除挂断，继续看。');
       }
 
-      const blocked = guardReason({ hungUp, fileEnded: Boolean(endedSource), explicitSrc });
+      /**
+       * `fileEnded` 只在**采集已经停了**的时候才算数。
+       *
+       * 为什么：文件还在播（`running` 为真）时，`watch` 走的是"接着等下一张"，
+       * 根本不是重播；这时候拦下来就是"看个视频，第二次 `watch` 就说文件放完了"。
+       * 真正的重播是"采集停了 + 不带 path 再 watch"—— 那一下才会 spawn 一根新管道、
+       * 从第 0 秒重来（社区实报的 24 秒解 1955 帧）。
+       */
+      const blocked = guardReason({
+        hungUp, fileEnded: Boolean(endedSource) && !running, explicitSrc,
+      });
       if (blocked === 'hung-up') return { ok: false, reason: 'hung-up', waited: 0 };
       if (blocked === 'file-ended') {
         return { ok: false, reason: 'file-ended', waited: 0, path: endedSource?.path };
@@ -666,6 +681,14 @@ export function createRunner({ ffmpegPath = 'ffmpeg', log = () => {}, graceSec =
               // （issue #1 的复现：`{ ok: true, frames: 1 }`）。
               // 不够就丢掉这一张接着等 —— 到点还没攒够，会走下面的 no-change 提示。
               if (s.frames.length >= minFrames) {
+                /**
+                 * **出图前等最多 300ms，让"最后一句话"赶上这张图。**
+                 *
+                 * 台词的取数窗口是「上一张的 wallTo → 这一张的 wallTo」。差几百毫秒
+                 * 没转完的那句会被推到下一张 —— 那就是十几秒，而 ASR 本身只有 0.7 秒。
+                 * 只有这条正常返回路径等；`peek`（后台唤醒）和插话要快，不等。
+                 */
+                await listener.settle(300);
                 return {
                   ok: true, sheet: attachLines(s), waited: (Date.now() - t0) / 1000, quality, windowOpen: win.ok,
                 };

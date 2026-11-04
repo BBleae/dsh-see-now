@@ -76,10 +76,6 @@ export function appendSpoken(role, text, { speak = true, env = process.env } = {
  */
 let lastSaid = null;
 
-export function lastSpoken() {
-  return lastSaid;
-}
-
 /**
  * 「你上一句说过什么」，给工具结果和唤醒文案共用。
  *
@@ -107,11 +103,6 @@ export function lastSaidText() {
   return lastSaid ? { text: lastSaid.text, at: lastSaid.at } : null;
 }
 
-/** 仅测试用：换一场会话别把上一场的口头禅带过来 */
-export function __resetSpokenLog() {
-  lastSaid = null;
-}
-
 /**
  * **进程共享**的增量探测器。
  *
@@ -125,11 +116,6 @@ let sharedWatcher = null;
 export function chatWatcherShared(env = process.env) {
   if (!sharedWatcher) sharedWatcher = makeChatWatcher(env);
   return sharedWatcher;
-}
-
-/** 仅测试用：换一个 DSH_HOME 之后要让共享 watcher 重建 */
-export function __resetChatWatcher() {
-  sharedWatcher = null;
 }
 
 /**

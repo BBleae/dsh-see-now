@@ -258,33 +258,6 @@ export function solve(tiers, {
 }
 
 /**
- * 自动挑档位序列：格子数固定时，枚举"若干大档 + 若干小档"的组合，
- * 取占用率最高的那个（顺序两种都试：大在前 / 小在前）。
- * @param {number} n 格子数
- * @param {object} [opts]
- * @param {number[]} [opts.tiers] 只在这些档位里挑（默认 2..8）
- */
-export function bestPlan(n, { grow = DEFAULT_GROW, tiers = [2, 3, 4, 5, 6, 7, 8] } = {}) {
-  let best = null;
-  const push = (seq, tag) => {
-    const plan = solve(seq, { grow });
-    if (!best || plan.fill > best.fill + 1e-12) best = { ...plan, seq, tag };
-  };
-  // 1) 全同档
-  for (const k of tiers) push(new Array(n).fill(k), `all-1/${k}`);
-  // 2) 两个相邻档混排（大在前 / 小在前）
-  for (let ki = 0; ki < tiers.length - 1; ki += 1) {
-    const big = tiers[ki];
-    const small = tiers[ki + 1];
-    for (let a = 1; a < n; a += 1) {
-      push([...new Array(a).fill(big), ...new Array(n - a).fill(small)], `mix-${a}x1/${big}`);
-      push([...new Array(n - a).fill(small), ...new Array(a).fill(big)], `mix-${a}x1/${big}-tail`);
-    }
-  }
-  return best;
-}
-
-/**
  * 把一串档位切成**每段都能装进一张图**的若干段（保序、不丢帧、尽量往前塞）。
  *
  * ## 为什么要有它

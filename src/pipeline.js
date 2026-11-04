@@ -20,8 +20,7 @@
 import { bgBorderChanged, bgKeep, createScorer, scorePair } from './cuts.js';
 import { createTiers, applyStrategy } from './tiers.js';
 import { solve, toRects, splitOneBin } from './pack.js';
-import { composePacked, addAudioStrip, SEAM } from './sheet.js';
-import { coverInto } from './scale.js';
+import { composePacked, drawAudioStrip, stripHeight } from './sheet.js';
 import { encodePng } from './png.js';
 import { gridRects } from './layout.js';
 
@@ -208,6 +207,14 @@ export const DEFAULTS = Object.freeze({
    * 0 = 关闭（用固定 silentFloorSec）。
    */
   floorGapK: 0,
+  /**
+   * 自适应兜底的上下界（秒）。**必须给默认值**：`PACES` 里三档都显式传了，
+   * 但直接 `createPipeline({floorGapK: 2})` 时它们是 undefined，
+   * `Math.min(undefined, …)` 得到 NaN → `elapsed >= NaN` 永远 false →
+   * **兜底帧一帧都不会出**（画面静止时就再也不给图了）。这种静默坏死最难查。
+   */
+  floorMin: 2,
+  floorMax: 20,
   /** 和上一张留下的帧差小于这个分就不留（0–255 刻度，见 cuts.js）。 */
   dupMin: 8,
 
@@ -337,7 +344,6 @@ export function createPipeline(opts = {}) {
   let lastKeptHsv = null;      // 上一张留下来的帧（去重基准）
   let frames = [];             // 本张待发
   let sheets = [];
-  let dropped = 0;
   /**
    * 切点时刻（相对秒）。只在图上画刻度用 —— `log` 里也有，但那个是离线标定用的全量记录，
    * 长期跑会一直涨；这里只留切点，几百个顶天了。
@@ -347,7 +353,7 @@ export function createPipeline(opts = {}) {
 
   const stats = {
     frames: 0, kept: 0, cuts: 0, marks: 0, floors: 0, dupSkipped: 0,
-    sheets: 0, msDecode: 0, msTotal: 0,
+    sheets: 0,
     scoreSum: 0, scoreN: 0, scoreMax: 0,
     /** 多箱兜底触发次数（>0 说明调用方没切干净，画面会被丢帧而不是糊掉） */
     overflow: 0,
@@ -519,15 +525,24 @@ export function createPipeline(opts = {}) {
    * 时间轴：条上的 x 用 `from..to`（相对秒，和格子里烧的编号同一套），
    * 响度序列用 `wall` 去取 —— 音频只有墙上时间，`t` 掉帧会漂。
    */
-  function withAudioStrip(img, first, last) {
-    // region 模式永远不加条：那里的画布是"一小块窗口"（竖屏时 800×450、更窄的只有 200 宽），
-    // 按宽度比例算的条会吃掉 10% 以上，而 region 的用途是"把这块看清"，不是看视频节奏。
-    if (o.audioStrip === false || regionAspect) return img;
+  /**
+   * 这一档要不要画音轨条，以及它有多高。
+   *
+   * **region 模式永远不加条**：那里的画布是"一小块窗口"（竖屏时 800×450、更窄的只有 200 宽），
+   * 按宽度比例算的条会吃掉 10% 以上，而 region 的用途是"把这块看清"，不是看视频节奏。
+   */
+  function stripHeightFor() {
+    if (o.audioStrip === false || regionAspect) return 0;
+    return stripHeight(width, height);
+  }
+
+  /** 取这一张时间窗里的响度与切点（没有音频链路时只返回切点）。 */
+  function audioOf(first, last) {
     const lv = (first.wall && last.wall && o.audio?.levels)
       ? o.audio.levels(first.wall, last.wall)
       : null;
     const cuts = cutTimes.filter((c) => c >= first.t && c <= last.t);
-    return addAudioStrip(img, { loudness: lv, cuts, window: { from: first.t, to: last.t } });
+    return { loudness: lv, cuts, window: { from: first.t, to: last.t } };
   }
 
   /**
@@ -542,12 +557,11 @@ export function createPipeline(opts = {}) {
     const n = batch.length;
     const g = gridRects(n, width, height, regionAspect);
     const cells = batch.map((f) => ({ buffer: f.buf, w: width, h: height }));
-    let img = composePacked({
+    const img = composePacked({
       frames: cells, rects: g.rects, width: g.width, height: g.height, burn: 'index',
     });
-    img = withAudioStrip(img, batch[0], batch[n - 1]);
     const png = encodePng(img.buffer, img.width, img.height, { level: 3 });
-    if (o.queueDepth > 0 && sheets.length >= o.queueDepth) { sheets.shift(); dropped += 1; }
+    if (o.queueDepth > 0 && sheets.length >= o.queueDepth) sheets.shift();
     const sheet = {
       at: t,
       from: batch[0].t,
@@ -595,22 +609,27 @@ export function createPipeline(opts = {}) {
     const used = batch.slice(0, kept.length);
     if (used.length < batch.length) stats.overflow += 1;
     const rects = toRects(kept, { width, height, gutter: 0 });
-    const cells = rects.map((r, i) => {
-      const cw = Math.max(1, r.pw - SEAM);
-      const ch = Math.max(1, r.ph - SEAM);
-      const buffer = Buffer.alloc(cw * ch * 3);
-      coverInto(used[i].buf, width, height, buffer, cw, ch);
-      return { buffer, w: cw, h: ch };
+    /**
+     * 帧直接以 `{src, sw, sh}` 交给 `composePacked`：它内部用 `coverIntoAt`
+     * 把每一帧缩进画布的对应格子。
+     *
+     * 旧链路是「每格 alloc 中间缓冲 → coverInto → blit 到画布」，等于每格多做
+     * 一次 267KB 的分配和一次同样大小的拷贝；4 格图纯搬运就是 1MB。现在零中间缓冲。
+     */
+    const cells = used.map((f) => ({ src: f.buf, sw: width, sh: height }));
+    const stripH = stripHeightFor();
+    const img = composePacked({
+      frames: cells, rects, width, height, burn: 'index', stripH,
     });
-    let img = composePacked({ frames: cells, rects, width, height, burn: 'index' });
-    // 音轨条：响度 + 切点刻度。**在编码之前接**，所以是一次编码，不额外烧 CPU。
-    img = withAudioStrip(img, used[0], used[used.length - 1]);
+    // 音轨条：响度 + 切点刻度。**画布已经预留好高度**，这里是就地填底部，
+    // 不再额外分配 + 拷贝一整张图（省 1.1MB/张）。
+    if (stripH) drawAudioStrip(img.buffer, img.width, img.height, height, audioOf(used[0], used[used.length - 1]));
     const png = encodePng(img.buffer, img.width, img.height, { level: 3 });
     // 占用率按**这张图上真有的格子**算：单箱时与 `p.area / p.bins` 完全等价
     const area = kept.reduce((acc, c) => acc + c.w * c.h, 0);
 
     // 队列深度：模型没跟上时丢最旧的 —— 宁可丢老画面，不给模型看十几秒前的事
-    if (o.queueDepth > 0 && sheets.length >= o.queueDepth) { sheets.shift(); dropped += 1; }
+    if (o.queueDepth > 0 && sheets.length >= o.queueDepth) sheets.shift();
     sheets.push({
       at: t,
       from: used[0].t,
@@ -652,10 +671,6 @@ export function createPipeline(opts = {}) {
       return Math.max(0, Number(raw) || 0);
     };
     return batch.map((f) => applyStrategy([Math.min(8, f.level + boostFor(f.via))], o.strategy)[0]);
-  }
-
-  function plan0(batch) {
-    return solve(seqOf(batch), { binCost: o.binCost });
   }
 
   /** 停住的大面积前景：外圈还是旧背景，且背景变化不到整片。 */
@@ -915,7 +930,6 @@ export function createPipeline(opts = {}) {
     },
 
     get pending() { return sheets.length; },
-    get dropped() { return dropped; },
     get log() { return log; },
     get stats() { return stats; },
     get tiers() { return tiers; },

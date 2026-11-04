@@ -40,6 +40,8 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { LISTEN_DEFAULTS } from './tuning.js';
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const LISTEN_SCRIPT = join(HERE, '..', 'examples', 'floating-chat', 'listen.py');
 
@@ -360,18 +362,48 @@ export function findListenPython({ env = process.env } = {}) {
  */
 export function createLineBuffer({ keepMs = KEEP_MS } = {}) {
   let lines = [];
+  const put = (t0, t1, t, partial) => {
+    const entry = { t0, t1, text: t, partial };
+    lines.push(entry);
+    // 修剪：只留最近 keepMs。看屏幕是长期会话，两三小时不修剪就是几千条
+    if (lines.length > 8) {
+      const cut = Date.now() - keepMs;
+      lines = lines.filter((l) => l.t1 >= cut);
+    }
+    return entry;
+  };
   return {
     add(t0, t1, text) {
       const t = String(text ?? '').trim();
       if (!t) return null;
-      const entry = { t0, t1, text: t };
-      lines.push(entry);
-      // 修剪：只留最近 keepMs。看屏幕是长期会话，两三小时不修剪就是几千条
-      if (lines.length > 8) {
-        const cut = Date.now() - keepMs;
-        lines = lines.filter((l) => l.t1 >= cut);
+      return put(t0, t1, t);
+    },
+    /**
+     * 写入/覆盖同一句的台词。
+     *
+     * 为什么需要覆盖：长句「边说边出」会先给一版 `partial` 快照，整句落盘后再给准确版。
+     * 判据是 **t0 相同就是同一句**（t0 是句首的墙上时间，由 Python 侧那一段唯一决定）。
+     *
+     * 两条铁律：
+     *  - **整句永远盖过快照**（`prev.partial === false && partial` 时不许覆盖）；
+     *  - **快照不许把整句改回 partial**（同一句的迟到快照直接丢掉）。
+     *
+     * @param {{partial?:boolean}} [o]
+     */
+    upsert(t0, t1, text, { partial = false } = {}) {
+      const t = String(text ?? '').trim();
+      if (!t) return null;
+      // 从后往前找：同一句的快照和整句都在尾部，比从头扫快
+      for (let i = lines.length - 1; i >= 0; i -= 1) {
+        const l = lines[i];
+        if (l.t0 !== t0) continue;
+        if (l.partial === false && partial) return l;
+        l.t1 = t1;
+        l.text = t;
+        l.partial = partial;
+        return l;
       }
-      return entry;
+      return put(t0, t1, t, partial);
     },
     /**
      * 取某段时间窗里的台词。**窗口按相交算**（`l.t1 >= from && l.t0 <= to`），
@@ -393,6 +425,14 @@ export function createLineBuffer({ keepMs = KEEP_MS } = {}) {
       }
       return out.reverse();
     },
+    /** 这句有没有**完整版**了（整句比快照准，有它就不必再转快照）。 */
+    hasFinal(t0) {
+      for (let i = lines.length - 1; i >= 0; i -= 1) {
+        const l = lines[i];
+        if (l.t0 === t0) return l.partial === false;
+      }
+      return false;
+    },
     get size() { return lines.length; },
     get all() { return lines.slice(); },
   };
@@ -410,21 +450,42 @@ export function createLineBuffer({ keepMs = KEEP_MS } = {}) {
  */
 export function createListener({
   ctx = null, dir = null, python = null, script = LISTEN_SCRIPT,
-  // 200ms：这个轮询直接计进"说完到模型能看见"的延迟里（见 README 的延迟分解）。
-  // 再快意义不大 —— 下面静音判定那 450ms 才是大头。
-  env = process.env, log = () => {}, pollMs = 200,
+  /**
+   * 延迟参数（`~/.dsh/see-now.json` 的 `listen` 段，见 tuning.js）。
+   *
+   * 分两半：`silence` / `maxSeg` / `live` 那组交给 Python 侧（它们决定"什么时候切一段"），
+   * `pollMs` 留在这里（决定"多久扫一次目录"）。
+   */
+  listen = LISTEN_DEFAULTS,
+  env = process.env, log = () => {}, pollMs = null,
+  /**
+   * 测试注入口：给一个转写器就完全不碰 `resolveTranscriber` / Python / 设备。
+   * 线上永远不传 —— `drain()` 是这条链里最容易出错的地方（覆盖、去重、失败不退），
+   * 不能只靠"起个真设备听一遍"来验。
+   */
+  transcriber: injected = null,
 } = {}) {
   const audioDir = dir || join(dshHome(env), 'see-now', 'audio');
+  const cfg = { ...LISTEN_DEFAULTS, ...(listen ?? {}) };
+  // `pollMs` 显式传值时优先（老测试还在用），否则读配置
+  const pollInterval = Number.isFinite(Number(pollMs)) && Number(pollMs) > 0
+    ? Number(pollMs) : cfg.pollMs;
   const buffer = createLineBuffer();
   let child = null;
   let timer = null;
   let busy = false;
   let fails = 0;
-  let enabled = false;
+  let enabled = Boolean(injected);
   let reason = '没启动';
-  let transcriber = null;
+  let transcriber = injected;
   let lastSegAt = 0;
   let total = 0;
+  /** 最近一句的延迟：从**句首**到**进了台词缓冲**（毫秒）。status 里直接看得见。 */
+  let lastLineLagMs = null;
+  /** 临时快照（`partial`）转成功过几次 —— 用来判断"边说边出"到底有没有在干活 */
+  let partials = 0;
+  /** live 文件去重：`name -> "size:mtime"`。同名覆盖是常态，内容变了才重转。 */
+  const liveSeen = new Map();
   /** 音量条数据：`{step, from, db[]}`，Python 那边每秒原子重写一次 levels.json */
   let levels = null;
   let levelsAt = 0;
@@ -432,6 +493,10 @@ export function createListener({
   let pausedUntil = 0;
   /** 最近一次转写错误（status 里要看得见，不能只进日志） */
   let lastError = null;
+  /** 上次主动拉起本地服务的时刻（60 秒内不重复拉，免得起两个抢端口） */
+  let lastEnsureAt = 0;
+  /** 快照失败只记一次日志（成功一次就复位），别每拍刷屏 */
+  let liveErrLogged = false;
 
   function state() {
     return {
@@ -443,9 +508,15 @@ export function createListener({
       lines: buffer.size,
       total,
       lastSegAt: lastSegAt || null,
+      /** 最近一句从**开口**到**台词可读**用了多久（毫秒）。调延迟就看这个数。 */
+      lastLineLagMs,
+      /** 正在说话时先给的那版临时台词转成功过几次（"边说边出"有没有在干活） */
+      partials,
       /** 转写出过错就带上原因 —— "在听但没台词"必须能分清是没人说话还是转写挂了 */
       error: lastError,
       paused: pausedUntil > Date.now(),
+      /** 生效的延迟参数：用户改 see-now.json 之后一眼能核对 */
+      tuning: { ...cfg },
     };
   }
 
@@ -490,7 +561,17 @@ export function createListener({
     return { step: span / count / 1000, db: out };
   }
 
-  /** 扫目录，处理没见过的 wav。一次一条，串行 —— 并发打同一个模型只会互相排队。 */
+  /**
+   * 扫目录，处理没见过的 wav。**一次一条，串行** —— 本地 paraformer 是单线程的
+   * （实测 3 个并发总共 530ms ≈ 串行 522ms），并发打进去只会互相排队。
+   *
+   * 两类文件：
+   *  - `seg-<t0>.wav` —— 一句完整的（静音断句 / maxSeg 强切），**准的**；
+   *  - `live-<t0>.wav` —— 长句说到一半的快照，**同名覆盖**，只是让字幕早几秒出现。
+   *
+   * 顺序是 **先 seg 后 live**：seg 落盘意味着这句已经说完，对应的 live 文件马上会被
+   * Python 删掉；先转 seg 能避免"白转一次马上被覆盖的快照"。
+   */
   async function drain() {
     if (busy || !transcriber) return;
     /**
@@ -523,7 +604,11 @@ export function createListener({
         }
         segs = segs.slice(-40);
       }
-      if (env.DSH_SEE_NOW_DEBUG) log(`[listen] drain: 目录里 ${names.length} 个文件，待处理 ${segs.length}`);
+      const lives = names.filter((n) => /^live-\d+\.wav$/.test(n));
+      if (env.DSH_SEE_NOW_DEBUG) {
+        log(`[listen] drain: 目录里 ${names.length} 个文件，整句 ${segs.length} / 快照 ${lives.length}`);
+      }
+
       for (const name of segs) {
         const path = join(audioDir, name);
         let wav = null;
@@ -543,6 +628,17 @@ export function createListener({
           fails += 1;
           lastError = String(e?.message ?? e);
           log(`转写出错（${fails}/${MAX_FAILS}）：${lastError}`);
+          /**
+           * **第一次失败就顺手把本地服务拉起来**（不 await，不挡这条链）。
+           *
+           * `asr.json` 的 `manage.idleMs` 常配成几秒 —— 视频安静一会儿服务就自己睡了，
+           * 再说话时第一个请求必然 `fetch failed`。等失败 3 次才动手（旧逻辑）要白丢
+           * 30 秒字幕；这里第一次就 spawn。60 秒内不重复拉，免得起了两个抢端口。
+           */
+          if (transcriber?.kind === 'http' && Date.now() - lastEnsureAt > 60_000) {
+            lastEnsureAt = Date.now();
+            ensureService(asrConfig(env), { log }).catch(() => {});
+          }
           if (fails >= MAX_FAILS) {
             pausedUntil = Date.now() + RETRY_MS;
             reason = `在听（音量条还在），但转写连续失败：${lastError}`;
@@ -551,11 +647,70 @@ export function createListener({
         }
         // 处理完就删：目录是工作区，不是档案。留着会几小时涨到几千个文件。
         try { unlinkSync(path); } catch { /* 删不掉就下次再说 */ }
+        // 这句已经有准的了，它的临时快照（还没转的）不必再转
+        liveSeen.delete(`live-${t0}.wav`);
         if (!text) continue;
         const dur = Math.max(0.2, (wav.length - 44) / 2 / 16_000);
-        buffer.add(t0, t0 + Math.round(dur * 1000), text);
+        const t1 = t0 + Math.round(dur * 1000);
+        // **upsert**：同一句如果先出过快照，这里用整句结果把它盖掉
+        buffer.upsert(t0, t1, text, { partial: false });
         lastSegAt = Date.now();
+        lastLineLagMs = lastSegAt - t0;
         total += 1;
+      }
+
+      /**
+       * 长句快照：只转**内容变过**的（Python 侧同名覆盖，size/mtime 一起变）。
+       * 失败**不计入 `fails`** —— 它只是"提前给一版"，挂了不该把主链路暂停 30 秒。
+       */
+      if (!cfg.live) {
+        for (const n of lives) { try { unlinkSync(join(audioDir, n)); } catch { /* 算了 */ } }
+      } else {
+        for (const name of lives) {
+          const path = join(audioDir, name);
+          const t0 = Number(name.slice(5, -4));
+          // 整句已经转出来了（Python 删文件失败 / 被占用）：这个快照没用，清掉
+          if (buffer.hasFinal(t0)) {
+            liveSeen.delete(name);
+            try { unlinkSync(path); } catch { /* 占着就下次 */ }
+            continue;
+          }
+          let st = null;
+          try { st = statSync(path); } catch { continue; }
+          if (st.size < 1024) continue;
+          const stamp = `${st.size}:${Math.round(st.mtimeMs)}`;
+          if (liveSeen.get(name) === stamp) continue;
+          liveSeen.set(name, stamp);
+          let wav = null;
+          try { wav = readFileSync(path); } catch { continue; }
+          let text = '';
+          try {
+            text = await transcriber.transcribe(canonicalizeWav(wav));
+            liveErrLogged = false;
+          } catch (e) {
+            // 快照失败**不计入 `fails`**（它只是"提前给一版"，挂了不该把主链路暂停），
+            // 但也不能完全静默 —— "临时字幕为什么一直不出现"时这是唯一线索。
+            if (!liveErrLogged) {
+              liveErrLogged = true;
+              log(`[listen] 快照转写失败（不影响整句）：${e?.message ?? e}`);
+            }
+            continue;
+          }
+          if (!text) continue;
+          const dur = Math.max(0.2, (wav.length - 44) / 2 / 16_000);
+          const t1 = t0 + Math.round(dur * 1000);
+          const before = buffer.all.length;
+          const line = buffer.upsert(t0, t1, text, { partial: true });
+          if (line && buffer.all.length > before) {
+            partials += 1;
+            lastLineLagMs = Date.now() - t0;
+          }
+        }
+        // 目录里可能残留上一句的快照（Python 删失败/被占用），别让它一直重转
+        if (liveSeen.size > 32) {
+          const keep = new Set(lives);
+          for (const k of liveSeen.keys()) if (!keep.has(k)) liveSeen.delete(k);
+        }
       }
     } finally {
       busy = false;
@@ -573,7 +728,7 @@ export function createListener({
       enabled = false;
       return { ok: false, reason };
     }
-    transcriber = resolveTranscriber(ctx, { env, log });
+    transcriber = injected ?? resolveTranscriber(ctx, { env, log });
     if (!transcriber) {
       reason = '没有可用的转写服务（宿主没有 speechToText，也没有 ~/.dsh/asr.json）';
       enabled = false;
@@ -605,7 +760,13 @@ export function createListener({
 
     mkdirSync(audioDir, { recursive: true });
     try {
-      child = spawn(python, [script, '--out', audioDir], {
+      // 断句与快照参数全部透传给 Python —— 它们是"什么时候切一段"的唯一决定者
+      child = spawn(python, [
+        script, '--out', audioDir,
+        '--silence', String(cfg.silence),
+        '--max-seg', String(cfg.maxSeg),
+        ...(cfg.live ? ['--live-min', String(cfg.liveMin), '--live-step', String(cfg.liveStep)] : ['--live', '0']),
+      ], {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
         env: { ...env, DSH_VIDEO_CACHE_DIR: join(dshHome(env), 'see-now') },
@@ -660,7 +821,7 @@ export function createListener({
       // 这里**不能静默吞**：drain 里的意外（权限、编码、表单构造）如果被 `.catch(() => {})`
       // 吃掉，表现就是"在听、但永远没台词"，日志里一条线索都没有。
       drain().catch((e) => log(`[listen] drain 出错：${e?.message ?? e}`));
-    }, pollMs);
+    }, pollInterval);
     timer.unref?.();
     return { ok: true };
   }
@@ -682,5 +843,37 @@ export function createListener({
     return buffer.between(fromMs, toMs, opts);
   }
 
-  return { start, stop, state, between, levelsBetween, drain };
+  /**
+   * 等"正在飞的那一段"落定（最多 `maxMs`）。
+   *
+   * ## 为什么这个函数比整个 ASR 链路都值钱
+   *
+   * `attachLines()` 取台词的窗口是「**上一张图的 wallTo → 这一张的 wallTo**」。
+   * 那么：图在 15.0 秒生成，而 14.8 秒那句话要 15.35 秒才转完 —— 它**赶不上这张图**，
+   * 被推到下一张。下一张 15 秒后才出，于是这套台词在用户眼里晚了整整 15 秒，
+   * 而 ASR 链路本身只用 0.7 秒。**边界效应才是"字幕比画面晚十几秒"的主因。**
+   *
+   * 出图前等最多 300ms（通常 100~200ms 就够：pollMs 100 + 转写 180），
+   * 把这段边界吃掉。代价是出图晚不到 0.3 秒，远小于解说延迟的 3.71s 上限。
+   *
+   * **积压时不参与等待**：`seg` 排到 3 个以上说明转写服务跟不上，等只会拖慢出图。
+   *
+   * @returns {Promise<boolean>} true = 手上已经清空（没有在飞的段）
+   */
+  async function settle(maxMs = 300) {
+    if (!transcriber) return false;
+    const until = Date.now() + maxMs;
+    for (;;) {
+      let names = [];
+      try { names = readdirSync(audioDir); } catch { names = []; }
+      let queued = 0;
+      for (const n of names) if (n.startsWith('seg-')) queued += 1;
+      if (queued > 3) return false;          // 积压：等也等不来
+      if (!busy && queued === 0) return true;
+      if (Date.now() >= until) return false;
+      await sleep(25);
+    }
+  }
+
+  return { start, stop, state, between, levelsBetween, drain, settle };
 }

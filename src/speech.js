@@ -56,11 +56,6 @@ export function speechSubscribers() {
   return n;
 }
 
-/** 全部订阅者（含只做展示的）。排查"到底谁在听"用。 */
-export function speechObservers() {
-  return subscribers.size;
-}
-
 /** 最近发出的一条事件（排查"它到底发没发"用，不参与逻辑） */
 export function lastSpeech() {
   return lastEvent;

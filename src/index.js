@@ -10,7 +10,7 @@ import { createRunner, SCENE_OPTS, PACES, DEFAULT_PACE } from './runner.js';
 import { resolveFfmpeg } from './binaries.js';
 import { parseRegion } from './layout.js';
 import { seeNowToolSpec, TOOL_TIMEOUT_MS, DEFAULT_BLOCK_SEC, TOOL_NAME } from './tool-spec.js';
-import { interjectNote, replyReminder, clearInterjected, noteInterjected, pendingInterjected } from './interject.js';
+import { interjectNote, replyReminder, clearInterjected } from './interject.js';
 import { appendSpoken, appendChat, lastSaidNote, lastSaidText, chatDir } from './chat.js';
 import { ensureConfiguredVoice, detachAdapters, attachedAdapters, configuredVoiceAdapter, lastVoiceError } from './voice.js';
 import { speechSubscribers, onSpeech } from './speech.js';
@@ -21,6 +21,10 @@ import { windowAlive, windowHidden, setWindowHidden, windowReport, windowLine } 
 import { pickRegion, loadRegion, clearRegion, regionText } from './region.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { createRequire } from 'node:module';
+
+/** ESM 里拿到同步 require（`node:sqlite` 只有同步 API，动态 import 是异步的）。 */
+const nodeRequire = createRequire(import.meta.url);
 
 /**
  * 从工具参数构造 source 描述。`watch` 和 `start` 两个入口共用。
@@ -131,21 +135,129 @@ async function loadDefineTool() {
  *  - **相对秒**（`9.3s`）：和上面每帧那个 `24.1s` 是同一个坐标系，模型才能把
  *    "这句话"对到"第几格画面"。
  */
+/**
+ * DSH 认证 cookie 的"拥挤度"（实际还活着的条数）。
+ *
+ * 宿主每次登录都会在 127.0.0.1 上签一个 **新的** `dsh-auth-<随机串>` cookie，旧的从不清理。
+ * 攒到 70 条左右，`Cookie` 头就超过 16KB，**下次启动在认证那一步直接挂**
+ * （`desktop welcome: Web authentication failed`，`phase: startup`）——
+ * 那时候任何插件都跑不起来，也就没法自救。所以只能趁还能跑的时候提醒。
+ *
+ * 用宿主内置的 `node:sqlite` 精确数。**不用"扫文件里的字符串"**：sqlite 删行不擦页，
+ * 清理完之后残留还在——实测清到 1 条，按字符串数能数出 95 条，纯误报。
+ *
+ * @param {string|null} file 覆盖路径（测试用）
+ * @returns {number|null} 条数；读不到（mac / 没装 / 没权限 / 没有 sqlite）返回 null
+ */
+export function authCookiePressure(file = null) {
+  try {
+    const p = file || join(process.env.APPDATA || '', '@deepseek-ai', 'dsh-desktop', 'Network', 'Cookies');
+    // 动态 require：`node:sqlite` 在某些 Node 版本里还是 experimental，
+    // 静态 import 会在没有它的运行时直接让整个插件加载失败 —— 一个体检功能不值这个。
+    const { DatabaseSync } = nodeRequire('node:sqlite');
+    const db = new DatabaseSync(p, { readOnly: true });
+    try {
+      const row = db.prepare("select count(*) as c from cookies where name like 'dsh-auth-%'").get();
+      return Number(row?.c ?? 0);
+    } finally { db.close(); }
+  } catch { return null; }
+}
+
+/**
+ * 台词清单。**只在真有台词时出现** —— 转写没开/没听见的时候，凭空来一行
+ * "台词："只会让模型以为转写坏了，然后去猜。
+ *
+ * 三个信息叠在一行：
+ *  - **`#2`**：这句话最接近第几格画面。模型不用自己拿时间码去对格子，
+ *    一眼就知道"这句配那张图"；
+ *  - **本机时钟**（`15:57:32`）：用户回头找"那句话是几点说的"只能靠它 ——
+ *    实时看屏幕没有"视频进度"这个东西，浏览器放到第几秒我们根本不知道；
+ *  - **相对秒**（`9.3s`）：和每帧那个 `24.1s` 同一坐标系，可交叉验证。
+ */
 export function linesText(sheet) {
   const got = sheet.lines;
   if (!got?.length) return '';
-  const f0 = sheet.frames?.[0];
+  const frames = sheet.frames ?? [];
+  const f0 = frames[0];
   // frame.wall 是 epoch ms、frame.t 是相对秒 → 两者相减就是"t=0 那一刻的 epoch"
   const origin = f0?.wall != null ? f0.wall - f0.t * 1000 : null;
+
+  /** 这句话落在哪一格：最后一个 `t <= 本句起点` 的帧（比首帧还早的归第 1 格）。 */
+  const cellFor = (tRel) => {
+    if (!frames.length) return null;
+    let idx = 0;
+    for (let i = 0; i < frames.length; i += 1) if (frames[i].t <= tRel + 1e-6) idx = i;
+    return idx + 1;
+  };
+
   const rows = got.map((l) => {
-    const rel = origin === null ? null : `${((l.t0 - origin) / 1000).toFixed(1)}s`;
+    const tRel = origin === null ? null : (l.t0 - origin) / 1000;
+    const rel = tRel === null ? null : `${tRel.toFixed(1)}s`;
     let clock = null;
     try { clock = new Date(l.t0).toLocaleTimeString('zh-CN', { hour12: false }); } catch { /* 时区数据缺失 */ }
     const stamp = [clock, rel].filter(Boolean).join(' / ');
-    return `  ${stamp || '—'}  ${l.text}`;
+    const cell = tRel === null ? null : cellFor(tRel);
+    // `partial` = 长句说到一半先给的临时版（还没断句）。标出来，模型才不会当成定论。
+    const tail = l.partial ? '（还在说…）' : '';
+    return `  ${cell === null ? '' : `#${cell}  `}${stamp || '—'}  ${l.text}${tail}`;
   });
   return `\n台词（这段时间里视频里在说的，机器转写，可能有错字/听岔；`
-    + `时间码是本机时钟 / 相对这张图起点的秒数）：\n${rows.join('\n')}`;
+    + '`#n` = 这句最接近第 n 格画面，后面是本机时钟 / 相对这张图起点的秒数；'
+    + '带「还在说…」的是说了一半的临时版）：\n'
+    + rows.join('\n');
+}
+
+/**
+ * 循环状态那一行。三种态要分清，别都写成"在跑"：
+ *   - `listen`：采集停了，但窗口里的输入还收得到（用户打字仍然能叫醒模型）
+ *   - `active`：正常在跑
+ *   - 已停 / 没起
+ *
+ * **必须在模块顶层**：它原来写在 `route()` 里面（靠函数提升才没报错），
+ * 于是每次工具调用都要重新创建三个闭包，而且缩进是 0 —— 读代码的人会以为它在外面。
+ */
+function loopLine(lp) {
+  if (!lp) return '没起（还没调过 watch）';
+  if (lp.mode === 'listen') return '只听（采集已停，窗口里的输入还收得到；要看就调 peek）';
+  if (lp.stopped) return lp.reason ? `已停（${lp.reason}）` : '已停';
+  const fail = lp.wakeFailures ? `，失败 ${lp.wakeFailures} 次` : '';
+  const last = lp.lastWakeAt
+    ? `，上一次 ${Math.round((Date.now() - lp.lastWakeAt) / 1000)}s 前${lp.lastWakeOk === false ? '（失败）' : ''}`
+    : '';
+  // 节奏诊断：上一句多长、下一轮最早什么时候 —— 用户问"怎么半天不说话"时先看这两个数
+  const speech = lp.lastSpeechMs ? `，上一句约 ${(lp.lastSpeechMs / 1000).toFixed(1)}s` : '';
+  const wait = lp.nextWakeAt && lp.nextWakeAt > Date.now()
+    ? `，下一轮最早 ${Math.ceil((lp.nextWakeAt - Date.now()) / 1000)}s 后` : '';
+  return `在跑（叫醒 ${lp.wakes} 次${fail}${last}${speech}${wait}，会话 ${lp.session ?? '未知'}）`;
+}
+
+/** 快到临界才提醒 —— 超了之后插件根本跑不起来，只能趁现在说。 */
+function cookieWarnLine() {
+  const n = authCookiePressure();
+  if (n === null || n < 50) return '';
+  return `\n⚠ DSH 认证 cookie 已约 ${n} 条：攒到 70 条左右宿主会起不来`
+    + '（`Web authentication failed`，跟插件无关）。关掉 DSH 后跑 `tools/fix-dsh-startup.cmd` 清一下。';
+}
+
+/**
+ * 「听声音」一行。
+ *
+ * 用户说"它好像没听见台词"时，答案全在这一行：是没转写服务、没 Python 包、
+ * 还是这台机器根本抓不到回环。**不要把未启用写成"正常"** —— 那会让人一直查画面。
+ */
+function listenLine(l) {
+  if (!l) return '没起（还没调过 watch）';
+  if (!l.enabled) return `没在听 —— ${l.reason}`;
+  // **转写挂了不能说成"在听"**：那会让人一直去查画面。
+  // 2026-11-04 社区实报：本地 ASR 服务没起，界面上一直显示"在听、0 句"，
+  // 看起来和"视频是默片"一模一样。
+  if (l.paused) return `在听但转写停了：${l.error ?? '原因未知'}（30 秒后自动重试，音量条还在）`;
+  if (l.error) return `在听（${l.backend}），但最近一次转写失败：${l.error}`;
+  const last = l.lastSegAt ? `，最近一句 ${Math.round((Date.now() - l.lastSegAt) / 1000)}s 前` : '，还没转出过台词';
+  // 延迟诊断：从"这句话开口"到"进了台词缓冲"用了多久。调快慢就看这一个数。
+  const lag = l.lastLineLagMs != null ? `，上一句开口→可读 ${(l.lastLineLagMs / 1000).toFixed(1)}s` : '';
+  const part = l.partials ? `，临时字幕 ${l.partials} 次` : '';
+  return `在听（${l.backend}，累计 ${l.total} 句${last}${lag}${part}）`;
 }
 
 /** 一张图 → 模型看得懂的清单。数字都是「这张图里第几格」，不是抽象指标。 */
@@ -274,11 +386,22 @@ async function registerAll(ctx) {
   // 写裸 'ffmpeg' 在 macOS 上就是 ENOENT，而且会伪装成"插件坏了"。
   const ffmpeg = resolveFfmpeg();
   log(`ffmpeg: ${ffmpeg.path}（${ffmpeg.source}）`);
+  /**
+   * 用户自己的节奏参数（`~/.dsh/see-now.json`）。在 apply 时读一次：
+   * 改配置要重开 DSH，和 voice.json 的热读不同 —— 这些值影响的是循环的收工线，
+   * 每拍读盘不值得。
+   *
+   * **必须在 createRunner 之前读**：`listen` 段要传给听声音那条链
+   * （断句参数、pollMs、长句快照都在里面）。
+   */
+  const tuning = readTuning();
+  if (tuning.warnings.length) log?.(`[see-now] ${tuning.warnings.join('；')}`);
   const runner = createRunner({
     ffmpegPath: ffmpeg.path,
     log,
     // 听声音要宿主 `speechToText`（社区用户那边零安装）；给不到就只降级成"没字幕"
     ctx,
+    listen: tuning.listen,
   });
   disposers.push(() => runner.stop());
 
@@ -323,13 +446,6 @@ async function registerAll(ctx) {
    * 忘一次就退回多帧拼图，演示当场露馅。所以开一次管到 `scene:false` 或 `stop` 为止。
    */
   let sceneMode = false;
-  /**
-   * 用户自己的节奏参数（`~/.dsh/see-now.json`）。在 apply 时读一次：
-   * 改配置要重开 DSH，和 voice.json 的热读不同 —— 这些值影响的是循环的收工线，
-   * 每拍读盘不值得。
-   */
-  const tuning = readTuning();
-  if (tuning.warnings.length) log?.(`[see-now] ${tuning.warnings.join('；')}`);
   /** 节奏：calm / normal / dense（粘性）。**这是"省点钱"唯一能真的生效的旋钮。** */
   let paceMode = PACES[tuning.defaultPace] ? tuning.defaultPace : DEFAULT_PACE;
   /**
@@ -836,45 +952,6 @@ async function registerAll(ctx) {
         };
       }
 
-/**
- * 循环状态那一行。三种态要分清，别都写成"在跑"：
- *   - `listen`：采集停了，但窗口里的输入还收得到（用户打字仍然能叫醒模型）
- *   - `active`：正常在跑
- *   - 已停 / 没起
- */
-function loopLine(lp) {
-  if (!lp) return '没起（还没调过 watch）';
-  if (lp.mode === 'listen') return '只听（采集已停，窗口里的输入还收得到；要看就调 peek）';
-  if (lp.stopped) return lp.reason ? `已停（${lp.reason}）` : '已停';
-  const fail = lp.wakeFailures ? `，失败 ${lp.wakeFailures} 次` : '';
-  const last = lp.lastWakeAt
-    ? `，上一次 ${Math.round((Date.now() - lp.lastWakeAt) / 1000)}s 前${lp.lastWakeOk === false ? '（失败）' : ''}`
-    : '';
-  // 节奏诊断：上一句多长、下一轮最早什么时候 —— 用户问"怎么半天不说话"时先看这两个数
-  const speech = lp.lastSpeechMs ? `，上一句约 ${(lp.lastSpeechMs / 1000).toFixed(1)}s` : '';
-  const wait = lp.nextWakeAt && lp.nextWakeAt > Date.now()
-    ? `，下一轮最早 ${Math.ceil((lp.nextWakeAt - Date.now()) / 1000)}s 后` : '';
-  return `在跑（叫醒 ${lp.wakes} 次${fail}${last}${speech}${wait}，会话 ${lp.session ?? '未知'}）`;
-}
-
-/**
- * 「听声音」一行。
- *
- * 用户说"它好像没听见台词"时，答案全在这一行：是没转写服务、没 Python 包、
- * 还是这台机器根本抓不到回环。**不要把未启用写成"正常"** —— 那会让人一直查画面。
- */
-function listenLine(l) {
-  if (!l) return '没起（还没调过 watch）';
-  if (!l.enabled) return `没在听 —— ${l.reason}`;
-  // **转写挂了不能说成"在听"**：那会让人一直去查画面。
-  // 2026-11-04 社区实报：本地 ASR 服务没起，界面上一直显示"在听、0 句"，
-  // 看起来和"视频是默片"一模一样。
-  if (l.paused) return `在听但转写停了：${l.error ?? '原因未知'}（30 秒后自动重试，音量条还在）`;
-  if (l.error) return `在听（${l.backend}），但最近一次转写失败：${l.error}`;
-  const last = l.lastSegAt ? `，最近一句 ${Math.round((Date.now() - l.lastSegAt) / 1000)}s 前` : '，还没转出过台词';
-  return `在听（${l.backend}，累计 ${l.total} 句${last}）`;
-}
-
       if (action === 'status') {
         const s = runner.status();
         const voice = voiceState();
@@ -909,7 +986,9 @@ function listenLine(l) {
                 ? `配了 ${voice.configured} 但没挂上（${voice.reason ?? '原因未知'}）`
                 : '没配 —— 写 ~/.dsh/voice.json 的 {"adapter":"…"} 才有声音'}`
             // 听声音（视频里的台词）：**"它不知道台词"时第一个要看的就是这一行**
-            + `\n听声音：${listenLine(s.listen)}`,
+            + `\n听声音：${listenLine(s.listen)}`
+            // 宿主 cookie 拥挤度：只快满了才出现（满了之后插件根本起不来，提醒不到）
+            + cookieWarnLine(),
           meta: { ...s, voice, loop: lp, window: windowReport() },
         };
       }

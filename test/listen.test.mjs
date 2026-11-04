@@ -311,3 +311,22 @@ test('ensureService：asr.json 没写 manage.start 就老实返回不托管', as
   assert.equal(r.ok, false);
   assert.match(r.reason, /manage\.start/);
 });
+
+test('linesText：每句台词标注最接近的帧号', async () => {
+  const { linesText } = await import('../src/index.js');
+  const t0 = 1_700_000_000_000;
+  const sheet = {
+    frames: [{ t: 0, wall: t0 }, { t: 10, wall: t0 + 10_000 }, { t: 20, wall: t0 + 20_000 }],
+    lines: [
+      { t0: t0 + 2_000, t1: t0 + 4_000, text: '第一句' },
+      { t0: t0 + 12_000, t1: t0 + 14_000, text: '第二句' },
+      { t0: t0 + 25_000, t1: t0 + 26_000, text: '最后一句' },
+    ],
+  };
+  const out = linesText(sheet);
+  assert.match(out, /#1\s/, '第一句归第 1 格');
+  assert.match(out, /#2\s/, '第二句归第 2 格');
+  assert.match(out, /#3\s/, '超出最后一帧的归最后一格');
+  assert.match(out, /#1\s+\d{2}:\d{2}:\d{2} \/ 2\.0s\s+第一句/);
+  assert.match(out, /#2\s+\d{2}:\d{2}:\d{2} \/ 12\.0s\s+第二句/);
+});

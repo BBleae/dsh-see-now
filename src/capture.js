@@ -36,9 +36,6 @@
 
 import { spawn } from 'node:child_process';
 
-/** 屏幕采集引擎。macOS 只有 avfoundation；Windows 走 ddagrab/gdigrab。 */
-export const ENGINES = Object.freeze(['auto', 'ddagrab', 'gdigrab', 'avfoundation']);
-
 /** macOS 上屏幕设备的默认名字。`-list_devices` 里它永远是英文，相机才是本地化的。 */
 export const DEFAULT_SCREEN_DEVICE = 'Capture screen 0';
 
@@ -219,23 +216,45 @@ export function captureArgs({
   const args = captureArgs({ source, width, height, fps, ffmpegPath, engine }).slice(1);
   const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
   const need = width * height * 3;
-  let pending = null;
+  /**
+   * 拼帧缓冲：**一帧只分配一次、只拷贝一次**。
+   *
+   * 旧写法是 `Buffer.concat([pending, chunk])` —— pipe 每给 64KB 就拼一次，
+   * 一帧 1.03MB 要拼 16 次，累计拷贝 ≈ 8.5MB/帧（100MB/s @12fps），全是白干。
+   * 现在先 `allocUnsafe(need)` 再按需 `copy` 进来，一帧固定 1MB。
+   */
+  let acc = null;
+  let filled = 0;
   let n = 0;
   const t0 = Date.now();
   let err = '';
 
+  const deliver = (buf) => {
+    const i = n;
+    n += 1;
+    if (i === 0) onFirst?.(Date.now() - t0);
+    onFrame?.({ i, t: i / fps, buf });
+  };
+
   const done = new Promise((resolve, reject) => {
     child.stdout.on('data', (chunk) => {
-      pending = pending?.length ? Buffer.concat([pending, chunk]) : chunk;
-      while (pending.length >= need) {
-        const buf = pending.subarray(0, need);
-        pending = pending.subarray(need);
-        const i = n;
-        n += 1;
-        if (i === 0) onFirst?.(Date.now() - t0);
-        onFrame?.({ i, t: i / fps, buf });
+      let off = 0;
+      while (off < chunk.length) {
+        // `filled` 填满就立刻交付并清零，所以这里 room 永远 > 0
+        const room = need - filled;
+        const take = chunk.length - off < room ? chunk.length - off : room;
+        if (filled === 0 && take === need) {
+          // 整帧刚好落在一个 chunk 里：零拷贝，直接给视图
+          deliver(chunk.subarray(off, off + need));
+          off += need;
+          continue;
+        }
+        if (filled === 0) acc = Buffer.allocUnsafe(need);
+        chunk.copy(acc, filled, off, off + take);
+        filled += take;
+        off += take;
+        if (filled === need) { deliver(acc); acc = null; filled = 0; }
       }
-      if (pending.length === 0) pending = null;
     });
     child.stderr.on('data', (d) => {
       err = `${err}${d}`.slice(-4000);
@@ -264,6 +283,18 @@ export function captureArgs({
        * 12fps 下 141s/1686 帧说明是正常跑着跑着停的，而不是启动就崩。
        */
       const stderrTail = err.trim().slice(-1000) || null;
+      /**
+       * **文件源是有限的：放完就 code 0，那是正常收尾。**
+       *
+       * 这条以前缺失，后果不是"多一条日志"—— `runner` 的 `run.done.then()` 里才写
+       * `endedSource`，走 reject 分支的话那个硬闸永远不生效，下一次 `watch` 会把
+       * 同一个文件**从头再放一遍**（社区实报：24 秒解 1955 帧、刷几十张图、
+       * 反复叫醒、关窗也停不干净）。`scripts/sim.mjs` 也因此在最后一步抛异常。
+       */
+      if (code === 0 && source?.kind === 'file') {
+        resolve({ frames: n, ms: Date.now() - t0, code, ended: true });
+        return;
+      }
       if (code !== 0) {
         const error = new Error(`ffmpeg exit ${code}（运行 ${secs}s / ${n} 帧）`
           + `: ${err.trim().slice(-300) || '无 stderr'}`);

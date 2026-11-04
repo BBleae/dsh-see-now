@@ -165,12 +165,18 @@ class Segmenter:
     预卷 `pre` 秒是"从判定有声往前多拿一点"。
     """
 
-    def __init__(self, silence=0.45, max_seg=6.0, pre=0.25, min_seg=0.5, thr=0.0035):
+    def __init__(self, silence=0.35, max_seg=3.0, pre=0.25, min_seg=0.5, thr=0.0035,
+                 live_min=1.8, live_step=1.2):
         self.silence = silence
         self.max_seg = max_seg
         self.pre = pre
         self.min_seg = min_seg
         self.thr = thr
+        # 「边说边出字幕」：说满 live_min 秒先给一版快照，之后每 live_step 秒刷新。
+        # live_min <= 0 = 关掉（只用整句）。
+        self.live_min = live_min
+        self.live_step = live_step
+        self.last_live_span = 0.0
         self.pre_buf = collections.deque()     # (wall, block)，只留 pre 秒
         self.in_speech = False
         self.cur = []                          # [(wall, block)]
@@ -229,6 +235,32 @@ class Segmenter:
             return self._close()
         return []
 
+    def snapshot(self):
+        """**这句说到目前的音频**（「边说边出字幕」用）。
+
+        为什么要有：长句要等 `max_seg`（3 秒）强切才送去转写，而本地 paraformer
+        转 1.8 秒音频只要 150ms —— **等断句的时间是转写本身的 20 倍**。
+        说满 `live_min` 秒就先给一版，让字幕早几秒出现；整句落盘后 Node 侧会用
+        准确结果把它覆盖掉（`upsert`），所以这一版**永远只是临时的**。
+
+        节流在内部，调用方可以每块都调。`live_min <= 0` 直接关掉。
+        """
+        if not self.in_speech or self.live_min <= 0 or self.live_step <= 0:
+            return []
+        if not self.cur:
+            return []
+        # 用"最后一块的到达时刻 + 块时长"算，不用 time.time() —— 主循环调度抖动不该算进来
+        wall, block = self.cur[-1]
+        span = wall + len(block) / SR - self.start_wall
+        if span < self.live_min:
+            return []
+        if self.last_live_span > 0 and span - self.last_live_span < self.live_step:
+            return []
+        self.last_live_span = span
+        # 尾部静音**不 trim**：这句还没说完，trim 会把正在说的字削掉
+        audio = np.concatenate([b for _, b in self.cur])
+        return [(self.start_wall, audio)]
+
     def flush(self):
         """退出时把没说完的那半句也交出来（够长才要）。"""
         if self.in_speech:
@@ -240,6 +272,7 @@ class Segmenter:
         self.cur = []
         self.in_speech = False
         self.silence_run = 0.0
+        self.last_live_span = 0.0
         self.pre_buf.clear()
         if not frames:
             return []
@@ -329,11 +362,14 @@ def main():
     ap = argparse.ArgumentParser(description="抓系统回环声音，按静音断句落成 16k wav")
     ap.add_argument("--out", required=False, help="wav 输出目录（seg-<epochMs>.wav）")
     ap.add_argument("--device", default=None, help="回环设备名的一部分（默认：系统默认输出的回环）")
-    ap.add_argument("--silence", type=float, default=0.45, help="静音多久算一句说完（秒）")
-    ap.add_argument("--max-seg", type=float, default=6.0, help="一句话最长多少秒，超了强切")
+    ap.add_argument("--silence", type=float, default=0.35, help="静音多久算一句说完（秒）")
+    ap.add_argument("--max-seg", type=float, default=3.0, help="一句话最长多少秒，超了强切")
     ap.add_argument("--pre", type=float, default=0.25, help="预卷：开口前多收多少秒")
     ap.add_argument("--min-seg", type=float, default=0.5, help="短于这个长度的段不发")
     ap.add_argument("--thr", type=float, default=0.0035, help="能量阈值（0~1，默认约 -49dB）")
+    ap.add_argument("--live", type=float, default=1.0, help="长句边说边出字幕：1 开 / 0 关")
+    ap.add_argument("--live-min", type=float, default=1.8, help="说满这么多秒才给第一版临时字幕")
+    ap.add_argument("--live-step", type=float, default=1.2, help="之后每这么多秒刷新一版")
     ap.add_argument("--list-devices", action="store_true", help="列出回环设备后退出")
     args = ap.parse_args()
 
@@ -371,7 +407,9 @@ def main():
                         input_device_index=dev["index"], frames_per_buffer=1024,
                         stream_callback=on_audio)
         seg = Segmenter(silence=args.silence, max_seg=args.max_seg,
-                        pre=args.pre, min_seg=args.min_seg, thr=args.thr)
+                        pre=args.pre, min_seg=args.min_seg, thr=args.thr,
+                        live_min=(args.live_min if args.live else 0.0),
+                        live_step=(args.live_step if args.live else 0.0))
 
         carry = np.zeros(0, dtype=np.float32)   # 48k → 16k 的余数（3 个凑 1 个）
         meter = LevelMeter()
@@ -401,14 +439,30 @@ def main():
                     continue
                 name = f"seg-{int(t0 * 1000)}.wav"
                 write_wav(os.path.join(args.out, name), audio)
+                # 这句已经有整句了，临时快照作废（Node 侧不必再转一次）
+                try:
+                    os.remove(os.path.join(args.out, f"live-{int(t0 * 1000)}.wav"))
+                except OSError:
+                    pass
                 written += 1
                 emit({"event": "seg", "name": name, "at": round(t0, 3),
                       "dur": round(len(audio) / SR, 2)})
 
+        def land_live(pieces):
+            """临时快照：**同名覆盖**（一句话只有一个 live 文件），Node 侧按 size/mtime 判新。"""
+            for t0, audio in pieces:
+                if tts_busy(t0 * 1000):
+                    continue
+                name = f"live-{int(t0 * 1000)}.wav"
+                write_wav(os.path.join(args.out, name), audio)
+                emit({"event": "live", "at": round(t0, 3), "dur": round(len(audio) / SR, 2)})
+
         stream.start_stream()
         while True:
             try:
-                wall, raw = q.get(timeout=0.05)
+                # 20ms 而不是 50：静音期没有数据块，`tick()` 的粒度就是这个超时 ——
+                # 它直接计进"说完 → 判定说完"的延迟里。
+                wall, raw = q.get(timeout=0.02)
             except queue.Empty:
                 wall, raw = None, None
             if raw is not None:
@@ -416,6 +470,7 @@ def main():
                 block = drop_ratio(x)
                 meter.push(wall, block)          # 音量条：顺手记，不额外解码
                 land(seg.push(wall, block))
+                land_live(seg.snapshot())        # 长句：不等断句，先给一版
             # 静音期没有数据，靠这里把"说完了"判出来
             land(seg.tick(time.time()))
             if time.time() - last_levels > 1.0:

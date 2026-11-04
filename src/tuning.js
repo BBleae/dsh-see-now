@@ -26,6 +26,34 @@ export const TUNING_DEFAULTS = Object.freeze({
   speechPacing: true,
 });
 
+/**
+ * 「听声音」那一链的延迟参数（`see-now.json` 的 `listen` 段）。
+ *
+ * 这几个数决定"视频里说的话多久之后能变成台词"，是全链路唯一能调的地方：
+ *
+ * ```
+ * 开口 ──silence/maxSeg 断句──▶ 落盘 ──pollMs──▶ 转写 ──▶ 台词可读
+ *        └─ liveMin/liveStep：长句不等断句，先给一版临时台词
+ * ```
+ *
+ * `live` 那组是 2026-11-04 加的：实测本地 paraformer 转 1.5 秒音频只要 140ms，
+ * 而长句要等 `maxSeg`（3 秒）强切才动 —— **等断句的时间是转写本身的 20 倍**。
+ */
+export const LISTEN_DEFAULTS = Object.freeze({
+  /** 长句「边说边出字幕」：说满 `liveMin` 秒就先转一版，整句落盘后覆盖它。 */
+  live: true,
+  /** 说满这么多秒才发第一版快照。1.0 秒的片段质量明显掉（实测丢一半），1.5 可用，1.8 稳。 */
+  liveMin: 1.8,
+  /** 之后每这么多秒刷新一次。**别低于 1.0** —— 转写服务是串行的，压太密只会互相排队。 */
+  liveStep: 1.2,
+  /** 静音多久算一句说完。0.35 是"人话气口"的下限，再低会把"第一个维/度是技术"切成两半。 */
+  silence: 0.35,
+  /** 一句话最长多少秒强切。长句靠 `live` 提前出字幕，这里不必再压。 */
+  maxSeg: 3.0,
+  /** Node 扫目录的间隔（毫秒）。直接计进延迟，200 → 100 净省 100ms。 */
+  pollMs: 100,
+});
+
 /** 可用节奏。和 runner.js 的 PACES 同步，但不在模块层 import（避免环形依赖）。 */
 export const PACES_KEYS = Object.freeze(['calm', 'normal', 'dense', 'game-economic']);
 
@@ -41,6 +69,48 @@ const clampInt = (value, min, max, fallback) => {
   const n = Number(value);
   return Number.isInteger(n) && n >= min && n <= max ? n : fallback;
 };
+
+const clampNum = (value, min, max, fallback) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
+};
+
+/**
+ * `listen` 段。每项都夹在自己那段区间里，越界退回默认并记一条 warn ——
+ * 写成 `"silence": "0.3"`（字符串）这种也必须能跑，配置不该把听声音弄停。
+ */
+function readListen(raw) {
+  const src = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  const out = { ...LISTEN_DEFAULTS };
+  const bad = [];
+
+  if (src.live !== undefined) {
+    if (typeof src.live === 'boolean') out.live = src.live;
+    else bad.push('listen.live 只能是 true / false');
+  }
+  const num = (key, min, max) => {
+    if (src[key] === undefined) return;
+    const v = clampNum(src[key], min, max, out[key]);
+    if (v !== out[key]) bad.push(`listen.${key} 必须在 ${min}–${max} 之间（秒）`);
+    out[key] = v;
+  };
+  num('liveMin', 0.8, 6);
+  num('liveStep', 0.4, 4);
+  num('silence', 0.15, 1.5);
+  num('maxSeg', 0.8, 15);
+
+  if (src.pollMs !== undefined) {
+    const v = clampInt(src.pollMs, 50, 1000, out.pollMs);
+    if (v !== out.pollMs) bad.push('listen.pollMs 必须是 50–1000 的整数（毫秒）');
+    out.pollMs = v;
+  }
+  // 快照间隔必须小于强切上限，否则一遍都发不出来
+  if (out.live && out.liveStep > out.maxSeg) {
+    bad.push('listen.liveStep 不能大于 maxSeg，已按 maxSeg 收窄');
+    out.liveStep = out.maxSeg;
+  }
+  return { listen: out, warnings: bad };
+}
 
 /**
  * @param {{env?:NodeJS.ProcessEnv, readFile?:typeof readFileSync}} [opts]
@@ -94,12 +164,16 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     else warnings.push('speechPacing 只能是 true / false / "guard"，已用默认 true');
   }
 
+  const listenCfg = readListen(raw.listen);
+  warnings.push(...listenCfg.warnings);
+
   return {
     maxAutonomousWakes,
     idleStopMin,
     idleStopMs: idleStopMin * 60 * 1000,
     defaultPace,
     speechPacing,
+    listen: listenCfg.listen,
     path,
     warnings,
   };
