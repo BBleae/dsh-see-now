@@ -5,12 +5,12 @@
  * 完全同一条代码路径，只是把「屏幕」换成「文件」—— 不用真的去抓桌面（那会拍到私事，
  * 而且结果不可复现）。
  *
- * 需要 ffmpeg 在 PATH 上；没有就跳过。
+ * ffmpeg 由 test/ffmpeg.mjs 统一解析（DSH_FFMPEG_PATH / DSH_HOME / PATH）；没有就跳过。
  */
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { FFMPEG, ffmpegOk } from './ffmpeg.mjs';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -20,18 +20,11 @@ const TOOLS_PATH = process.env.DSH_TOOLS_PATH
 
 const FIXTURE = join('.tmp', 'e2e-clip.mp4');
 
-function ffmpegOk() {
-  try {
-    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' });
-    return true;
-  } catch { return false; }
-}
-
 function makeFixture() {
   if (existsSync(FIXTURE) && statSync(FIXTURE).size > 10_000) return FIXTURE;
   mkdirSync('.tmp', { recursive: true });
   // testsrc2 每个区域都在动 → 积分帧会持续触发，能攒出真正的多帧图
-  execFileSync('ffmpeg', ['-hide_banner', '-v', 'error', '-y',
+  execFileSync(FFMPEG, ['-hide_banner', '-v', 'error', '-y',
     '-f', 'lavfi', '-i', 'testsrc2=size=640x480:rate=12', '-t', '24',
     '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-preset', 'ultrafast', FIXTURE], { stdio: 'inherit' });
   return FIXTURE;

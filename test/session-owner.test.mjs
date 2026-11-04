@@ -10,7 +10,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { FFMPEG, ffmpegOk } from './ffmpeg.mjs';
 import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,14 +27,10 @@ process.env.DSH_TOOLS_PATH = TOOLS_PATH;
 const FIXTURE = join('.tmp', 'owner-clip.mp4');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function ffmpegOk() {
-  try { execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' }); return true; } catch { return false; }
-}
-
 function makeFixture() {
   if (existsSync(FIXTURE) && statSync(FIXTURE).size > 10_000) return FIXTURE;
   mkdirSync('.tmp', { recursive: true });
-  execFileSync('ffmpeg', ['-hide_banner', '-v', 'error', '-y',
+  execFileSync(FFMPEG, ['-hide_banner', '-v', 'error', '-y',
     '-f', 'lavfi', '-i', 'testsrc2=size=640x480:rate=12', '-t', '8',
     '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-preset', 'ultrafast', FIXTURE], { stdio: 'inherit' });
   return FIXTURE;
