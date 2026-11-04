@@ -123,11 +123,14 @@ export const DEFAULTS = Object.freeze({
    * 且变化区域没有盖满有效画面高度（`mcSpanY / activeY < cutBgMaxSpanY`，上下黑边不计）时，
    * 视为手/勺子/遮挡物这类前景运动，不切。只在分数低于 `cutBgMaxScore`
    * 且不是孤立弱切点时启用；真正切镜头会把稳定背景整片换掉（几百），
-   * 前景运动只换一部分（几十）。`cutBgMinCells` 太少时不可信，直接不启用。
+   * 前景运动只换一部分（几十）。`cutBgMinCells` 太少时不可信，直接不启用；
+   * `cutBgMaxChanged` 是绝对变化格数上限：稳定背景格很多时，比例低也可能已经是
+   * 真切镜头（实测开箱视频 18.67s 比例 89/255，但变了约 700 格），这类不挡。
    */
   cutBgAbs: 100,
   cutBgMaxScore: 60,
   cutBgMinCells: 128,
+  cutBgMaxChanged: 600,
   cutBgMaxSpanY: 0.85,
   cutBgWindow: 6,
 
@@ -613,6 +616,7 @@ export function createPipeline(opts = {}) {
       && bg !== null
       && bg > 0
       && bg < o.cutBgAbs
+      && (o.cutBgMaxChanged <= 0 || (entry.bgChanged ?? 0) <= o.cutBgMaxChanged)
       && (entry.activeY ?? 0) >= 0.25
       && (o.cutBgMaxSpanY <= 0
         || (entry.activeY > 0

@@ -44,6 +44,20 @@ function shiftedFrame(off) {
   return buf;
 }
 
+/** 底色 + 顶部 rows 行高亮；用于数稳定背景变化格。 */
+function topPatchFrame(rows) {
+  const buf = frame();
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < W; x += 1) {
+      const i = (y * W + x) * 3;
+      buf[i] = 240;
+      buf[i + 1] = 240;
+      buf[i + 2] = 30;
+    }
+  }
+  return buf;
+}
+
 /** 上下各 8 行黑边的宽银幕帧。 */
 function letterboxFrame({ r = 30, g = 40, b = 70 } = {}) {
   const buf = Buffer.alloc(W * H * 3);
@@ -118,6 +132,15 @@ test('bgStats：稳定背景整片换色才 255，同一帧为 0', () => {
   const all = bgStats(hist, b);
   assert.equal(all.stable, N);
   assert.equal(all.score, 255);
+});
+
+test('bgStats：同时返回绝对变化格数，供“稳定背景很多”的真切点放行', () => {
+  const a = hsvOf(frame());
+  const hist = [a, a, a, a, a, a];
+  const st = bgStats(hist, hsvOf(topPatchFrame(20)));
+  assert.equal(st.stable, N);
+  assert.equal(st.changed, W * 20);
+  assert.equal(st.score, (W * 20 / N) * 255);
 });
 
 test('contentHeightRatio：宽银幕只算有效画面高度，全黑为 0', () => {
