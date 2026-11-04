@@ -49,6 +49,44 @@ export const DEFAULT_SCREEN_DEVICE = 'Capture screen 0';
 export const SCREEN_PERMISSION_HINT =
   'ffmpeg 没有「屏幕录制」权限：系统设置 → 隐私与安全性 → 屏幕录制，勾上跑 DSH 的那个 App（或终端），重启它再试。';
 
+/**
+ * 把采集失败归成能直接照着做的一类。
+ *
+ * 原来所有失败都只有一句 "ffmpeg exit 1"，用户分不清是没装 ffmpeg、没给权限，
+ * 还是设备名不对（#6 的核心诉求）。判据只用 stderr 里的明文证据，不猜。
+ *
+ * @param {Error & {code?:string|number, stderrTail?:string|null}} error
+ * @param {'spawn'|'exit'|'list'} stage
+ */
+export function captureErrorInfo(error, stage = 'exit') {
+  if (error?.errorInfo) return error.errorInfo;
+  const message = `${error?.message ?? error}\n${error?.stderrTail ?? ''}`;
+  const category = error?.code === 'ENOENT' || /找不到 FFmpeg|spawn.*ENOENT/i.test(message)
+    ? 'dependency-missing'
+    : error instanceof RangeError ? 'invalid-input'
+      : /permission denied|not authorized|operation not permitted|screen recording permission/i.test(message)
+        ? 'permission-denied'
+        : /device.*(?:not found|invalid)|invalid.*device|could not find.*device|video device.*not available/i.test(message)
+          ? 'device-unavailable'
+          : 'capture-failed';
+  return {
+    category,
+    stage,
+    code: error?.code ?? null,
+    signal: error?.signal ?? null,
+    stderrTail: error?.stderrTail ?? null,
+  };
+}
+
+/** 分类 → 一句能照做的话。只给用户/模型看的，不参与判断。 */
+export const CAPTURE_HINTS = Object.freeze({
+  'dependency-missing': '没找到 ffmpeg：装一个，或用 DSH_FFMPEG_PATH 指到绝对路径。',
+  'invalid-input': '参数不合法：region 必须是物理像素整数、宽高为正。',
+  'permission-denied': SCREEN_PERMISSION_HINT,
+  'device-unavailable': '设备名不对或没插上：换成可用的设备，或不传 device 用默认屏幕。',
+  'capture-failed': '采集失败：看 stderrTail，那几行通常就是原因。',
+});
+
 /** 源描述 → 输入参数。纯函数，可单测。 */
 export function sourceArgs(
   source = { kind: 'screen' },
@@ -201,7 +239,11 @@ export function captureArgs({
       err = `${err}${d}`.slice(-4000);
       onStderr?.(String(d));
     });
-    child.on('error', reject);
+    child.on('error', (e) => {
+      // 常见于 ffmpeg 不在 PATH（ENOENT）—— 分类后上层能直接给出"装/指路径"的提示
+      e.errorInfo = captureErrorInfo(e, 'spawn');
+      reject(e);
+    });
     child.on('close', (code) => {
       const secs = Math.round((Date.now() - t0) / 1000);
       // `code === null` = 被我们自己 SIGKILL 的（stop / 换清晰度 / 收工）。
@@ -219,14 +261,24 @@ export function captureArgs({
        * 报错里必须带**跑了多久、收了多少帧** —— 只有 code 是定位不了的：
        * 12fps 下 141s/1686 帧说明是正常跑着跑着停的，而不是启动就崩。
        */
+      const stderrTail = err.trim().slice(-1000) || null;
       if (code !== 0) {
-        reject(new Error(`ffmpeg exit ${code}（运行 ${secs}s / ${n} 帧）`
-          + `: ${err.trim().slice(-300) || '无 stderr'}`));
+        const error = new Error(`ffmpeg exit ${code}（运行 ${secs}s / ${n} 帧）`
+          + `: ${err.trim().slice(-300) || '无 stderr'}`);
+        error.code = code;
+        error.stderrTail = stderrTail;
+        error.errorInfo = captureErrorInfo(error, 'exit');
+        const hint = CAPTURE_HINTS[error.errorInfo.category];
+        if (hint) error.message += `\n  ↳ ${hint}`;
+        reject(error);
         return;
       }
-      reject(new Error(`ffmpeg 自己退出了（code 0，运行 ${secs}s / ${n} 帧）—— `
+      const error = new Error(`ffmpeg 自己退出了（code 0，运行 ${secs}s / ${n} 帧）—— `
         + `屏幕源没了？独占全屏切换 / 显示器休眠 / 抓屏引擎掉线都会这样。`
-        + ` stderr: ${err.trim().slice(-300) || '空'}`));
+        + ` stderr: ${err.trim().slice(-300) || '空'}`);
+      error.stderrTail = stderrTail;
+      error.errorInfo = captureErrorInfo(error, 'exit');
+      reject(error);
     });
   });
 
