@@ -22,6 +22,8 @@ export const TUNING_DEFAULTS = Object.freeze({
   maxAutonomousWakes: 8,
   idleStopMin: 3,
   defaultPace: 'normal',
+  // 「上一句说多久，就等多久再叫下一轮」（见 pacing.js）。false = 退回固定 8 秒。
+  speechPacing: true,
 });
 
 /** 可用节奏。和 runner.js 的 PACES 同步，但不在模块层 import（避免环形依赖）。 */
@@ -84,11 +86,20 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     else warnings.push(`defaultPace 只能是 ${PACES_KEYS.join(' / ')}，已用默认 normal`);
   }
 
+  // true / "follow" = 按上一句时长排；"guard" = 旧间隔与说完取更晚；false = 关掉
+  let speechPacing = TUNING_DEFAULTS.speechPacing;
+  if (raw.speechPacing !== undefined) {
+    if (typeof raw.speechPacing === 'boolean') speechPacing = raw.speechPacing;
+    else if (raw.speechPacing === 'guard') speechPacing = 'guard';
+    else warnings.push('speechPacing 只能是 true / false / "guard"，已用默认 true');
+  }
+
   return {
     maxAutonomousWakes,
     idleStopMin,
     idleStopMs: idleStopMin * 60 * 1000,
     defaultPace,
+    speechPacing,
     path,
     warnings,
   };

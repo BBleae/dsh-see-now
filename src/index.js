@@ -843,7 +843,11 @@ function loopLine(lp) {
   const last = lp.lastWakeAt
     ? `，上一次 ${Math.round((Date.now() - lp.lastWakeAt) / 1000)}s 前${lp.lastWakeOk === false ? '（失败）' : ''}`
     : '';
-  return `在跑（叫醒 ${lp.wakes} 次${fail}${last}，会话 ${lp.session ?? '未知'}）`;
+  // 节奏诊断：上一句多长、下一轮最早什么时候 —— 用户问"怎么半天不说话"时先看这两个数
+  const speech = lp.lastSpeechMs ? `，上一句约 ${(lp.lastSpeechMs / 1000).toFixed(1)}s` : '';
+  const wait = lp.nextWakeAt && lp.nextWakeAt > Date.now()
+    ? `，下一轮最早 ${Math.ceil((lp.nextWakeAt - Date.now()) / 1000)}s 后` : '';
+  return `在跑（叫醒 ${lp.wakes} 次${fail}${last}${speech}${wait}，会话 ${lp.session ?? '未知'}）`;
 }
 
 /**

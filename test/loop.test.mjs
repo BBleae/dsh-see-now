@@ -287,3 +287,30 @@ test('runner 的 note/takeNote：取一次就没了（同一句话不许每轮�
   assert.equal(r.takeNote(), null, '取过就不该再来一次');
   assert.equal(r.touch(), false, '没在采集时续命不该假装活着');
 });
+
+test('节奏：spoken 记下上一句时长；有声音适配器时 due 不算', async () => {
+  const speech = await import('../src/speech.js');
+  speech.__resetSpeech();
+  const fake = fakeCtx();
+  const loop = startLoop({
+    ctx: fake.ctx, sessionId: 's1', runner: fakeRunner(), wakeMinGapSec: 60,
+  });
+  try {
+    speech.emitSpoken({ text: '这是一句大概十个字的话' });
+    const spokenMs = loop.state().lastSpeechMs;
+    assert.ok(spokenMs > 1000, `spoken 之后应该记下时长，实际 ${spokenMs}`);
+
+    // 有"会出声"的订阅者 = 装着声音适配器 → due 只是"打算念"，不能当起点
+    const off = speech.onSpeech(() => {}, { voice: true });
+    speech.emitSpeech({ at: null, text: '短', state: 'due' });
+    assert.equal(loop.state().lastSpeechMs, spokenMs, 'due 不该覆盖 spoken 的时长');
+    off();
+
+    // 没有声音适配器 → 文字就是用户能感知的全部，due 该算
+    speech.emitSpeech({ at: null, text: '这是一句大概十个字的话', state: 'due' });
+    assert.ok(loop.state().lastSpeechMs > 1000, '没声音时 due 要算时长');
+  } finally {
+    loop.dispose();
+    speech.__resetSpeech();
+  }
+});

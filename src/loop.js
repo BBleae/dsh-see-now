@@ -32,6 +32,8 @@ import { startTicker, wakeWithRetry } from './timer.js';
 import { windowAlive, windowPidAlive } from './window.js';
 import { appendSpoken, chatWatcherShared, chatWaiterCount, lastSaidNote } from './chat.js';
 import { noteInterjected } from './interject.js';
+import { onSpeech, speechSubscribers } from './speech.js';
+import { estimateSpeechMs, nextProactiveAt } from './pacing.js';
 
 /** 两次叫醒之间至少隔这么久（叫醒一次 = 模型跑一轮，很贵） */
 const WAKE_COOLDOWN_MS = 3000;
@@ -153,6 +155,37 @@ export function startLoop({
   let consecutiveFails = 0;
   let wakeCount = 0;
   let stopReason = null;
+  /**
+   * 上一句真正出声的时刻与估计时长（见 pacing.js）。
+   *
+   * 只认 `spoken`（适配器开始播放的那一瞬）：`due` 是"打算念"，离真出声还隔着合成，
+   * 拿它当起点会把等待算短。没有声音适配器时永远收不到 `spoken`，节奏就退回旧的 8 秒。
+   */
+  let lastSpeechAt = 0;
+  let lastSpeechMs = 0;
+  /**
+   * 节奏口径（`~/.dsh/see-now.json` 的 speechPacing）：
+   *   true / 'follow'（默认）= 上一句说多久，下一句就隔多久；
+   *   'guard' = 旧间隔与"说完+气口"取更晚，只在长句时推迟；
+   *   false = 关掉，纯固定间隔。
+   */
+  const pacingMode = (() => {
+    const v = tuning?.speechPacing;
+    if (v === false) return 'off';
+    return v === 'guard' ? 'guard' : 'follow';
+  })();
+  const followSpeech = pacingMode !== 'off';
+  const offSpeech = onSpeech((e) => {
+    if (!followSpeech) return;
+    const state = e?.state;
+    // 有声音适配器：等 `spoken`（真正开始播放）。没有声音：`due` 就是"这话已经给用户看了"，
+    // 按它算，免得没装语音的用户被同一句文字刷屏。
+    if (state !== 'spoken' && !(state === 'due' && speechSubscribers() === 0)) return;
+    const ms = estimateSpeechMs(e.text);
+    if (!ms) return;
+    lastSpeechAt = Date.now();
+    lastSpeechMs = ms;
+  }, { voice: false });
   /** 起循环时的会话（一旦定下就不再变，见参数注释） */
   const owner = sessionId ?? getSessionId() ?? null;
   /** 上一张已经叫过的图（`#序号` 或 `p脉冲`），同一张永不重复叫 */
@@ -383,7 +416,17 @@ export function startLoop({
       const sheetSeq = Number(st.sheets ?? st.stats?.sheets ?? 0);
       const key = pending > 0 ? (sheetSeq > 0 ? `#${sheetSeq}` : `p${pendingPulse}`) : null;
       if (!key || key === lastKey) return;
-      if (Date.now() - lastWakeAt < Math.max(0, wakeMinGapSec) * 1000) return;   // 下一拍再来
+      // ⑤.1 节奏：既不能比 wakeMinGapSec 更密，也不能在上一句还没说完时插嘴。
+      //      "上一句说多久，就等多久"——上一句 6 秒，下一次最早在说完之后（+气口），
+      //      而不是从"叫醒那一刻"起算的固定 8 秒。
+      const nextAt = nextProactiveAt({
+        lastWakeAt,
+        minGapMs: Math.max(0, wakeMinGapSec) * 1000,
+        speechAt: followSpeech ? lastSpeechAt : 0,
+        speechMs: followSpeech ? lastSpeechMs : 0,
+        mode: pacingMode,
+      });
+      if (Date.now() < nextAt) return;   // 下一拍再来
 
       // 叫醒了才算"这张已经叫过"。**失败不能记账**：记了的话下一拍看到 key 没变
       // 就不再重试，连续失败计数永远到不了上限 —— 于是"叫不醒"既不会重试也不会停。
@@ -406,6 +449,7 @@ export function startLoop({
     if (disposed) return;
     disposed = true;
     ticker.dispose();
+    try { offSpeech(); } catch { /* 已经退订 */ }
   }
 
   return {
@@ -422,6 +466,15 @@ export function startLoop({
       lastWakeAt: lastWakeAt || null,
       lastWakeOk,
       lastSheet: lastKey,
+      // 节奏诊断：下一次主动唤醒最早落在什么时候、为什么被推迟
+      lastSpeechMs: lastSpeechMs || null,
+      nextWakeAt: nextProactiveAt({
+        lastWakeAt,
+        minGapMs: Math.max(0, wakeMinGapSec) * 1000,
+        speechAt: followSpeech ? lastSpeechAt : 0,
+        speechMs: followSpeech ? lastSpeechMs : 0,
+        mode: pacingMode,
+      }) || null,
     }),
   };
 }

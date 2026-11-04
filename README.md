@@ -335,7 +335,8 @@ see_now({ scene: true, say: "好，接下来每换一个画面我就说一句" }
 {
   "maxAutonomousWakes": 24,
   "idleStopMin": 10,
-  "defaultPace": "calm"
+  "defaultPace": "calm",
+  "speechPacing": true
 }
 ```
 
@@ -344,6 +345,15 @@ see_now({ scene: true, say: "好，接下来每换一个画面我就说一句" }
 | `maxAutonomousWakes` | 8 | 连续这么多次自动叫醒都没人理 → 收工。**悬浮窗开着时，这条就是实际的最长陪看时长**（normal 15 秒一次 ≈ 2 分钟）。1–200 |
 | `idleStopMin` | 3 | 没开悬浮窗时，用户这么久没说话 → 收工。`0` = 关掉这条 |
 | `defaultPace` | `normal` | 新会话/重开采集时的默认节奏：`calm` / `normal` / `dense` / `game-economic`。调用里显式传 `pace` 仍然优先 |
+| `speechPacing` | `true` | 按上一句的估计时长排下一轮（中文约 5 字/秒）。`"guard"` = 只在长句时推迟、不比旧节奏密；`false` = 退回固定间隔 |
+
+**为什么要 `speechPacing`**：固定间隔是从"叫醒那一刻"起算的（calm 30s / normal 15s / dense 8s / 逐场景 4s），
+跟上一句说了多久没关系。现在默认改成**跟随上一句**：上一句 3 秒，下一轮最早 3.8 秒后（有 3 秒地板，防连珠炮）；
+上一句 12 秒，就顺到 12.8 秒。想保持旧节奏就写 `"guard"`（取旧间隔和"说完+气口"里更晚的那个），
+写 `false` 完全关掉。用户插话不受限制。
+
+估时长只看文本，误差约 ±20%（不同引擎/语速），目的是"跟住嘴"，不需要精确。
+`see_now({action:"status"})` 的循环行会显示 `上一句约 X.Xs`、`下一轮最早 Ns 后`。
 
 `see_now({action:"status"})` 的「收工线」那一行会显示当前生效的值，
 改过配置会带上文件路径 —— 否则"怎么陪一会儿就自己停了"很难查。
