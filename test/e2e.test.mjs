@@ -74,7 +74,11 @@ test('端到端：喂一段视频，工具返回一张真图 + 清单', { skip, 
 
     assert.match(v.text, /个画面/, '清单要说清这张里几个画面');
     assert.ok(v.meta.frames >= 1, '至少要有一帧');
-    assert.ok(v.meta.fill > 0.4, `fill 太低：${v.meta.fill}`);
+    // 这里**不能卡绝对下限**：fill 由这一轮抓到几帧决定（文件回放吃真实时间，
+    // from/to 每次都不一样），同一 fixture 连跑 12 次落在 0.5~0.833，偶发 0.25
+    // （只攒到 1 帧、铺在 2×2 画布的一格）。绝对比较归 pack.test.mjs，那边用的是
+    // 相对涨幅；这条只守"别出空白图"。
+    assert.ok(v.meta.fill > 0.15, `fill 太低：${v.meta.fill}`);
     assert.ok(v.meta.to >= v.meta.from, '时间区间要成立（单帧时首尾相等）');
   } finally {
     dispose();
