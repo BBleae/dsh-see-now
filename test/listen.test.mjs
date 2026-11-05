@@ -210,6 +210,42 @@ test('markSpeaking：写静音窗口，且时长随文本变长（宁可多静�
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
+test('markSpeaking：适配器给了真实时长就按它算，不再按字数猜（issue #33）', async () => {
+  const { markSpeaking, quietFile } = await import('../src/listen.js');
+  const home = mkdtempSync(join(tmpdir(), 'see-quiet-'));
+  try {
+    const env = { ...process.env, DSH_HOME: home };
+    delete env.DSH_QUIET_FILE;
+    const text = '这句话字数不少，按字数估算会被拉得很长很长很长很长很长。';
+
+    const guessed = markSpeaking(text, { env });
+    const real = markSpeaking(text, { env, durationMs: 1500 });
+    assert.ok(real < guessed,
+      `真实 1.5 秒就该按 2.7 秒算，不比字数估算长（guessed=${guessed - Date.now()} real=${real - Date.now()}）—— 快 TTS 多聋几秒就是这里`);
+
+    const raw = JSON.parse(readFileSync(quietFile(env), 'utf8'));
+    assert.equal(raw.durationMs, 1500, '文件里要留下这次是按真实时长算的痕迹');
+    assert.equal(raw.until, real);
+
+    // 慢 TTS：字数估的那种"短窗口"被真实时长直接顶掉 —— 正是自激的修法
+    const shorter = markSpeaking('嗯。', { env });
+    const longer = markSpeaking('嗯。', { env, durationMs: 30000 });
+    assert.ok(longer - shorter > 20000, '慢 TTS 出声那一刻要把窗口延到它真正念完');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('markSpeaking：只有时长没有文本也能占窗口（适配器只报了音频）', async () => {
+  const { markSpeaking } = await import('../src/listen.js');
+  const home = mkdtempSync(join(tmpdir(), 'see-quiet-'));
+  try {
+    const env = { ...process.env, DSH_HOME: home };
+    delete env.DSH_QUIET_FILE;
+    const until = markSpeaking('', { env, durationMs: 2000 });
+    assert.ok(until > Date.now(), '有真实音频就该静音，文本是给日志看的');
+    assert.equal(markSpeaking('', { env }), null, '什么都没有才不占窗口');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
 test('markSpeaking：空文本不占窗口（否则一次空 say 会白静音两秒）', async () => {
   const { markSpeaking, quietFile } = await import('../src/listen.js');
   const home = mkdtempSync(join(tmpdir(), 'see-quiet-'));

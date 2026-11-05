@@ -78,6 +78,14 @@ export function emitSpeech(event) {
     state: normalizeState(event?.state),
     // `origin: 'chat'` = 这条已经被写进聊天流了，展示层不要再写一遍
     ...(event?.origin ? { origin: String(event.origin) } : {}),
+    /**
+     * 适配器知道的**音频真实时长**（毫秒）。
+     *
+     * 只给 `spoken` 用：`due` 那一刻还没有音频，估不出来。拿到之后
+     * `markSpeaking()` 就不再按字数猜了 —— 字数估算对慢语速会低估、对快语速会高估，
+     * 两头都出问题（issue #33：慢的会自激、快的会多聋几秒）。
+     */
+    ...(Number.isFinite(Number(event?.durationMs)) ? { durationMs: Number(event.durationMs) } : {}),
   });
   lastEvent = { ...payload, emittedAt: Date.now() };
   let delivered = 0;

@@ -535,6 +535,19 @@ async function registerAll(ctx) {
    * `speechSubscribers()` 一直 > 0，展示层就会一直等一个永远不会来的 `spoken`。
    */
   disposers.push(onSpeech((e) => {
+    /**
+     * `spoken` = **声音真的出来了**（适配器在开始播放那一瞬发的）。
+     *
+     * 这里必须再占一次窗口：`due` 是"该念了"，慢 TTS 从 due 到出声可能要几十秒，
+     * 那期间窗口早过期了，AI 自己的声音会被回环收回去当成视频台词 ——
+     * 模型接着自己的话聊，停不下来（issue #33 的自激）。
+     *
+     * 适配器要是给了 `durationMs`，就按真实时长收口，不再按字数猜。
+     */
+    if (e?.state === 'spoken') {
+      markSpeaking(e.text, e.durationMs ? { durationMs: e.durationMs } : {});
+      return;
+    }
     if (e?.state === 'due') markSpeaking(e.text);
   }, { voice: false }));
 

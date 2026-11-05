@@ -476,18 +476,39 @@ export function quietFile(env = process.env) {
  * 只能抓浏览器/播放器的音频树，AI 从别的进程出来的声音根本进不来。那是另一件事，
  * 要写 COM（`ActivateAudioInterfaceAsync`），pyaudiowpatch 没有这个能力。
  *
+ * ## 谁该调它、什么时候调（issue #33）
+ *
+ * 以前只有 `due` 调，而 `due` 是"该念了"，**不是"出声了"**。慢 TTS（本机合成要 30~60 秒）
+ * 的情况：`due` 那一刻占的窗口早就过期了，等声音真出来，回环把它当视频台词收回去 ——
+ * 模型接着自己的话聊，停不下来。
+ *
+ * 所以 `spoken`（适配器在开始播放那一瞬发的）**也必须调一次**，从真正出声的那一刻
+ * 重新起算。两条都调不冲突：`due` 那次是提前占位（快 TTS 靠它），`spoken` 那次是纠偏，
+ * 后写的 `until` 会直接覆盖前者（长了就延长，短了就缩短 —— 快 TTS 多聋几秒正是这个原因）。
+ *
+ * @param {{env?:object, extraMs?:number, durationMs?:number}} [opts]
+ *   `durationMs`：适配器知道的音频真实时长。给了就用它，字数只是拿不到时长时的兜底 ——
+ *   按字数估算对慢语速会低估、对 edge-tts 这种快语速会高估，两个方向都会出问题。
  * @returns {number|null} 静音到什么时候（epoch ms）
  */
-export function markSpeaking(text, { env = process.env, extraMs = 1200 } = {}) {
+export function markSpeaking(text, { env = process.env, extraMs = 1200, durationMs = null } = {}) {
   const chars = String(text ?? '').trim().length;
-  if (!chars) return null;
-  // 中文约 4~5 字/秒，取 4 再乘 1.5 倍余量，加收尾 —— **宁可多静音，也别把自己的话变成台词**
-  const ms = Math.ceil((chars / 4) * 1000 * 1.5) + extraMs;
+  const real = Number(durationMs);
+  if (!chars && !(Number.isFinite(real) && real > 0)) return null;
+  /**
+   * 有真实时长就用真实的（+ 收尾余量）；没有才退回字数估算。
+   * 中文约 4~5 字/秒，取 4 再乘 1.5 倍余量 —— **宁可多静音，也别把自己的话变成台词**。
+   */
+  const ms = Number.isFinite(real) && real > 0
+    ? Math.ceil(real) + extraMs
+    : Math.ceil((chars / 4) * 1000 * 1.5) + extraMs;
   const until = Date.now() + ms;
   try {
     const p = quietFile(env);
     mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, JSON.stringify({ until, at: Date.now(), by: 'see-now' }), 'utf8');
+    const body = { until, at: Date.now(), by: 'see-now' };
+    if (Number.isFinite(real) && real > 0) body.durationMs = Math.round(real);
+    writeFileSync(p, JSON.stringify(body), 'utf8');
   } catch { /* 写不了最多是"可能听见自己"，别让它影响念 */ }
   return until;
 }
