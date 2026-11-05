@@ -24,6 +24,11 @@ export const TUNING_DEFAULTS = Object.freeze({
   defaultPace: 'normal',
   // 「上一句说多久，就等多久再叫下一轮」（见 pacing.js）。false = 退回固定 8 秒。
   speechPacing: true,
+  /**
+   * 变化日志：交付时在图下面附一段「这期间屏幕怎么动的」（时间 / 变化分 / 方位）。
+   * 默认关 —— 每次交付加约 100 token，属于按需打开的能力，不该改所有人的默认成本。
+   */
+  changeLog: false,
 });
 
 /**
@@ -186,6 +191,12 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     else warnings.push('speechPacing 只能是 true / false / "guard"，已用默认 true');
   }
 
+  let changeLog = TUNING_DEFAULTS.changeLog;
+  if (raw.changeLog !== undefined) {
+    if (typeof raw.changeLog === 'boolean') changeLog = raw.changeLog;
+    else warnings.push('changeLog 只能是 true / false，已用默认 false');
+  }
+
   const listenCfg = readListen(raw.listen);
   warnings.push(...listenCfg.warnings);
 
@@ -195,6 +206,7 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     idleStopMs: idleStopMin * 60 * 1000,
     defaultPace,
     speechPacing,
+    changeLog,
     listen: listenCfg.listen,
     path,
     warnings,
