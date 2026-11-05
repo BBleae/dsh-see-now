@@ -179,6 +179,17 @@ export function seeNowToolSpec() {
           + '(default 1). A 1-frame image costs the same as a 4-frame one, so raising this saves tokens '
           + 'when the screen is mostly static.',
       },
+      /**
+       * 档位（每帧占画布几分之几）。
+       *
+       * **故意只写枚举，不写"什么时候该用"** —— 这是给模型的一个通道，不是一条建议。
+       * 每写一句引导，每一轮请求都要付一次它的 token，而且会把它从"用户说了才动"
+       * 变成"它觉得自己该动"。用户要的是"有能力，但别主动"。
+       */
+      tier: {
+        type: 'string',
+        description: 'standard | native | full | compact',
+      },
       quality: {
         type: 'string',
         description: 'How sharp the image is. "low" (default, 798×462 = 450px of frames + a 12px audio '

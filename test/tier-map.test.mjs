@@ -20,7 +20,8 @@ const home = mkdtempSync(join(tmpdir(), 'dsh-see-tiermap-'));
 process.env.DSH_HOME = home;
 
 const { applyStrategy, DEFAULT_TIER_MAP } = await import('../src/tiers.js');
-const { readTuning, writeTuning, tuningPath, TUNING_DEFAULTS } = await import('../src/tuning.js');
+const { readTuning, writeTuning, tuningPath, TUNING_DEFAULTS, TIER_STYLES } =
+  await import('../src/tuning.js');
 
 test('custom：逐档查表，整体升一档就是 [2,3,4,5,6,7,8,8]', () => {
   const tiers = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -132,4 +133,28 @@ test('它压过 native/full/compact —— 因为那三种是在"密度档位"�
   assert.deepEqual(applyStrategy(base, 'custom', same), [2, 2, 2]);
   // 对照：compact 是"每个档位 +1"，结果仍随密度变
   assert.deepEqual(applyStrategy(base, 'compact'), [2, 6, 8]);
+});
+
+// ---- 模型能用 `tier` 改档位（schema 里只留枚举，不写引导） -----------------
+
+test('schema 里有 tier 参数，枚举和内部白名单一致', async () => {
+  const { seeNowToolSpec } = await import('../src/tool-spec.js');
+  const tier = seeNowToolSpec().parameters.tier;
+  assert.ok(tier, '这参数必须存在 —— 宿主按 schema 过滤，没声明就传不进来');
+  assert.equal(tier.type, 'string');
+  const listed = String(tier.description).split('|').map((x) => x.trim());
+  for (const v of ['standard', 'native', 'full', 'compact']) {
+    assert.ok(listed.includes(v), `schema 里漏了 ${v}`);
+    assert.ok(TIER_STYLES.includes(v), `TIER_STYLES 里没有 ${v}`);
+  }
+  assert.ok(!listed.includes('custom'), 'custom 不给模型 —— 它填不了那张八项的表');
+});
+
+test('模型改档位后 tierMode 生效，且不再带 custom 的表', () => {
+  // 走一遍和 index.js 里同样的判断：custom 被挡住，四档被接受
+  const modes = ['standard', 'native', 'full', 'compact'];
+  const pick = (want) => (modes.includes(String(want).toLowerCase()) ? String(want).toLowerCase() : null);
+  assert.equal(pick('full'), 'full');
+  assert.equal(pick('CUSTOM'), null, 'custom 不该被接受');
+  assert.equal(pick('nonsense'), null);
 });

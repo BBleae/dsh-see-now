@@ -16,7 +16,7 @@ import { ensureConfiguredVoice, detachAdapters, attachedAdapters, configuredVoic
 import { speechSubscribers, onSpeech } from './speech.js';
 import { markSpeaking } from './listen.js';
 import { startLoop, HANGUP_NOTE } from './loop.js';
-import { readTuning } from './tuning.js';
+import { readTuning, TIER_STYLES } from './tuning.js';
 import { createSettingsApi, ROUTE_PREFIX } from './settings-api.mjs';
 import { windowAlive, windowHidden, setWindowHidden, hiddenForShow, windowReport, windowLine } from './window.js';
 import { pickRegion, loadRegion, clearRegion, regionText } from './region.js';
@@ -594,6 +594,15 @@ async function registerAll(ctx) {
   /** 节奏：calm / normal / dense（粘性）。**这是"省点钱"唯一能真的生效的旋钮。** */
   let paceMode = PACES[tuning.defaultPace] ? tuning.defaultPace : DEFAULT_PACE;
   /**
+   * 当前生效的档位（每帧占画布几分之几）。
+   *
+   * 初值取设置页那一项；模型可以通过 `tier` 参数改它，改了就**粘住**（和 `pace` 一样）。
+   * 它只在常规模式下进 `opts.strategy` —— 逐帧模式必须整幅，不能被这个覆盖。
+   */
+  let tierMode = TIER_STYLES.includes(tuning.tierStyle) ? tuning.tierStyle : 'standard';
+  /** 模型能用 `tier` 选的四个值（不含 `custom`，理由见下面处理 `args.tier` 那段）。 */
+  const TIER_MODES = ['standard', 'native', 'full', 'compact'];
+  /**
    * **上一次真正生效的 source 类型**。`cutAbs` 的自动选择要靠它，不能看本次请求的 `src`：
    * 第二次 `watch` 通常不带 path（接着看同一段），那时 `src` 是 undefined，判定就会从
    * "文件回放"翻回默认档 —— 参数一变 runner 就重启采集，画面从 0 秒重来。
@@ -815,6 +824,20 @@ async function registerAll(ctx) {
       let wantPace = args.pace ? String(args.pace).toLowerCase() : null;
       // 旧名兼容：`action` 曾短暂用过，收到就走新档
       if (wantPace === 'action') wantPace = 'game-economic';
+      /**
+       * 档位：模型传 `tier` 才会走到这里，没传就保持当前值。
+       * 不在 schema 里教它什么时候用 —— 见 `tool-spec.js` 那段注释。
+       */
+      const wantTier = args.tier ? String(args.tier).toLowerCase() : null;
+      /**
+       * 模型只能选这四档。**`custom` 故意不给它** —— 那是一张八项的表，
+       * 模型填不准（它看不到当前档位分布），传了 `custom` 却没有表等于什么都不改。
+       */
+      if (wantTier && TIER_MODES.includes(wantTier) && wantTier !== tierMode) {
+        tierMode = wantTier;
+        log(`档位改成 ${wantTier}`);
+      }
+
       if (wantPace && PACES[wantPace] && wantPace !== paceMode) {
         paceMode = wantPace;
         try { runner.stop(); } catch { /* 没在跑 */ }
@@ -898,6 +921,13 @@ async function registerAll(ctx) {
             // 档位自带的管线覆盖（`action` 用：积分阈值、每张帧数、兜底间隔…）。
             // 逐帧模式不吃这套 —— 它自己已经定死了 maxFrames/strategy。
             ...(sceneMode ? {} : (PACES[paceMode].pipeline ?? {})),
+            /**
+             * 每帧多大。`tierMode` 变了签名就变，runner 会自己重开管线（约 0.5 秒），
+             * 不用在这里手动 stop。逐帧模式由 `SCENE_OPTS` 钉成 `single`，这里跳过。
+             */
+            ...(sceneMode ? {} : { strategy: tierMode }),
+            // 设置页选了「自定义」时把那张表带上；模型改过档位后就不再是 custom 了
+            ...(sceneMode || tierMode !== 'custom' ? {} : { tierMap: tuning.tierMap }),
             // **文件回放（看视频）走视频最优门槛**：实测 27 段短视频上，cutAbs 7 的切点 F1 是 56.8%，
             // 默认 12 只有 51.9%（12fps 采样本来就会吃掉一部分快切）。屏幕采集不受影响。
             // 用户显式传了 pace 就尊重用户。
@@ -1148,7 +1178,7 @@ async function registerAll(ctx) {
              * 档位分布：**"格子怎么变了"有两级原因**（节奏 → 密度 → 档位，再由映射偏移），
              * 只报"节奏"看不清。这一行能分出"帧太少所以格子大"和"映射被改了"。
              */
-            + tierLine(s.stats?.tierHist, tuning)
+            + tierLine(s.stats?.tierHist, { tierStyle: tierMode })
             // 收工线：用户改过 see-now.json 时要能看出来，否则"怎么陪我一会儿就停了"查不到
             + `\n收工线：连续 ${tuning.maxAutonomousWakes} 次叫醒没人理`
             + ` · ${tuning.idleStopMin > 0 ? `没开窗时 ${tuning.idleStopMin} 分钟没说话` : '空闲线已关闭'}`
