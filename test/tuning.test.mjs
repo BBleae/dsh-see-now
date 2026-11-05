@@ -79,3 +79,22 @@ test('shouldGoIdle：覆盖值真的改变判据', () => {
   // 窗开着时只靠次数兜底
   assert.equal(shouldGoIdle({ now, lastUserAt: now - 5 * 60_000, windowOpen: true, maxWakes: 0 }), false);
 });
+
+test('listen：合法但非默认的值不报警告，越界的值必须报警告', () => {
+  // 原来的判据是"夹回后的值 !== out[key]"，两个方向都错：
+  //   silence: 0.5（合法）→ 0.5 !== 0.35 → 被报成"必须在 0.15–1.5 之间"
+  //   liveStep: 9（越界）→ 夹回 1.2 === 默认 → 一条警告都不留，用户以为改生效了
+  const ok = readTuning({
+    env: ENV,
+    readFile: readJson({ listen: { silence: 0.5, pollMs: 200, maxSeg: 5 } }),
+  });
+  assert.equal(ok.listen.silence, 0.5);
+  assert.equal(ok.listen.pollMs, 200);
+  assert.equal(ok.listen.maxSeg, 5);
+  assert.deepEqual(ok.warnings, []);
+
+  const bad = readTuning({ env: ENV, readFile: readJson({ listen: { liveStep: 9 } }) });
+  assert.equal(bad.listen.liveStep, 1.2); // 越界退回默认
+  assert.equal(bad.warnings.length, 1);
+  assert.match(bad.warnings[0], /liveStep/);
+});
