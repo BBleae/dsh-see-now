@@ -17,6 +17,48 @@
  *
  * 结论：屏幕源**默认用 ddagrab**，跑不起来退回 gdigrab；设备源别停进程 —— 首帧延迟只能靠常驻摊掉。
  *
+ * ## gdigrab 全屏到底贵在哪，以及四条"优化"为什么都是假的（2026-11-05 实测）
+ *
+ * 社区报「ddagrab 起不来、退 gdigrab 之后一放视频就卡」，所以把 gdigrab 的成本拆开量了一遍。
+ * 条件：2560×1600 → 798×450 / 12fps，i9-12900HX，ffmpeg 7.0，`-f null` 出图（排除管道开销），
+ * 3 轮交替取最小（笔电会升降频，单次数字能差一倍，别信）。
+ *
+ * | 这一档只做 | 核 | 每帧 |
+ * |---|---|---|
+ * | GDI 拷屏（`-vf null`） | 0.141 | 11.9 ms |
+ * | + BGRA→rgb24 | 0.174 | 14.7 ms |
+ * | + `scale=area`（线上这条） | 0.347 | 29.3 ms |
+ *
+ * **六成的钱花在缩放上，不是拷屏上。** 四条看着有戏的路，实测全不成立：
+ *
+ * ① `-video_size 800x450` 让 gdigrab 少拷一点 —— **它是裁剪，不是缩放**。
+ *    与 `crop=800:450:0:0` **逐字节相同**，与 `scale=800:450` 平均像素差 70.5。
+ *    真按这个"优化"，插件只会看到屏幕左上角，而且看不出是坏的（画面正常、有内容）。
+ * ② `flags=fast_bilinear` 换掉 `area` —— CPU 降到 0.201 核（-42%），但以 `lanczos` 为参照
+ *    SSIM 只有 **0.877**，`area` 是 **0.989**；800×450 下界面文字明显发糊。
+ *    这个插件产出的是给模型读屏的图，**不换**。
+ * ③ `-threads 1` / `-filter_threads` —— 无收益（0.239~0.257 核）。swscale 在单个 scale
+ *    滤镜内部本来就切片并行，外面再给线程只是抢核。
+ * ④ `zscale`（libzimg）—— 更慢（0.35 核），因为它要先把 packed rgb24 拆成平面。
+ *
+ * 结论：**gdigrab 全屏的代价是 GDI + swscale 的固有成本，改滤镜参数救不回来。**
+ * 想省钱只有三条路：换 ddagrab、少抓帧、只抓那一块窗口（region 的 BitBlt 只拷 region；
+ * ffmpeg 7.0 还支持 `-i hwnd=<句柄>` 直接抓窗口）。
+ *
+ * ## 一个反直觉的数：别默认"ddagrab 一定更省"
+ *
+ * 本机把两个引擎交替各跑两轮 5 秒（`798×450 / 12fps`，和 `scripts/bench-capture.mjs` 同一条命令链）：
+ *
+ * | 轮次 | gdigrab | ddagrab |
+ * |---|---|---|
+ * | 1 | 0.22 核 | 0.49 核 |
+ * | 2 | 0.18 核 | 0.23 核 |
+ *
+ * **静止桌面上 gdigrab 反而赢**，而且同一个命令相邻两轮能差一倍多（升降频 + 屏幕有没有在动）。
+ * 上面那张"373ms / 0.28 核 vs 310ms / 0.45 核"的老表是另一台机器、另一种屏幕内容量的，
+ * 两者不矛盾但**不能互相外推** —— 谁快谁慢得用 `scripts/bench-capture.mjs` 现量，
+ * 而且要交替两轮取小。所以这条分支的判断依据永远是"能不能出帧"，不是"哪个更快"。
+ *
  * ## macOS（M 系列 / Retina，同样 12fps → 800×450）
  *
  * | 源 | 首帧 | CPU | 备注 |
@@ -121,8 +163,20 @@ export function sourceArgs(
           '-capture_cursor', s.mouse ? '1' : '0',
           '-i', `${s.device ?? DEFAULT_SCREEN_DEVICE}:none`];
       }
-      // region 只能走 gdigrab：ddagrab 是 filter source，没有 `-offset_x`/`-video_size`
-      // 这类输入侧参数，带 region 时给它会把偏移静默丢掉（抓到整屏，用户以为生效了）。
+      /**
+       * region 走 gdigrab。**原因不是"ddagrab 不支持 region"** —— 它有
+       * `offset_x` / `offset_y` / `video_size` 三个 **filter 选项**。
+       * 2026-11-05 实测（2560×1600，取 200,120 处 800×450）：
+       * ddagrab 与 gdigrab 抓同一块区域**逐字节相同**，与"左上角 800×450 裁剪"平均差 55.5 ——
+       * 偏移是真的生效的。
+       *
+       * 还不能切的理由：region 的用户多半在盯一个窗口，gdigrab 的 `-video_size`
+       * 只 BitBlt 那一块（不是整屏），代价本来就小；换 ddagrab 要整条走 hwdownload 路径，
+       * 收益没量过 —— 要动先拿 `scripts/bench-capture.mjs` 比一遍。
+       *
+       * 唯一**绝对不能**做的是把 `-offset_x` 当**输入**参数塞给 ddagrab：
+       * 它是 filter source，输入侧的这类参数会被静默丢掉（抓到整屏，用户以为生效了）。
+       */
       const useDda = !s.region
         && (s.engine === 'ddagrab' || (s.engine !== 'gdigrab' && engine !== 'gdigrab'));
       if (!useDda) {
@@ -134,8 +188,16 @@ export function sourceArgs(
         return ['-f', 'gdigrab', '-framerate', String(fps), '-draw_mouse', '0', ...region,
           '-i', s.desktop ?? 'desktop'];
       }
-      // ddagrab 是 filter source，输入侧没有帧率参数
-      return ['-f', 'lavfi', '-i', `ddagrab=framerate=${fps}:draw_mouse=${s.mouse ? 1 : 0}`];
+      // ddagrab 是 filter source，输入侧没有帧率参数。
+      // `output_idx` / `allow_fallback` 只在探测发现默认值不可用时才出现 ——
+      // 正常机器上这一段仍拼出和以前一模一样的字符串（见 probeDdagrab 的注释）。
+      {
+        const dda = [`framerate=${fps}`, `draw_mouse=${s.mouse ? 1 : 0}`];
+        const idx = Number.isInteger(s.outputIdx) ? s.outputIdx : cachedOutputIdx;
+        if (Number.isInteger(idx)) dda.push(`output_idx=${idx}`);
+        if (s.allowFallback) dda.push('allow_fallback=1');
+        return ['-f', 'lavfi', '-i', `ddagrab=${dda.join(':')}`];
+      }
     }
     case 'file':
       // `realtime` 才加 -re；离线跑要看的是「管线本身多快」，不能被播放速度骗了
@@ -341,11 +403,17 @@ export function captureArgs({
 let cachedEngine = null;
 let cachedFormat = null;            // macOS 屏幕像素格式：'' = 用设备默认
 let screenWarning = null;
+/**
+ * ddagrab 探测出来的 DXGI output 序号。`null` = 用 ffmpeg 的默认值（0），
+ * 此时命令行与以前**逐字节一致** —— 正常机器上不允许因为这次改动多出参数。
+ */
+let cachedOutputIdx = null;
 
 export function resetScreenEngineCache() {
   cachedEngine = null;
   cachedFormat = null;
   screenWarning = null;
+  cachedOutputIdx = null;
 }
 
 /** 上一次探测留下的警告（目前只有"没有屏幕录制权限"这一类）。 */
@@ -438,28 +506,106 @@ function grabOneFrame({ ffmpegPath, fps, width, height, pixelFormat, timeoutMs }
 }
 
 /** Windows：探 ddagrab，不行退 gdigrab。 */
+/**
+ * 探一次 ddagrab。**先按默认参数试，失败才放宽。**
+ *
+ * 社区那台 GTX1050Ti 报的 `Selected output not supported` 是 ffmpeg 里
+ * `DuplicateOutput` 返回 `DXGI_ERROR_UNSUPPORTED` 的分支（见 7.0 的
+ * `vsrc_ddagrab.c`：这条 HRESULT 只印这一句；索引越界是另一句
+ * `Failed to enumerate DXGI output N`，其它情况是 `access denied` / `Failed duplicating output`）。
+ * 换句话说：**那个 output 自己拒绝被复制**，不是编号找错了。
+ *
+ * 由此得到两条硬约束，别再绕弯：
+ *  ① **适配器不能从命令行指定**。`-init_hw_device d3d11va=dx:N -filter_hw_device dx`
+ *     对 `-f lavfi` 的输入图**不生效** —— 实测 ddagrab 照样打 "Created internal
+ *     hw_device_ctx"（它自己建设备，用的是 libavutil 选的默认适配器）。
+ *     所以"混合显卡要换块卡"这条路走不通，只能换 output_idx。
+ *  ② output_idx 只能救"这台机器上存在第 N 个 output"的情况。真的是 UNSUPPORTED
+ *     （虚拟显示器、被独占全屏挡住、远程会话）时，四档全试也一样失败 —— 那时
+ *     gdigrab 不是"降级"，是唯一能出画面的引擎。
+ *
+ * 尽力而为的部分：先换 output_idx，最后才动 allow_fallback
+ * （后者允许 ffmpeg 回退到 8bit 输出，精度略降，但比完全没有 GPU 路径强）。
+ *
+ * 失败是**快速失败**：ffmpeg 报错立即退出，不会耗满 timeoutMs（本机实测
+ * output 1/2/3 各 ~80ms 就返回），所以多试几个不会拖慢启动。
+ */
 function probeDdagrab({ ffmpegPath, fps, timeoutMs }) {
   const W = 64;
-  const H = 36;                     // 探针只取 1 帧，尺寸越小越快
-  const args = captureArgs({
-    source: { kind: 'screen', engine: 'ddagrab' }, width: W, height: H, fps, ffmpegPath, engine: 'ddagrab',
-  }).slice(1);
-  args.splice(args.length - 1, 0, '-frames:v', '1');
+  const H = 36;
+  // null = 默认参数，命令行与历史版本逐字节一致
+  const attempts = [
+    null,
+    { outputIdx: 1, allowFallback: true },
+    { outputIdx: 2, allowFallback: true },
+    { outputIdx: 0, allowFallback: true },
+  ];
+  const deadline = Date.now() + Math.max(timeoutMs * 2, 6000);
 
-  return new Promise((resolve) => {
-    const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+  const tryOne = (extra) => new Promise((resolve) => {
+    const args = captureArgs({
+      source: { kind: 'screen', engine: 'ddagrab', ...(extra ?? {}) },
+      width: W, height: H, fps, ffmpegPath, engine: 'ddagrab',
+    }).slice(1);
+    args.splice(args.length - 1, 0, '-frames:v', '1');
+    let child;
+    try {
+      child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch {
+      resolve({ ok: false, stderr: '' });
+      return;
+    }
     let got = 0;
-    const done = (engine) => {
-      cachedEngine = engine;
+    let settled = false;
+    let stderr = '';
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    function finish(ok) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       try { child.kill('SIGKILL'); } catch { /* 已经没了 */ }
-      resolve(engine);
-    };
-    const timer = setTimeout(() => done('gdigrab'), timeoutMs);
+      resolve({ ok, stderr });
+    }
     child.stdout.on('data', (d) => {
       got += d.length;
-      if (got >= W * H * 3) { clearTimeout(timer); done('ddagrab'); }
+      if (got >= W * H * 3) finish(true);
     });
-    child.on('error', () => { clearTimeout(timer); done('gdigrab'); });
-    child.on('close', () => { clearTimeout(timer); if (!got) done('gdigrab'); });
+    child.stderr.on('data', (d) => { stderr = (stderr + d.toString()).slice(-400); });
+    child.on('error', () => finish(false));
+    child.on('close', () => finish(got >= W * H * 3));
   });
+
+  return (async () => {
+    let firstError = '';
+    for (const extra of attempts) {
+      if (Date.now() > deadline) break;
+      const r = await tryOne(extra);
+      if (r.ok) {
+        cachedEngine = 'ddagrab';
+        cachedOutputIdx = extra?.outputIdx ?? null;
+        // 走放宽路径才成功 → 说清楚，别让人以为一切正常
+        if (extra) {
+          screenWarning = `GPU 抓屏（ddagrab）在默认输出上起不来，已改用 output_idx=${extra.outputIdx}`
+            + `${extra.allowFallback ? '（允许 8bit 回退）' : ''} —— 这通常是混合显卡笔记本，屏幕挂在另一块显卡上。`;
+        }
+        return 'ddagrab';
+      }
+      if (!firstError) firstError = r.stderr;
+    }
+    cachedEngine = 'gdigrab';
+    cachedOutputIdx = null;
+    screenWarning = ddagrabFallbackHint(firstError);
+    return 'gdigrab';
+  })();
+}
+
+/** ddagrab 彻底不可用时给一句人话，而不是让用户对着"卡"猜。 */
+function ddagrabFallbackHint(stderr) {
+  const line = String(stderr || '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find((l) => /not supported|Failed|Error|error/i.test(l)) ?? '';
+  const why = line.replace(/^\[[^\]]*\]\s*/, '').slice(0, 100);
+  return `GPU 抓屏（ddagrab）不可用${why ? `：${why}` : ''}，已退到 gdigrab。`
+    + '后者每帧要从 GDI 拷整屏，全屏 12fps 很吃 CPU，放视频可能卡 —— 可以降低 quality 档或先关掉。';
 }
