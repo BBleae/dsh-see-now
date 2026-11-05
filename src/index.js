@@ -291,13 +291,13 @@ function changeText(changes) {
 }
 
 /** 一张图 → 模型看得懂的清单。数字都是「这张图里第几格」，不是抽象指标。 */
-function sheetText(sheet, { waited = 0, partial = false, userText = null, say = null, looping = false } = {}) {
+function sheetText(sheet, { waited = 0, partial = false, userText = null, say = null, looping = false, order = null } = {}) {
   const { frames, from, to, why } = sheet;
   // 单帧时首尾相等，写成区间会变成"过去 24.1–24.1 秒"，读起来像出错了
   const span = frames.length === 1
     ? `此刻（第 ${frames[0].t.toFixed(1)} 秒）的 1 个画面`
     : `过去 ${from.toFixed(1)}–${to.toFixed(1)} 秒的 ${frames.length} 个画面`;
-  const head = `${span} · ${sheet.w}×${sheet.h}`
+  const head = (order ? `第 ${order.i}/${order.n} 张 · ` : '') + `${span} · ${sheet.w}×${sheet.h}`
     + `${partial ? '，还没攒满就截断了' : ''}`
     + `${waited ? ` · 等了 ${waited.toFixed(0)}s` : ''}`;
   const lines = frames.map((f, i) => {
@@ -335,30 +335,55 @@ function sheetText(sheet, { waited = 0, partial = false, userText = null, say = 
  * **`saveImage` 必须 `.call(svc, …)`**：它内部读 `this.compression`，方法取下来裸调会丢 this，
  * 报 `Cannot read properties of undefined (reading 'compression')` —— 所有出图工具一起挂。
  */
-async function attachAndReturn(ctx, sheet, extra = {}) {
+/**
+ * 把一张**或多张**图交给宿主，拼成一次工具结果。
+ *
+ * 超省模式（`wakeBatch > 1`）下一次要交好几张 —— 分成几次交就等于没攒：
+ * 模型每轮都要把整个上下文重过一遍，省下来的钱全在这条上。
+ *
+ * `meta` 里单张的字段（`frames` / `from` / `to` / `fill` / `why` / `bytes`）保持不变，
+ * 单张时语义完全一样；多张时 `frames` / `bytes` 是合计，`from` / `to` 是首尾，
+ * 逐张的区间放进 `sheets[]`。`batch` 说明这次交了几张。
+ */
+async function attachAndReturn(ctx, sheets, extra = {}) {
   const svc = serviceOf(ctx, 'attachments');
+  const list = (Array.isArray(sheets) ? sheets : [sheets]).filter(Boolean);
+  if (!list.length) {
+    return { text: '没有可交付的画面。', meta: { ok: false, ...extra, batch: 0 } };
+  }
   if (!svc?.saveImage) {
     return { text: '拿到图了，但宿主没有 attachments 服务，交不上去。', meta: { ok: false, ...extra } };
   }
-  const ref = await svc.saveImage.call(svc, {
-    data: sheet.png,
-    mediaType: 'image/png',
-    name: `see-now-${Date.now()}.png`,
-  });
+  const refs = [];
+  for (const s of list) {
+    refs.push(await svc.saveImage.call(svc, {
+      data: s.png,
+      mediaType: 'image/png',
+      name: `see-now-${Date.now()}${list.length > 1 ? `-${refs.length + 1}` : ''}.png`,
+    }));
+  }
   // `say` 是给清单用的，不进 meta —— 那是整段话，塞进 meta 只会让返回值翻倍
   const { say: said, ...meta } = extra;
+  const first = list[0];
+  const last = list[list.length - 1];
   return {
-    images: [ref],
-    text: sheetText(sheet, extra),
+    images: refs,
+    text: list
+      .map((s, i) => sheetText(s, { ...extra, order: list.length > 1 ? { i: i + 1, n: list.length } : null }))
+      .join('\n\n'),
     meta: {
       ...meta,
       said: said ? String(said).slice(0, 200) : null,
-      frames: sheet.frames.length,
-      from: +sheet.from.toFixed(2),
-      to: +sheet.to.toFixed(2),
-      fill: +sheet.fill.toFixed(3),
-      why: sheet.why,
-      bytes: sheet.png.length,
+      batch: list.length,
+      sheets: list.map((s) => ({
+        from: +s.from.toFixed(2), to: +s.to.toFixed(2), frames: s.frames.length, bytes: s.png.length,
+      })),
+      frames: list.reduce((n, s) => n + s.frames.length, 0),
+      from: +first.from.toFixed(2),
+      to: +last.to.toFixed(2),
+      fill: +first.fill.toFixed(3),
+      why: first.why,
+      bytes: list.reduce((n, s) => n + s.png.length, 0),
     },
   };
 }
@@ -376,6 +401,13 @@ function voiceState() {
     reason: speakers > 0 ? null : (lastVoiceError() ?? null),
   };
 }
+
+/**
+ * 测试钩子：`attachAndReturn` 是**多图交付**的核心（超省模式一轮交好几张），
+ * 但它藏在 `apply` 的闭包里，不导出就只能靠起整个插件去验。
+ * 和 `client.js` 的 `__test` 一个路数 —— 只暴露纯函数，不碰宿主状态。
+ */
+export const __test = { attachAndReturn, sheetText };
 
 export async function apply(ctx) {
   try {
@@ -479,6 +511,8 @@ async function registerAll(ctx) {
     listen: tuning.listen,
     // 变化日志（`~/.dsh/see-now.json` 的 `changeLog`，默认关）
     changeLog: tuning.changeLog,
+    // 超省模式：攒够几张图才交（`wakeBatch`，默认 1 = 现在这样）
+    wakeBatch: tuning.wakeBatch,
   });
   disposers.push(() => runner.stop());
 
@@ -883,7 +917,7 @@ async function registerAll(ctx) {
         // **拿到第一张图之后就把钟起起来** —— 这是"看一眼就完"和"一直看下去"的分界线。
         // 之后每攒够一张，循环会自己叫醒你，不用你再调。
         const lp = ensureLoop(ownerAtStart);
-        const out = await attachAndReturn(ctx, r.sheet, {
+        const out = await attachAndReturn(ctx, r.sheets, {
           waited: r.waited, partial: r.partial, quality: r.quality,
           userText: r.userText ?? null,
           say: said,
@@ -930,8 +964,9 @@ async function registerAll(ctx) {
         const st = runner.status();
         // 走 peek 路线的会话也要有循环：不然模型摘完这一张就结束，没人再叫它。
         // **但采集都停了就别起** —— 起一个下一拍就自杀的钟只是噪音。
-        const lp = (s || st.running || st.pending) ? ensureLoop() : null;
-        if (!s) {
+        // 注意 `s` 现在是**数组**：空数组是 truthy，不能直接 `!s`
+        const lp = (s?.length || st.running || st.pending) ? ensureLoop() : null;
+        if (!s?.length) {
           return {
             text: '手上还没有画面（刚开或刚发完，下一张还在攒）。\n'
               + `循环${!lp || lp.stopped() ? '没在跑' : '在跑'} —— 攒够我会叫你；要看此刻可以调 \`see_now({action:"watch"})\`。`,
@@ -1073,6 +1108,8 @@ async function registerAll(ctx) {
             + ` · 节奏：${sceneMode ? 'dense（跟逐帧走）' : paceMode}`
             + `（切点门槛 ${(sceneMode ? PACES.dense : PACES[paceMode]).cutAbs}，`
             + `最多 ${sceneMode ? 4 : PACES[paceMode].wakeGapSec} 秒叫一次）`
+            // 超省模式是"一次交几张"，和"多久叫一次"是两件事，单独说
+            + (tuning.wakeBatch > 1 ? `\n超省模式：攒够 ${tuning.wakeBatch} 张才交（一轮看完，省上下文重算）` : '')
             // 收工线：用户改过 see-now.json 时要能看出来，否则"怎么陪我一会儿就停了"查不到
             + `\n收工线：连续 ${tuning.maxAutonomousWakes} 次叫醒没人理`
             + ` · ${tuning.idleStopMin > 0 ? `没开窗时 ${tuning.idleStopMin} 分钟没说话` : '空闲线已关闭'}`

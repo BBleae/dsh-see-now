@@ -22,6 +22,17 @@ export const TUNING_DEFAULTS = Object.freeze({
   maxAutonomousWakes: 8,
   idleStopMin: 3,
   defaultPace: 'normal',
+  /**
+   * 超省模式：攒够几张图才交给模型（1 = 现在这样，攒满一张就交）。
+   *
+   * 省的不是图的钱 —— 一张 798×450 只有 222 token，多带两张几乎不要钱。
+   * 省的是**每一轮请求都要把整个上下文重过一遍**的那笔：按实测 142k 的会话算，
+   * 3 张一起交比分 3 次交，输入侧少算 2/3。会话越短省的越少。
+   *
+   * **光攒不交是不省的**：叫醒了却还是一次只给一张，剩下两张它还得再 peek 两次，
+   * 等于又变回三轮。所以 `takeSheets()` 必须把队列里攒下的一次全给出去。
+   */
+  wakeBatch: 1,
   // 「上一句说多久，就等多久再叫下一轮」（见 pacing.js）。false = 退回固定 8 秒。
   speechPacing: true,
   /**
@@ -176,6 +187,11 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     warnings.push('idleStopMin 必须是 0–1440 的整数（分钟），已用默认 3');
   }
 
+  const wakeBatch = clampInt(raw.wakeBatch, 1, 4, TUNING_DEFAULTS.wakeBatch);
+  if (raw.wakeBatch !== undefined && Number(raw.wakeBatch) !== wakeBatch) {
+    warnings.push('wakeBatch 必须是 1–4 的整数（攒够几张图才交），已用默认 1');
+  }
+
   let defaultPace = TUNING_DEFAULTS.defaultPace;
   if (typeof raw.defaultPace === 'string' && raw.defaultPace.trim()) {
     const want = raw.defaultPace.trim();
@@ -203,6 +219,7 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
   return {
     maxAutonomousWakes,
     idleStopMin,
+    wakeBatch,
     idleStopMs: idleStopMin * 60 * 1000,
     defaultPace,
     speechPacing,
@@ -217,7 +234,7 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
 
 /** 面板能改的顶层键。`idleStopMs` 是派生的，不在这里 —— 传进来会被拒。 */
 export const WRITABLE_KEYS = Object.freeze([
-  'maxAutonomousWakes', 'idleStopMin', 'defaultPace', 'speechPacing', 'listen',
+  'maxAutonomousWakes', 'idleStopMin', 'wakeBatch', 'defaultPace', 'speechPacing', 'listen',
 ]);
 
 /** `listen` 段能改的键。 */

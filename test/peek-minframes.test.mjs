@@ -39,7 +39,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const skip = !ffmpegOk();
 const { createRunner } = skip ? {} : await import('../src/runner.js');
 
-test('peek 队列空时返回 null，不再凭空截一张', { skip }, async () => {
+test('peek 队列空时返回空数组，不再凭空截一张', { skip }, async () => {
   const runner = createRunner({ ffmpegPath: FFMPEG });
   try {
     await runner.start({
@@ -55,7 +55,7 @@ test('peek 队列空时返回 null，不再凭空截一张', { skip }, async () 
     assert.equal(st.pending, 0, '前置条件：还没封箱，队列该是空的');
 
     const s = runner.peek();
-    assert.equal(s, null, '队列空时 peek 必须返回 null；返回一张就说明又走了 flushNow()');
+    assert.equal(s.length, 0, '队列空时 peek 必须返回空数组；给出一张就说明又走了 flushNow()');
 
     // 副作用检查：peek 不该把"攒了一半"的状态搅乱
     assert.equal(runner.status().pending, 0, 'peek 之后队列仍是空的');
@@ -82,10 +82,10 @@ test('peek 取走队列里的那张，取一张少一张', { skip }, async () =>
     assert.ok(before >= 1, `应该先封出一张，实际 pending=${before}`);
 
     const a = runner.peek();
-    assert.ok(a, 'peek 应能取到队列里的那张');
-    assert.ok(a.frames.length > 0, '取到的必须是真图');
+    assert.equal(a.length, 1, 'peek 应能取到队列里的那张');
+    assert.ok(a[0].frames.length > 0, '取到的必须是真图');
     // 旧实现 flushNow() 产出的帧标 `via: 'user'`；正常封箱是 cut / mark / floor / time…
-    assert.notEqual(a.frames?.[0]?.via, 'user', 'peek 拿的应是自动封箱的图，不是"立刻截一张"');
+    assert.notEqual(a[0].frames?.[0]?.via, 'user', 'peek 拿的应是自动封箱的图，不是"立刻截一张"');
 
     const after = runner.status().pending;
     assert.equal(after, before - 1, `peek 只该取走一张（before=${before}, after=${after}）—— 清空队列就是 bug`);

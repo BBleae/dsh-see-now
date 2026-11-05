@@ -77,11 +77,12 @@ test('叫醒预留：占住之后队列空着，peek 仍拿得到那一张（而
     assert.ok(runner.status().reserved, 'status 里要看得见预留（诊断"叫醒却没图"靠它）');
 
     const got = runner.peek();
-    assert.ok(got, '占住的那张必须能 peek 到 —— 这就是"叫醒必有图"');
-    assert.equal(got.to, held.to, '要给的正是叫醒时那一张，不是队列里别的');
-    assert.equal(got.frames.length, held.frames, '帧数也要对得上');
+    // peek 现在返回**数组**（超省模式一次可能给多张）；默认 wakeBatch=1 时长度必须是 1
+    assert.equal(got.length, 1, '占住的那张必须能 peek 到 —— 这就是"叫醒必有图"');
+    assert.equal(got[0].to, held.to, '要给的正是叫醒时那一张，不是队列里别的');
+    assert.equal(got[0].frames.length, held.frames, '帧数也要对得上');
 
-    assert.equal(runner.peek(), null, '同一张不许给两次（模型会以为又换画面了）');
+    assert.equal(runner.peek().length, 0, '同一张不许给两次（模型会以为又换画面了）');
     assert.equal(runner.status().takes.peekEmpty, 1, '空手要记账');
     assert.equal(runner.status().takes.reserved, 1, '取走的那次是预留给的');
   } finally {
@@ -100,8 +101,8 @@ test('叫醒失败：预留的放回队列，图不会凭空消失', { skip }, a
     assert.equal(runner.status().pending, 1, '队列里要重新有一张');
 
     const got = runner.peek();
-    assert.ok(got, '放回去的那张要能再取出来');
-    assert.equal(got.to, held.to, '还是原来那张（不是重新攒一张新的）');
+    assert.equal(got.length, 1, '放回去的那张要能再取出来');
+    assert.equal(got[0].to, held.to, '还是原来那张（不是重新攒一张新的）');
   } finally {
     runner.stop();
   }
@@ -120,10 +121,11 @@ test('watch 也认预留：同一张不会被两条路径各给一次', { skip }
     // 两条路径各取各的话，watch 会以为队列是空的，白等一整个窗口。
     const r = await runner.watch({ seconds: 2, minFrames: 1, opts });
     assert.equal(r.ok, true, `watch 该把预留的那张交出去，实际 ${JSON.stringify(r).slice(0, 160)}`);
-    assert.equal(r.sheet.to, held.to, '交出去的正是叫醒时那一张');
+    assert.equal(r.sheets.length, 1, '这一轮只该有一张');
+    assert.equal(r.sheets[0].to, held.to, '交出去的正是叫醒时那一张');
 
     const again = runner.peek();
-    assert.ok(!again || again.to !== held.to, '同一张不许再给 peek 一次（模型会以为又换画面了）');
+    assert.ok(!again.length || again[0].to !== held.to, '同一张不许再给 peek 一次（模型会以为又换画面了）');
   } finally {
     runner.stop();
   }
@@ -136,7 +138,7 @@ test('没人来取：预留会过期，不会一直占着内存', { skip }, asyn
     assert.ok(runner.reserveSheet());
     await sleep(300);
 
-    assert.equal(runner.peek(), null, '过期了就该当没有（队列也空着）');
+    assert.equal(runner.peek().length, 0, '过期了就该当没有（队列也空着）');
     assert.equal(runner.status().reserved, null, '过期的那一刻就丢掉，不给下一次 peek 捡回来');
     assert.equal(runner.status().takes.peekEmpty, 1);
     assert.equal(runner.status().takes.reserved, 0, '过期的那张不该算"预留给的"');
@@ -270,7 +272,7 @@ test('整条链：每次唤醒之后的 peek 都有图', { skip, timeout: 90_000
 
     assert.ok(wakes.length >= 2, `8 秒里该叫醒几次，实际 ${wakes.length}`);
     assert.ok(peeks.length >= 1, '被叫醒之后模型总会 peek 一次');
-    const empty = peeks.filter((s) => !s).length;
+    const empty = peeks.filter((s) => !s?.length).length;
     assert.equal(empty, 0, `唤醒之后的 peek 不该有空手：${empty}/${peeks.length}`);
 
     const st = runner.status();

@@ -88,6 +88,15 @@ window.__ModuleLoader__.load({
       'pace.normal': '正常 —— 默认',
       'pace.dense': '密集 —— 反应快，话也多',
       'pace.game-economic': '游戏省流 —— 只在动作明显时才看',
+      'field.batch': '超省模式（攒几张再交）',
+      'field.batch.hint': '攒够几张图才叫醒你一次。1 张 = 攒满就交（默认，最及时）。'
+        + '调到 3 张：模型一次看三张，少两轮请求 —— 省的是"每轮都要把整个上下文重过一遍"那笔，'
+        + '一张图本身只要 222 token，多带两张几乎不要钱。代价是画面更晚到：'
+        + '每张要 15~40 秒，攒 3 张就是 1~2 分钟。会话越长越值。',
+      'batch.1': '1 张 —— 攒满就交（默认）',
+      'batch.2': '2 张',
+      'batch.3': '3 张 —— 省得明显',
+      'batch.4': '4 张 —— 最省，也最慢',
       'field.idleStop': '空闲多久自己收工',
       'field.idleStop.hint': '单位分钟。0 = 关掉这条线，你不理它它就一直陪着（会一直花 token）。',
       'field.pacing': '说话停顿跟着句长走',
@@ -530,6 +539,12 @@ window.__ModuleLoader__.load({
               ['normal', t('pace.normal')],
               ['dense', t('pace.dense')],
               ['game-economic', t('pace.game-economic')],
+            ]),
+            select('wakeBatch', 'field.batch', 'field.batch.hint', [
+              [1, t('batch.1')],
+              [2, t('batch.2')],
+              [3, t('batch.3')],
+              [4, t('batch.4')],
             ]),
             field('idleStopMin', 'field.idleStop', 'field.idleStop.hint', { min: 0, max: 1440, step: 1 }),
             select('speechPacing', 'field.pacing', 'field.pacing.hint', [

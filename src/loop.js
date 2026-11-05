@@ -428,7 +428,17 @@ export function startLoop({
       if (pending > 0 && lastPending === 0) pendingPulse += 1;
       lastPending = pending;
       const sheetSeq = Number(st.sheets ?? st.stats?.sheets ?? 0);
-      const key = pending > 0 ? (sheetSeq > 0 ? `#${sheetSeq}` : `p${pendingPulse}`) : null;
+      /**
+       * **攒够 `wakeBatch` 张才叫。**
+       *
+       * `wakeBatch: 1` 就是原来的行为（有新图就叫）。> 1 是超省模式：叫一次交一批，
+       * 模型一轮看完，不必为每张图各重过一遍上下文。
+       *
+       * 判据必须是 `>= batch` 而不是 `> 0`：后者会在第 1 张就叫，攒第二、三张的
+       * 时间里模型已经看完一轮了 —— 队列压得住也没用，唤醒次数根本没减少。
+       */
+      const batch = Math.max(1, Math.trunc(tuning?.wakeBatch) || 1);
+      const key = pending >= batch ? (sheetSeq > 0 ? `#${sheetSeq}` : `p${pendingPulse}`) : null;
       if (!key || key === lastKey) return;
       // ⑤.1 节奏：既不能比 wakeMinGapSec 更密，也不能在上一句还没说完时插嘴。
       //      "上一句说多久，就等多久"——上一句 6 秒，下一次最早在说完之后（+气口），

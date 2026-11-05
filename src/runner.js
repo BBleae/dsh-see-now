@@ -181,6 +181,14 @@ export function createRunner({
    * "宿主冷启动 + 模型思考"的最坏情况，又远短于"用户已经不看这一屏了"。
    */
   reserveSec = 60,
+  /**
+   * 超省模式：攒够几张图才交给模型（`~/.dsh/see-now.json` 的 `wakeBatch`）。
+   *
+   * 两个地方用它：`queueDepth` 决定队列能压几张（压不住就等于没攒），
+   * `takeSheets()` 决定一次最多交几张。**只改一个都不省**——攒了却一张张交，
+   * 模型还是得一轮一轮来。
+   */
+  wakeBatch = 1,
 } = {}) {
   let pipeline = null;   // 当前（或刚停的）引擎 —— 停采集后仍留着，好把队列里剩的图发完
   let running = false;
@@ -273,30 +281,42 @@ export function createRunner({
   function dropReserved() { reserved = null; }
 
   /**
-   * **取一张排队中的图** —— `watch` 和 `peek` 唯一的取图口。
+   * **取走队列里能拿的图** —— `watch` 和 `peek` 唯一的取图口。
    *
    * 两条路径各写一句 `pipeline.take()` 的话，预留的那张永远拿不到（peek 只看队列），
    * 等于白留。所以必须收成一个函数，顺手把"谁取的、空了几次"记下来。
    *
+   * **为什么返回数组**：超省模式（`wakeBatch > 1`）下，叫醒一次只交一张等于白攒 ——
+   * 剩下两张模型还得再 `peek` 两次，唤醒次数一点没少，"每轮重过一遍上下文"那笔钱
+   * 也就一分没省。所以这里一次把队列里攒的都取走，上限 `wakeBatch`。
+   *
+   * 顺序是**时间正序**：预留的那张（叫醒时占住的最老一张）在前，队列里更新的在后。
+   *
    * @param {'peek'|'watch'} [by] 记账用（不传就是内部调用，不计数）
+   * @returns {object[]} 空数组 = 真的一张都没有
    */
-  function takeSheet(by) {
-    let sheet = null;
+  function takeSheets(by) {
+    const out = [];
     if (reserved) {
       const r = reserved;
       reserved = null;
       // 过期就**当它不存在**：模型没来取，这张已经旧了，交给队列里更新的那张
       if (Date.now() - r.at <= reserveSec * 1000) {
-        sheet = r.sheet;
+        out.push(r.sheet);
         takes.reserved += 1;
       }
     }
-    sheet ??= pipeline?.take() ?? null;
+    const batch = Math.max(1, Math.trunc(wakeBatch) || 1);
+    while (out.length < batch) {
+      const s = pipeline?.take?.() ?? null;
+      if (!s) break;
+      out.push(s);
+    }
     if (by) {
       takes[by] += 1;
-      if (!sheet) takes[`${by}Empty`] += 1;
+      if (!out.length) takes[`${by}Empty`] += 1;
     }
-    return sheet;
+    return out;
   }
 
   /**
@@ -464,6 +484,14 @@ export function createRunner({
       ...opts, width: w, height: h, ...regionOpts,
       // 变化日志是会话级偏好（配置项），不该被单次 watch 的 opts 覆盖
       changeLog,
+      /**
+       * **队列能压几张 = 超省模式攒几张**。
+       *
+       * 默认 `queueDepth: 1` 是"出新图就挤掉旧的" —— 那是最新一张的语义，
+       * 也是 `wakeBatch: 1` 时正确的东西。但超省模式要的是"攒"，压不住就等于没攒：
+       * 第 3 张出来时前两张已经被挤掉了，`takeSheets()` 只能拿到一张。
+       */
+      queueDepth: Math.max(1, Math.trunc(wakeBatch) || 1),
       // 音量条：直接问听声音那条链要 —— 那边已经在算 RMS 了（断句要用），
       // 这里只是把它按时间窗取出来画成柱子，**不额外解码一次音频**。
       audio: { levels: (a, b) => listener.levelsBetween(a, b) },
@@ -756,7 +784,7 @@ export function createRunner({
           const now = flushNow(null, 'user');
           const waited = (Date.now() - t0) / 1000;
           return now
-            ? { ok: true, sheet: attachLines(now), waited, quality, userText: text }
+            ? { ok: true, sheets: [attachLines(now)], waited, quality, userText: text }
             : { ok: false, reason: 'user-no-frame', waited, userText: text };
         };
 
@@ -788,7 +816,7 @@ export function createRunner({
                 const first = flushNow(null, 'first');
                 if (first) {
                   return {
-                    ok: true, sheet: attachLines(first), waited: (Date.now() - t0) / 1000,
+                    ok: true, sheets: [attachLines(first)], waited: (Date.now() - t0) / 1000,
                     quality, windowOpen: win.ok, first: true,
                   };
                 }
@@ -805,28 +833,29 @@ export function createRunner({
             // **插话优先于一切**：用户说话了就立刻截断，不等判据、不排队
             const said = pollUser();
             if (said) return await interjectNow(said);
-            // **走 `takeSheet` 而不是 `pipeline.take()`**：叫醒时预留的那张也在这里交付
+            // **走 `takeSheets` 而不是 `pipeline.take()`**：叫醒时预留的那张也在这里交付
             // （它是队列里最早的一张，本来就该先给 `watch`）。两条路径各取各的话，
             // 预留的那张只能在 peek 里取到，`watch` 会以为队列是空的。
-            const s = takeSheet('watch');
-            if (s) {
-              // **正常返回也要过 minFrames**。以前只有超时分支检查，于是
-              // `minFrames: 5` 在队列先到的路径上会被无视，照样交一张 1 帧的图
-              // （issue #1 的复现：`{ ok: true, frames: 1 }`）。
-              // 不够就丢掉这一张接着等 —— 到点还没攒够，会走下面的 no-change 提示。
-              if (s.frames.length >= minFrames) {
-                /**
-                 * **出图前等最多 300ms，让"最后一句话"赶上这张图。**
-                 *
-                 * 台词的取数窗口是「上一张的 wallTo → 这一张的 wallTo」。差几百毫秒
-                 * 没转完的那句会被推到下一张 —— 那就是十几秒，而 ASR 本身只有 0.7 秒。
-                 * 只有这条正常返回路径等；`peek`（后台唤醒）和插话要快，不等。
-                 */
-                await listener.settle(300);
-                return {
-                  ok: true, sheet: attachLines(s), waited: (Date.now() - t0) / 1000, quality, windowOpen: win.ok,
-                };
-              }
+            //
+            // 超省模式下这里会一次拿到多张（`wakeBatch`）。**这是省钱的唯一入口** ——
+            // 一次交 N 张 = 模型一轮看完；一张张交 = N 轮，每轮都要重过一遍上下文。
+            const got = takeSheets('watch').filter((x) => x.frames.length >= minFrames);
+            if (got.length) {
+              /**
+               * **出图前等最多 300ms，让"最后一句话"赶上这张图。**
+               *
+               * 台词的取数窗口是「上一张的 wallTo → 这一张的 wallTo」。差几百毫秒
+               * 没转完的那句会被推到下一张 —— 那就是十几秒，而 ASR 本身只有 0.7 秒。
+               * 只有这条正常返回路径等；`peek`（后台唤醒）和插话要快，不等。
+               */
+              await listener.settle(300);
+              return {
+                ok: true,
+                sheets: got.map((x) => attachLines(x)),
+                waited: (Date.now() - t0) / 1000,
+                quality,
+                windowOpen: win.ok,
+              };
             }
             // 采集停了、队列和预留都空了 = 再等也不会有了
             if (!running && !pipeline?.pending && !reserved) break;
@@ -838,7 +867,7 @@ export function createRunner({
         // 到点了：手上攒的半张也算数（用户已经在等），但不够 minFrames 就不给
         const last = flushNow(null, 'timeout');
         if (last && last.frames.length >= minFrames) {
-          return { ok: true, sheet: attachLines(last), waited: (Date.now() - t0) / 1000, partial: true, quality };
+          return { ok: true, sheets: [attachLines(last)], waited: (Date.now() - t0) / 1000, partial: true, quality };
         }
         return {
           ok: false,
@@ -871,10 +900,12 @@ export function createRunner({
      * 这期间队列可能已经被别的路径取空了 —— 那正是"叫了 6 次、多数 peek 是空"的原因。
      */
     peek() {
-      const queued = takeSheet('peek');
+      // 超省模式下这里可能一次拿到多张 —— 和 `watch` 同一个口径，
+      // 否则"攒了 3 张但 peek 只给 1 张"等于白攒。
+      const queued = takeSheets('peek').map((s) => attachLines(s));
       if (running) armGrace();
       if (!windowState?.ok && !windowPending) void ensureWindow();
-      return attachLines(queued);
+      return queued;
     },
 
     /**
