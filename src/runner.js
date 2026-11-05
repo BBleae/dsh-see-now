@@ -195,7 +195,7 @@ export function createRunner({
    * 只在**调用方没显式传** `opts.strategy` 时生效 —— 逐帧模式（`SCENE_OPTS`）必须
    * 把整幅写死，不能被用户设的"更小"打回 1/4 格子。
    */
-  tierStyle = 'native',
+  tierStyle = 'standard',
   tierMap = null,
 } = {}) {
   let pipeline = null;   // 当前（或刚停的）引擎 —— 停采集后仍留着，好把队列里剩的图发完

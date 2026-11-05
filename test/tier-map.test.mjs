@@ -72,11 +72,22 @@ test('readTuning：tierMap 逐项校验，坏的那一项用默认值并给警�
   assert.ok(t.warnings.some((w) => w.includes('tierMap[4]')), '该报第 4 项');
 });
 
-test('readTuning：tierStyle 不认识就用 native', () => {
+test('readTuning：tierStyle 不认识就回默认（standard）', () => {
   writeFileSync(tuningPath({ DSH_HOME: home }), JSON.stringify({ tierStyle: 'huge' }), 'utf8');
   const t = readTuning({ env: { DSH_HOME: home } });
   assert.equal(t.tierStyle, TUNING_DEFAULTS.tierStyle);
+  assert.equal(t.tierStyle, 'standard', '默认是标准档：1 档压成 1/2');
   assert.ok(t.warnings.some((w) => w.includes('tierStyle')));
+});
+
+test('standard：只压 1 档，其余档位不动', () => {
+  assert.deepEqual(applyStrategy([1, 2, 5, 8], 'standard'), [2, 2, 5, 8]);
+});
+
+test('standard 和 native 的唯一区别就是 1 档', () => {
+  const base = [1, 1, 3, 8];
+  assert.deepEqual(applyStrategy(base, 'native'), [1, 1, 3, 8], '原生：1 档占满整幅');
+  assert.deepEqual(applyStrategy(base, 'standard'), [2, 2, 3, 8], '标准：1 档压成 1/2');
 });
 
 test('writeTuning：自定义映射能落盘，读回来还是那八个数', () => {

@@ -36,12 +36,12 @@ export const TUNING_DEFAULTS = Object.freeze({
   /**
    * 档位映射：这张图里每帧占多大格子。
    *
-   * `native` 按密度算出来的原样；`full` 整体降一档（格子更大）；`compact` 整体升一档
-   * （格子更小）；`custom` 走 `tierMap` 逐档查表。
+   * `standard` 把 1 档压成 1/2（默认）；`native` 原样不压；`full` 整体降一档（格子更大）；
+   * `compact` 整体升一档（格子更小）；`custom` 走 `tierMap` 逐档查表。
    *
    * 以前这条只能用 `watch({opts:{strategy}})` 传，而模型从来不会传 —— 等于没得配。
    */
-  tierStyle: 'native',
+  tierStyle: 'standard',
   /** `custom` 时的查表：第 i 个数 = "档位 i+1 映射到哪一档"。默认恒等。 */
   tierMap: [1, 2, 3, 4, 5, 6, 7, 8],
   // 「上一句说多久，就等多久再叫下一轮」（见 pacing.js）。false = 退回固定 8 秒。
@@ -108,7 +108,7 @@ export const PREFER_KEYS = Object.freeze(['auto', 'host', 'local']);
  * `custom` 是设置页展开八个下拉的那一档（走 `tierMap`）。
  * 注意 `single`（逐帧模式固定整幅）**不在这里**：它是逐帧模式的内部约定，不该被用户改。
  */
-export const TIER_STYLES = Object.freeze(['native', 'full', 'compact', 'custom']);
+export const TIER_STYLES = Object.freeze(['standard', 'native', 'full', 'compact', 'custom']);
 
 function dshHome(env) {
   return env.DSH_HOME || join(env.USERPROFILE || env.HOME || homedir(), '.dsh');

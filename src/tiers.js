@@ -46,6 +46,16 @@ export const TIER_MAX = 8;
  */
 export const STRATEGIES = Object.freeze({
   native: { bump: 0, label: '原生' },
+  /**
+   * **标准**：1 档压成 1/2（`floor: 2`），其余档位不动。
+   *
+   * 以前实时这边特意不要它（注释原话："在实时里等于单帧永远不给整幅，静态画面白扔 75% 画布"）。
+   * 但实测下来"一格占满"的场景很少：大多数片子 1 档是"几乎没变"的那几帧，
+   * 让它们占满整张图反而一张只放一帧、张数爆炸。所以改成默认压一档。
+   *
+   * 想要"1 档也占满整幅"就选「原生」（不压），逐帧模式仍然强制整幅（`single`）。
+   */
+  standard: { bump: 0, floor: 2, label: '标准' },
   full: { bump: -1, floor: 1, label: '更大' },
   compact: { bump: 1, label: '更小' },
   /**

@@ -110,10 +110,11 @@ window.__ModuleLoader__.load({
       'field.maxSeg.hint': '单位秒。说到这么久还没停就强行断开，否则一句话一直不断，字幕永远出不来。',
       'field.tierStyle': '每帧多大（档位）',
       'field.tierStyle.hint': '档位 1 = 一格占满，8 = 只占 1/8 边。'
-        + '默认跟着变化密度走：帧越密格子越小，这样一张图覆盖的时长才稳定。'
-        + '所以换「节奏」时格子会跟着变 —— 那是设计，不是错。'
-        + '要自己说了算就选「固定一档」，两件事就分开了。',
-      'tier.native': '跟随密度 —— 算出来几档就是几档（默认）',
+        + '默认「标准」：按变化密度算出档位后，1 档压成 1/2 —— 不然那几帧几乎没变的画面'
+        + '会各占满一整张图，张数白涨。想要 1 档也占满就选「原生」。'
+        + '换「节奏」时格子会跟着变（帧越密格子越小），那是设计，不是错。',
+      'tier.standard': '标准 —— 1 档压成 1/2（默认）',
+      'tier.native': '原生 —— 算出几档就是几档，1 档也占满',
       'tier.full': '更大 —— 在密度基础上整体降一档',
       'tier.compact': '更小 —— 在密度基础上整体升一档',
       'tier.custom': '自定义 —— 逐档指定映射',
@@ -597,6 +598,7 @@ window.__ModuleLoader__.load({
           h('summary', {}, t('sec.advanced')),
           h('div', { className: 'sn_grid', style: { marginTop: '12px' } },
             select('tierStyle', 'field.tierStyle', 'field.tierStyle.hint', [
+              ['standard', t('tier.standard')],
               ['native', t('tier.native')],
               ['full', t('tier.full')],
               ['compact', t('tier.compact')],
