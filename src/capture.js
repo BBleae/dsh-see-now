@@ -134,8 +134,16 @@ export function sourceArgs(
         return ['-f', 'gdigrab', '-framerate', String(fps), '-draw_mouse', '0', ...region,
           '-i', s.desktop ?? 'desktop'];
       }
-      // ddagrab 是 filter source，输入侧没有帧率参数
-      return ['-f', 'lavfi', '-i', `ddagrab=framerate=${fps}:draw_mouse=${s.mouse ? 1 : 0}`];
+      // ddagrab 是 filter source，输入侧没有帧率参数。
+      // `output_idx` / `allow_fallback` 只在探测发现默认值不可用时才出现 ——
+      // 正常机器上这一段仍拼出和以前一模一样的字符串（见 probeDdagrab 的注释）。
+      {
+        const dda = [`framerate=${fps}`, `draw_mouse=${s.mouse ? 1 : 0}`];
+        const idx = Number.isInteger(s.outputIdx) ? s.outputIdx : cachedOutputIdx;
+        if (Number.isInteger(idx)) dda.push(`output_idx=${idx}`);
+        if (s.allowFallback) dda.push('allow_fallback=1');
+        return ['-f', 'lavfi', '-i', `ddagrab=${dda.join(':')}`];
+      }
     }
     case 'file':
       // `realtime` 才加 -re；离线跑要看的是「管线本身多快」，不能被播放速度骗了
@@ -341,11 +349,17 @@ export function captureArgs({
 let cachedEngine = null;
 let cachedFormat = null;            // macOS 屏幕像素格式：'' = 用设备默认
 let screenWarning = null;
+/**
+ * ddagrab 探测出来的 DXGI output 序号。`null` = 用 ffmpeg 的默认值（0），
+ * 此时命令行与以前**逐字节一致** —— 正常机器上不允许因为这次改动多出参数。
+ */
+let cachedOutputIdx = null;
 
 export function resetScreenEngineCache() {
   cachedEngine = null;
   cachedFormat = null;
   screenWarning = null;
+  cachedOutputIdx = null;
 }
 
 /** 上一次探测留下的警告（目前只有"没有屏幕录制权限"这一类）。 */
@@ -438,28 +452,96 @@ function grabOneFrame({ ffmpegPath, fps, width, height, pixelFormat, timeoutMs }
 }
 
 /** Windows：探 ddagrab，不行退 gdigrab。 */
+/**
+ * 探一次 ddagrab。**先按默认参数试，失败才放宽。**
+ *
+ * 为什么需要放宽：笔记本的屏幕可能挂在**另一个** DXGI output 上（混合显卡），
+ * 此时 ddagrab 默认的 `output_idx=0` 会报 `Selected output not supported`。
+ * 以前的实现只试这一个就静默退到 gdigrab —— 用户只看到"放视频卡"，
+ * 完全不知道 GPU 抓屏从来没启用过（社区实测 GTX1050Ti / i7-8750H）。
+ *
+ * 顺序按"改动最小"排：先换 output_idx，最后才动 allow_fallback
+ * （后者允许 ffmpeg 回退到 8bit 输出，精度略降，但比完全没有 GPU 路径强）。
+ *
+ * 失败是**快速失败**：ffmpeg 报错立即退出，不会耗满 timeoutMs（本机实测
+ * output 1/2/3 各 ~80ms 就返回），所以多试几个不会拖慢启动。
+ */
 function probeDdagrab({ ffmpegPath, fps, timeoutMs }) {
   const W = 64;
-  const H = 36;                     // 探针只取 1 帧，尺寸越小越快
-  const args = captureArgs({
-    source: { kind: 'screen', engine: 'ddagrab' }, width: W, height: H, fps, ffmpegPath, engine: 'ddagrab',
-  }).slice(1);
-  args.splice(args.length - 1, 0, '-frames:v', '1');
+  const H = 36;
+  // null = 默认参数，命令行与历史版本逐字节一致
+  const attempts = [
+    null,
+    { outputIdx: 1, allowFallback: true },
+    { outputIdx: 2, allowFallback: true },
+    { outputIdx: 0, allowFallback: true },
+  ];
+  const deadline = Date.now() + Math.max(timeoutMs * 2, 6000);
 
-  return new Promise((resolve) => {
-    const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+  const tryOne = (extra) => new Promise((resolve) => {
+    const args = captureArgs({
+      source: { kind: 'screen', engine: 'ddagrab', ...(extra ?? {}) },
+      width: W, height: H, fps, ffmpegPath, engine: 'ddagrab',
+    }).slice(1);
+    args.splice(args.length - 1, 0, '-frames:v', '1');
+    let child;
+    try {
+      child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch {
+      resolve({ ok: false, stderr: '' });
+      return;
+    }
     let got = 0;
-    const done = (engine) => {
-      cachedEngine = engine;
+    let settled = false;
+    let stderr = '';
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    function finish(ok) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       try { child.kill('SIGKILL'); } catch { /* 已经没了 */ }
-      resolve(engine);
-    };
-    const timer = setTimeout(() => done('gdigrab'), timeoutMs);
+      resolve({ ok, stderr });
+    }
     child.stdout.on('data', (d) => {
       got += d.length;
-      if (got >= W * H * 3) { clearTimeout(timer); done('ddagrab'); }
+      if (got >= W * H * 3) finish(true);
     });
-    child.on('error', () => { clearTimeout(timer); done('gdigrab'); });
-    child.on('close', () => { clearTimeout(timer); if (!got) done('gdigrab'); });
+    child.stderr.on('data', (d) => { stderr = (stderr + d.toString()).slice(-400); });
+    child.on('error', () => finish(false));
+    child.on('close', () => finish(got >= W * H * 3));
   });
+
+  return (async () => {
+    let firstError = '';
+    for (const extra of attempts) {
+      if (Date.now() > deadline) break;
+      const r = await tryOne(extra);
+      if (r.ok) {
+        cachedEngine = 'ddagrab';
+        cachedOutputIdx = extra?.outputIdx ?? null;
+        // 走放宽路径才成功 → 说清楚，别让人以为一切正常
+        if (extra) {
+          screenWarning = `GPU 抓屏（ddagrab）在默认输出上起不来，已改用 output_idx=${extra.outputIdx}`
+            + `${extra.allowFallback ? '（允许 8bit 回退）' : ''} —— 这通常是混合显卡笔记本，屏幕挂在另一块显卡上。`;
+        }
+        return 'ddagrab';
+      }
+      if (!firstError) firstError = r.stderr;
+    }
+    cachedEngine = 'gdigrab';
+    cachedOutputIdx = null;
+    screenWarning = ddagrabFallbackHint(firstError);
+    return 'gdigrab';
+  })();
+}
+
+/** ddagrab 彻底不可用时给一句人话，而不是让用户对着"卡"猜。 */
+function ddagrabFallbackHint(stderr) {
+  const line = String(stderr || '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find((l) => /not supported|Failed|Error|error/i.test(l)) ?? '';
+  const why = line.replace(/^\[[^\]]*\]\s*/, '').slice(0, 100);
+  return `GPU 抓屏（ddagrab）不可用${why ? `：${why}` : ''}，已退到 gdigrab。`
+    + '后者每帧要从 GDI 拷整屏，全屏 12fps 很吃 CPU，放视频可能卡 —— 可以降低 quality 档或先关掉。';
 }
