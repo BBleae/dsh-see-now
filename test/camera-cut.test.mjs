@@ -381,3 +381,105 @@ test('只改亮度（5 分左右）仍不能当切点', () => {
   p.finish();
   assert.equal(p.log.filter((x) => x.via === 'cut').length, 0);
 });
+
+/**
+ * ## 低分未来帧确认的合成序列
+ *
+ * `lowAmbiguousFuture` 的 `highBg` 出口要求四个量同时成立，其中 `bgStable <= 300`
+ * 最难造 —— 静止背景会让全部 2304 格都算稳定。
+ *
+ * 做法：背景在 BASE 上下**对称**摆动。
+ *
+ * | 量 | 比的是什么 | 摆动下的值 | 门槛 |
+ * |---|---|---|---|
+ * | `bgStable` | 单格在 6 帧窗里的通道极差 > 24 则不稳 | 极差 26 → 只剩中心恒定区 200 格 | <= 300 |
+ * | `score` | **相邻两帧**全屏平均 HSV 差 | 17.8 | < 60（且摆动段 < `cutAbs`=12 不自己切） |
+ * | `bg` | 稳定背景格被改掉的占比 | 255（前景盖住全部 200 格） | >= 220 |
+ *
+ * 对称是关键：参考模型取的是**中位数**，摆动中位 = BASE = 静止值，
+ * 所以前景离开后画面才回得到参考背景，`bgKeep` 才判「前景走了」。
+ * 单调漂移（中位 ≠ 静止值）会让 keep 虚高到 232.9，门槛 220 卡不住。
+ *
+ * 实测（settle=2 hold=6）：默认 1 刀；`cutFutureDelay:0` 2 刀。
+ */
+const DRIFT_BASE = 60;
+/** 极差 2×13=26 > stableRange(24)；相邻帧差 17.8 < cutFutureMinScore(60)。 */
+const DRIFT_SWING = 13;
+/** 中心恒定区 10 列 × 20 行 = 200 格，落在 cutFutureLowStableTight(300) 之内。 */
+const STABLE_W = 10;
+
+/** 背景摆动/静止 + 左边 cover 列的大面积前景。 */
+function swingFrame({ phase, cover, swinging }) {
+  const d = swinging
+    ? (phase % 2 === 0 ? DRIFT_BASE - DRIFT_SWING : DRIFT_BASE + DRIFT_SWING)
+    : DRIFT_BASE;
+  const x0 = Math.floor((W - STABLE_W) / 2);
+  const x1 = x0 + STABLE_W;
+  const buf = Buffer.alloc(W * H * 3);
+  for (let y = 0; y < H; y += 1) {
+    for (let x = 0; x < W; x += 1) {
+      const i = (y * W + x) * 3;
+      let r;
+      let g;
+      let b;
+      if (cover > 0 && x < cover) {
+        [r, g, b] = [60, 90, 140];                       // 前景
+      } else if (x >= x0 && x < x1 && y >= 8 && y < 28) {
+        [r, g, b] = [30, 60, 110];                       // 恒定区：稳定背景格
+      } else {
+        [r, g, b] = [30 + d, 60 + d, 110 + d];           // 摆动区
+      }
+      buf[i] = r; buf[i + 1] = g; buf[i + 2] = b;
+    }
+  }
+  return buf;
+}
+
+/** 摆动 24 帧 → 静止 2 帧 → 前景盖住 6 帧 → 前景离开 18 帧。 */
+function lowBgFeed(opts) {
+  const p = createPipeline({ width: W, height: H, fps: 12, queueDepth: 0, ...opts });
+  let f = 0;
+  for (let i = 0; i < 24; i += 1) p.push({ t: f++ / 12, buf: swingFrame({ phase: i, cover: 0, swinging: true }) });
+  for (let i = 0; i < 2; i += 1) p.push({ t: f++ / 12, buf: swingFrame({ phase: 0, cover: 0, swinging: false }) });
+  for (let i = 0; i < 6; i += 1) p.push({ t: f++ / 12, buf: swingFrame({ phase: 0, cover: 60, swinging: false }) });
+  for (let i = 0; i < 18; i += 1) p.push({ t: f++ / 12, buf: swingFrame({ phase: 0, cover: 0, swinging: false }) });
+  p.finish();
+  return p.log.filter((x) => x.via === 'cut');
+}
+
+test('低分未来帧确认：大面积前景进场又离开时不切', () => {
+  const guarded = lowBgFeed({});
+  assert.equal(guarded.length, 1, `前景进场那一刀应被确认挡住，实际 ${guarded.length} 刀`);
+
+  // 关掉未来帧确认后复现误切，证明测的是这条守卫，而不是序列本身没有候选。
+  const raw = lowBgFeed({ cutFutureDelay: 0 });
+  assert.equal(raw.length, 2, `关掉确认后应多出前景进场那一刀，实际 ${raw.length} 刀`);
+  assert.ok(raw[0].score < 60,
+    `这一条要覆盖**低分**路径（高分走 cutFutureMinScore），实际 ${raw[0].score}`);
+});
+
+test('cutFutureLowBgMax: 0 整条关闭低分未来帧确认', () => {
+  // 修复前：`highBg`（bg 高但稳定背景少）排在 `bg >= cutFutureLowBgMax` 之外，
+  // 设 0 只关低 bg 分支，这条序列仍被挡住 → 1 刀，与 cutFutureDelay:0 的 2 刀不符。
+  const off = lowBgFeed({ cutFutureLowBgMax: 0 });
+  const delayOff = lowBgFeed({ cutFutureDelay: 0 });
+  assert.equal(off.length, delayOff.length,
+    `cutFutureLowBgMax:0 应与 cutFutureDelay:0 在低分路径上等价，`
+    + `实际 ${off.length} vs ${delayOff.length} 刀`);
+  assert.equal(off.length, 2, `关闭后应复现误切，实际 ${off.length} 刀`);
+});
+
+test('cutFutureLowBgMax: 0 不影响高分未来帧确认', () => {
+  // 高分路径（score >= cutFutureMinScore）由 cutFutureDelay 管，不该被这个开关带走。
+  const feed = (opts) => {
+    const p = createPipeline({ width: W, height: H, fps: 12, queueDepth: 0, ...opts });
+    let f = 0;
+    for (let i = 0; i < 18; i += 1) p.push({ t: f++ / 12, buf: highBlockAt(0, 0, 0, 0) });
+    for (let i = 0; i < 4; i += 1) p.push({ t: f++ / 12, buf: highBlockAt(4, 4, 56, 28) });
+    for (let i = 0; i < 12; i += 1) p.push({ t: f++ / 12, buf: highBlockAt(0, 0, 0, 0) });
+    p.finish();
+    return p.log.filter((x) => x.via === 'cut');
+  };
+  assert.equal(feed({ cutFutureLowBgMax: 0 }).length, 0,
+    '关掉低分确认后，高分前景离开仍应被挡住');
+});
