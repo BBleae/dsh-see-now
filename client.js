@@ -50,9 +50,38 @@ window.__ModuleLoader__.load({
       'state.save': '保存',
       'state.saving': '保存中…',
       'state.saved': '已保存。重开 DSH 生效。',
+      'state.savedLocal': '已保存。下一次转写就用新地址。',
       'state.nosave': '没有改动。',
       'sec.common': '常用',
       'sec.advanced': '高级（一般不用动）',
+      'field.prefer': '用哪个转写服务',
+      'field.prefer.hint': '宿主自带的是 SenseVoice（桌面版内置、零配置、不占显存）。下面那块 asr.json 是可选的自建或在线服务 —— 选「只用宿主自带的」时它不参与，那块配置会收起来。',
+      'prefer.auto': '自动 —— 宿主自带的优先',
+      'prefer.host': '只用宿主自带的（SenseVoice）',
+      'prefer.local': '只用下面那个服务（asr.json）',
+      'local.title': '转写服务（asr.json）',
+      'local.sub': '这个文件决定"声音用谁听写"。它与 video-storyboard 共用一份 —— 两个插件都读它，所以改这里对两边都生效。',
+      'local.api': '接口形态',
+      'local.api.hint': '多数服务是音频接口。只有聊天接口的服务（小米 MiMo 这类）才选第二种 —— 端点不一样，选错会 404。',
+      'local.api.openai': '音频接口 /audio/transcriptions',
+      'local.api.chat': '聊天接口 /chat/completions',
+      'local.baseUrl': '服务地址',
+      'local.baseUrl.hint': '要带版本路径，例如 https://api.example.com/v1。留空 = 不用这个文件。',
+      'local.baseUrl.ph': 'https://api.example.com/v1',
+      'local.model': '模型名',
+      'local.model.hint': '按服务方的文档填。',
+      'local.language': '语言',
+      'local.language.hint': 'auto / zh / en，按服务支持的填。',
+      'local.key': '密钥',
+      'local.key.hint': '只写不读：文件里的 key 不会回显到页面上。留空表示不改。',
+      'local.key.keep': '已设置，留空不改',
+      'local.key.ph': '没设置',
+      'local.empty': '这里还是空的。填了地址就能用；留空则由上面「用哪个转写服务」的规则决定。',
+      'local.save': '保存转写服务',
+      'local.sample': '看看这个文件长什么样',
+      'local.sample.body': '{\n  "api": "openai-audio",\n  "baseUrl": "http://127.0.0.1:8000/v1",\n  "model": "paraformer-zh-2024-03-09",\n  "language": "auto"\n}',
+      'local.manage': '文件里还有 manage（怎么把服务拉起来）一类的键，面板不动它们，原样保留。',
+      'local.env': '环境变量正在覆盖这些字段',
       'field.pace': '默认节奏',
       'field.pace.hint': '决定多长时间醒一次、一次说多少。理解为"话多话少"。',
       'pace.calm': '平缓 —— 很久才出声',
@@ -135,6 +164,9 @@ window.__ModuleLoader__.load({
 .sn_box ul{margin:4px 0 0;padding-left:18px}
 .sn_box li{margin:2px 0}
 .sn_det summary{cursor:pointer;font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-secondary);padding:2px 0}
+.sn_pre{margin:8px 0 0;padding:10px 12px;border-radius:8px;overflow-x:auto;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.55;
+  background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
 `;
 
     /**
@@ -168,6 +200,7 @@ window.__ModuleLoader__.load({
         idleStopMin: values.idleStopMin,
         defaultPace: values.defaultPace,
         speechPacing: values.speechPacing,
+        prefer: listen.prefer,
         live: listen.live,
         liveMin: listen.liveMin,
         liveStep: listen.liveStep,
@@ -216,12 +249,55 @@ window.__ModuleLoader__.load({
           : num(draft[key]);
       }
       const listen = {};
-      for (const key of ['live', 'liveMin', 'liveStep', 'silence', 'maxSeg', 'pollMs']) {
-        if (draft[key] !== values.listen[key]) listen[key] = key === 'live' ? draft[key] === true : num(draft[key]);
+      for (const key of ['prefer', 'live', 'liveMin', 'liveStep', 'silence', 'maxSeg', 'pollMs']) {
+        if (draft[key] === values.listen[key]) continue;
+        // prefer 是枚举字符串，不能交给 num()（那会把 'host' 换成 NaN）
+        listen[key] = key === 'live' ? draft[key] === true
+          : key === 'prefer' ? String(draft[key] ?? '')
+          : num(draft[key]);
       }
       if (Object.keys(listen).length > 0) patch.listen = listen;
       return patch;
     }
+
+    // ── asr.json 的那一份草稿 ─────────────────────────────────────────────────
+    // 单独一套，因为它写的是另一个文件：改了立刻对下一次转写生效，不用重开 DSH。
+    // key 永远是空串起步 —— 后端不回传密钥，所以"草稿里没有 key" 与 "文件里没有 key"
+    // 是两件事，靠 hasKey 区分。
+    const ASR_FIELDS = ['api', 'baseUrl', 'model', 'language'];
+
+    function localDraftOf(local) {
+      if (!local || typeof local !== 'object') return null;
+      return {
+        api: local.api || 'openai-audio',
+        baseUrl: local.baseUrl || '',
+        model: local.model || '',
+        language: local.language || '',
+        key: '',
+      };
+    }
+
+    /** 只提交真的改过的那几个键；key 只在用户真填了的时候才带。 */
+    function localPatchOf(draft, local) {
+      const patch = {};
+      if (!draft || !local) return patch;
+      for (const key of ASR_FIELDS) {
+        const next = String(draft[key] ?? '').trim();
+        if (next !== String(local[key] ?? '').trim()) patch[key] = next;
+      }
+      const key = String(draft.key ?? '').trim();
+      if (key !== '') patch.key = key;
+      return patch;
+    }
+
+    /**
+     * asr.json 那块只在**可能用到它**的时候出现。
+     *
+     * 原来它顶在最上面，看起来像"转写已经换成这个自建服务了"——实际上宿主自带的
+     * SenseVoice 一直在，选了 local 才轮到 asr.json。所以：选「只用宿主自带的」
+     * 时整块收起来，别让配置项的存在暗示了不存在的替换关系。
+     */
+    const shouldShowLocal = (prefer) => prefer !== 'host';
 
     // ── 设置页 ────────────────────────────────────────────────────────────────
     function SettingsPage() {
@@ -231,6 +307,10 @@ window.__ModuleLoader__.load({
       const [rejected, setRejected] = useState([]);
       const [busy, setBusy] = useState(true);
       const [savedAt, setSavedAt] = useState(0);
+      // asr.json 那一套是独立的：不同文件、不同生效方式（改完立刻生效）。
+      const [localDraft, setLocalDraft] = useState(null);
+      const [localRejected, setLocalRejected] = useState([]);
+      const [localAt, setLocalAt] = useState(0);
 
       const load = useCallback(async () => {
         setBusy(true);
@@ -239,6 +319,7 @@ window.__ModuleLoader__.load({
           const next = await api('/status');
           setData(next);
           setDraft(draftOf(next.values));
+          setLocalDraft(localDraftOf(next.local));
         } catch (err) {
           setError(String(err?.message ?? err));
         } finally {
@@ -290,6 +371,43 @@ window.__ModuleLoader__.load({
         }
       };
 
+      const setLocal = (key, value) => {
+        setLocalAt(0);
+        setLocalRejected([]);
+        setLocalDraft(current => ({ ...(current ?? {}), [key]: value }));
+      };
+
+      const saveLocal = async () => {
+        if (data === null || localDraft === null) return;
+        const patch = localPatchOf(localDraft, data.local);
+        if (Object.keys(patch).length === 0) {
+          setLocalAt(-1);
+          return;
+        }
+        setBusy(true);
+        setError('');
+        setLocalRejected([]);
+        try {
+          const result = await api('/local', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ patch }),
+          });
+          if (result.ok) {
+            // 同 save()：以宿主回的快照为准，别把草稿当真相。
+            setData(current => ({ ...current, local: result.local }));
+            setLocalDraft(localDraftOf(result.local));
+            setLocalAt(Date.now());
+          } else {
+            setLocalRejected(result.rejected ?? []);
+          }
+        } catch (err) {
+          setError(String(err?.message ?? err));
+        } finally {
+          setBusy(false);
+        }
+      };
+
       if (data === null || draft === null) {
         return h('div', { className: 'sn_root' },
           h('div', { className: 'sn_hero' },
@@ -319,6 +437,71 @@ window.__ModuleLoader__.load({
         }, options.map(([value, text]) => h('option', { key: String(value), value: String(value) }, text))),
         h('span', { className: 'sn_hint' }, t(hintKey)));
 
+      // asr.json 那一套的控件：数据源是 localDraft，不是 draft（两个不同的文件）。
+      const localField = (key, labelKey, hintKey, props) => h('label', { className: 'sn_field', key: `l_${key}` },
+        h('span', { className: 'sn_label' }, t(labelKey)),
+        h('input', {
+          className: 'sn_input',
+          value: String(localDraft?.[key] ?? ''),
+          onChange: e => setLocal(key, e.target.value),
+          ...props,
+        }),
+        h('span', { className: 'sn_hint' }, t(hintKey)));
+
+      const localSelect = (key, labelKey, hintKey, options) => h('label', { className: 'sn_field', key: `l_${key}` },
+        h('span', { className: 'sn_label' }, t(labelKey)),
+        h('select', {
+          className: 'sn_select',
+          value: String(localDraft?.[key] ?? ''),
+          onChange: e => setLocal(key, e.target.value),
+        }, options.map(([value, text]) => h('option', { key: String(value), value: String(value) }, text))),
+        h('span', { className: 'sn_hint' }, t(hintKey)));
+
+      // ── 转写服务：asr.json ──
+      // 放在「常用」**下面**：先看"用哪个"，再看"那个服务的细节"。顶在最上面会让
+      // 人以为这是在替换宿主自带的转写 —— 它只是备选，选「只用宿主的」时整块收起。
+      const localCard = data.local && localDraft && shouldShowLocal(draft.prefer)
+        ? h('div', { className: 'sn_card' },
+          h('div', { className: 'sn_cardhd' }, h('span', { className: 'sn_cardname' }, t('local.title'))),
+          h('p', { className: 'sn_note', style: { margin: '0 0 10px' } }, t('local.sub')),
+          h('div', { className: 'sn_mono', style: { marginBottom: '10px' } }, data.local.path),
+          !data.local.exists ? h('div', { className: 'sn_hint', style: { marginBottom: '10px' } }, t('local.empty')) : null,
+          h('div', { className: 'sn_grid' },
+            localSelect('api', 'local.api', 'local.api.hint', [
+              ['openai-audio', t('local.api.openai')],
+              ['chat-audio', t('local.api.chat')],
+            ]),
+            localField('baseUrl', 'local.baseUrl', 'local.baseUrl.hint', { type: 'text', placeholder: t('local.baseUrl.ph') }),
+            localField('model', 'local.model', 'local.model.hint', { type: 'text' }),
+            localField('language', 'local.language', 'local.language.hint', { type: 'text' }),
+            localField('key', 'local.key', 'local.key.hint', {
+              type: 'password',
+              autoComplete: 'off',
+              placeholder: data.local.hasKey ? t('local.key.keep') : t('local.key.ph'),
+            })),
+
+          data.local.manage ? h('div', { className: 'sn_hint', style: { marginTop: '8px' } }, t('local.manage')) : null,
+          data.local.envKeys && data.local.envKeys.length > 0
+            ? h('div', { className: 'sn_box warn', style: { marginTop: '10px' } },
+              `${t('local.env')}：${data.local.envKeys.join('、')}`)
+            : null,
+
+          localRejected.length > 0
+            ? h('div', { className: 'sn_box bad', style: { marginTop: '10px' } },
+              t('err.rejected'),
+              h('ul', {}, localRejected.map((line, i) => h('li', { key: i }, line))))
+            : null,
+
+          h('div', { className: 'sn_row', style: { marginTop: '10px' } },
+            h('button', { className: 'sn_btn', onClick: saveLocal, disabled: busy }, t('local.save')),
+            localAt > 0 ? h('span', { className: 'sn_ok' }, t('state.savedLocal')) : null,
+            localAt < 0 ? h('span', { className: 'sn_note' }, t('state.nosave')) : null),
+
+          h('details', { className: 'sn_det', style: { marginTop: '10px' } },
+            h('summary', {}, t('local.sample')),
+            h('pre', { className: 'sn_pre' }, t('local.sample.body'))))
+        : null;
+
       return h('div', { className: 'sn_root' },
         h('div', { className: 'sn_hero' },
           h('h2', { className: 'sn_title' }, t('title')),
@@ -337,6 +520,11 @@ window.__ModuleLoader__.load({
         h('div', { className: 'sn_card' },
           h('div', { className: 'sn_cardhd' }, h('span', { className: 'sn_cardname' }, t('sec.common'))),
           h('div', { className: 'sn_grid' },
+            select('prefer', 'field.prefer', 'field.prefer.hint', [
+              ['auto', t('prefer.auto')],
+              ['host', t('prefer.host')],
+              ['local', t('prefer.local')],
+            ]),
             select('defaultPace', 'field.pace', 'field.pace.hint', [
               ['calm', t('pace.calm')],
               ['normal', t('pace.normal')],
@@ -351,6 +539,8 @@ window.__ModuleLoader__.load({
             ]),
             field('silence', 'field.silence', 'field.silence.hint', { min: 0.15, max: 1.5, step: 0.05 }),
             field('maxSeg', 'field.maxSeg', 'field.maxSeg.hint', { min: 0.8, max: 15, step: 0.1 }))),
+
+        localCard,
 
         // ── 高级 ──
         h('details', { className: 'sn_det sn_card' },
@@ -412,7 +602,7 @@ window.__ModuleLoader__.load({
     exports.apply = apply;
     exports.inject = inject;
     exports.name = 'dsh-see-now';
-    exports.__test = { draftOf, mergeValues, patchOf, num, TEXT };
+    exports.__test = { draftOf, mergeValues, patchOf, num, TEXT, localDraftOf, localPatchOf, shouldShowLocal };
     return module.exports;
   },
 });

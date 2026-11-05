@@ -11,7 +11,7 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -149,4 +149,79 @@ test('POST /config 回的是写完之后的完整快照', async () => {
   assert.equal(body.values.listen.silence, 0.35, '没提交的段要按文件里的实际值回');
   assert.equal(body.values.idleStopMs, 1800000, '派生值一起回，前端不用自己算');
   assert.equal('defaults' in body.values, false, '契约是「值」，不夹带 defaults');
+});
+
+// ── /local：改 asr.json 那一支 ────────────────────────────────────────────────
+// 这份文件是两个插件共用的，所以这里的断言重点在"别写坏别人的东西"：
+// 未知键拒、manage 保留、key 只写不读。
+
+const asrFile = () => join(home, 'asr.json');
+const asrStored = () => (existsSync(asrFile()) ? JSON.parse(readFileSync(asrFile(), 'utf8')) : null);
+
+async function postLocal(payload) {
+  const res = await fetch(`${base}/local`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return { code: res.status, body: await res.json() };
+}
+
+test('status 里带 asr.json 的现状；没有文件时 exists 为假', async () => {
+  const { body } = await status();
+  assert.equal(body.local.path, asrFile());
+  assert.equal(body.local.exists, false);
+  assert.equal(body.local.api, 'openai-audio');
+  assert.equal(body.local.hasKey, false);
+});
+
+test('POST /local 写 asr.json，status 立刻反映新值', async () => {
+  const r = await postLocal({
+    patch: { api: 'chat-audio', baseUrl: 'https://api.example.com/v1', model: 'mimo-v2.5-asr', language: 'auto', key: 'sk-1' },
+  });
+  assert.equal(r.code, 200);
+  assert.equal(r.body.ok, true, JSON.stringify(r.body.rejected));
+
+  const saved = asrStored();
+  assert.equal(saved.baseUrl, 'https://api.example.com/v1');
+  assert.equal(saved.api, 'chat-audio');
+  assert.equal(saved.key, 'sk-1');
+
+  const { body } = await status();
+  assert.equal(body.local.exists, true);
+  assert.equal(body.local.api, 'chat-audio');
+  assert.equal(body.local.hasKey, true);
+  assert.equal(JSON.stringify(body.local).includes('sk-1'), false, 'key 不该回传给前端');
+});
+
+test('POST /local 拒绝未知字段，且一个字节都不写', async () => {
+  const before = asrStored();
+  const r = await postLocal({ patch: { 乱写: 1 } });
+  assert.equal(r.code, 200);
+  assert.equal(r.body.ok, false);
+  assert.deepEqual(asrStored(), before);
+});
+
+test('POST /local 拒绝非法 api', async () => {
+  const r = await postLocal({ patch: { api: 'grpc' } });
+  assert.equal(r.body.ok, false);
+  assert.match(r.body.rejected.join(), /openai-audio/);
+});
+
+test('POST /local 缺 patch 回 400', async () => {
+  const r = await postLocal({});
+  assert.equal(r.code, 400);
+});
+
+test('GET /local 回 405', async () => {
+  const res = await fetch(`${base}/local`);
+  assert.equal(res.status, 405);
+});
+
+test('写 asr.json 时 manage 原样保留 —— 那是另一个插件拉起服务用的', async () => {
+  writeFileSync(asrFile(), JSON.stringify({ baseUrl: 'http://127.0.0.1:8000/v1', manage: { idleMs: 5000 } }));
+  const r = await postLocal({ patch: { model: 'paraformer-zh-2024-03-09' } });
+  assert.equal(r.body.ok, true, JSON.stringify(r.body.rejected));
+  assert.deepEqual(asrStored().manage, { idleMs: 5000 });
+  assert.equal(asrStored().baseUrl, 'http://127.0.0.1:8000/v1');
 });

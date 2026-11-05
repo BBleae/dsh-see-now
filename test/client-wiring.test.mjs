@@ -166,6 +166,8 @@ test('文案里不出现占位符', () => {
   for (const [key, value] of Object.entries(__test.TEXT)) {
     assert.equal(typeof value, 'string', key);
     assert.ok(value.length > 0, key);
+    // 样例 JSON 里本来就该有花括号，别把它当成漏填的占位符。
+    if (key === 'local.sample.body') continue;
     assert.ok(!/[{}]/.test(value), `${key} 里留着模板占位符`);
   }
 });
@@ -204,4 +206,64 @@ test('mergeValues 把增量回包并进整份配置', () => {
   // 新宿主：回完整快照，照单全收
   const full = { ...prev, idleStopMin: 20, listen: { ...prev.listen, maxSeg: 9 } };
   assert.deepEqual(__test.mergeValues(prev, full), full);
+});
+
+// ── asr.json 那一套 ───────────────────────────────────────────────────────────
+// 它写的是另一个文件，所以草稿与补丁都是独立的一份，不能和 see-now.json 的混用。
+
+test('asr.json 的草稿：key 永远是空串，文件里的密钥不回显', () => {
+  const { __test } = mod;
+  const local = { path: 'x', exists: true, api: 'chat-audio', baseUrl: 'https://a/v1', model: 'm', language: 'zh', hasKey: true };
+  const draft = __test.localDraftOf(local);
+  assert.equal(draft.api, 'chat-audio');
+  assert.equal(draft.baseUrl, 'https://a/v1');
+  assert.equal(draft.key, '');
+});
+
+test('asr.json 的补丁：只带改过的键；key 只有真填了才带', () => {
+  const { __test } = mod;
+  const local = { api: 'openai-audio', baseUrl: 'https://a/v1', model: 'm', language: 'zh', hasKey: true };
+  const draft = __test.localDraftOf(local);
+  assert.deepEqual(__test.localPatchOf(draft, local), {}, '什么都没改就是空补丁');
+
+  assert.deepEqual(__test.localPatchOf({ ...draft, model: 'm2' }, local), { model: 'm2' });
+  assert.deepEqual(__test.localPatchOf({ ...draft, key: 'sk-1' }, local), { key: 'sk-1' });
+  // 前后空格不算改动 —— 否则光标一进出就冒出一个假补丁
+  assert.deepEqual(__test.localPatchOf({ ...draft, model: '  m  ' }, local), {});
+});
+
+test('localDraftOf 拿到空值也不把面板弄挂', () => {
+  const { __test } = mod;
+  assert.equal(__test.localDraftOf(null), null);
+  assert.equal(__test.localDraftOf(undefined), null);
+});
+
+test('asr.json 那块只在"可能用到它"时出现', () => {
+  const { __test } = mod;
+  // host = 只用宿主自带的：那块收起来。顶在最上面会让人以为 SenseVoice 被替换了。
+  assert.equal(__test.shouldShowLocal('host'), false);
+  assert.equal(__test.shouldShowLocal('auto'), true);
+  assert.equal(__test.shouldShowLocal('local'), true);
+});
+
+test('prefer 三档能读进草稿，也能按枚举提交回去', () => {
+  const { __test } = mod;
+  const values = {
+    maxAutonomousWakes: 8,
+    idleStopMin: 3,
+    defaultPace: 'normal',
+    speechPacing: true,
+    listen: { prefer: 'auto', live: true, liveMin: 1.8, liveStep: 1.2, silence: 0.35, maxSeg: 3, pollMs: 100 },
+  };
+
+  // 读：草稿里必须带上 prefer，否则下拉框没有当前值（String(undefined) = 'undefined'）
+  assert.equal(__test.draftOf(values).prefer, 'auto');
+
+  // 写：prefer 是字符串，绝不能过 num() —— 那会把 'host' 变成 NaN 交给宿主拒
+  assert.deepEqual(__test.patchOf({ ...__test.draftOf(values), prefer: 'host' }, values), {
+    listen: { prefer: 'host' },
+  });
+
+  // 没改就不提交
+  assert.deepEqual(__test.patchOf(__test.draftOf(values), values), {});
 });

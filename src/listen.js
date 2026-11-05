@@ -33,6 +33,8 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import {
   existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
@@ -163,13 +165,30 @@ export function hostTranscriber(ctx, { language = 'zh', timeoutMs = 30_000 } = {
 }
 
 /** `~/.dsh/asr.json`（和 storyboard 共用同一份配置）：`{baseUrl, key, model, language}` */
+/**
+ * 转写服务的**协议形态**。`asr.json` 的 `api` 字段选它。
+ *
+ * - `openai-audio`（默认）：OpenAI 的 `/audio/transcriptions`，multipart 上传音频。
+ *   所有说自己"OpenAI 兼容语音接口"的服务都是这个。
+ * - `chat-audio`：`/chat/completions`，音频 base64 塞进 `messages[].content[].input_audio`。
+ *   小米 MiMo-V2.5-ASR 是这种。它文档标题写「OpenAI API 兼容」，但兼容的是**聊天**
+ *   接口 —— 端点、请求体、返回结构三样都和音频接口不同，直接换 baseUrl 会 404。
+ *
+ * 加这一档不是为了某一家：把"转写服务"绑死在一种协议上，等于把那些只提供聊天形态
+ * 的模型挡在门外。
+ */
+export const ASR_APIS = Object.freeze(['openai-audio', 'chat-audio']);
+
 export function asrConfig(env = process.env) {
   const home = dshHome(env);
   const cfg = readJson(join(home, 'asr.json'));
   const baseUrl = env.DSH_ASR_BASE_URL || cfg.baseUrl || '';
   if (!baseUrl) return null;
+  const api = String(env.DSH_ASR_API || cfg.api || 'openai-audio');
   return {
     baseUrl: String(baseUrl).replace(/\/+$/, ''),
+    /** 协议形态。写错了退回默认 —— 拼错一个词不该让整个听写不可用。 */
+    api: ASR_APIS.includes(api) ? api : 'openai-audio',
     key: env.DSH_ASR_KEY || cfg.key || '',
     model: env.DSH_ASR_MODEL || cfg.model || 'paraformer-zh-2024-03-09',
     language: env.DSH_ASR_LANGUAGE || cfg.language || 'zh',
@@ -182,27 +201,94 @@ export function asrConfig(env = process.env) {
   };
 }
 
-/** OpenAI 兼容 HTTP（see-now 自己不发请求给模型，只把音频丢给这个服务）。 */
-export function httpTranscriber(cfg, { timeoutMs = 30_000, log = () => {} } = {}) {
-  if (!cfg?.baseUrl) return null;
+/**
+ * 把一段 wav 交给转写服务（see-now 自己不发音频给模型，只转交给用户配的那个服务）。
+ *
+ * 两种协议形态，按 `cfg.api` 分：
+ * - `openai-audio`：multipart 打 `/audio/transcriptions`，读 `text`
+ * - `chat-audio`：JSON 打 `/chat/completions`，读 `choices[0].message.content`
+ */
+/**
+ * 发一个 POST，走 `node:http` / `node:https` 而不是全局 `fetch`。
+ *
+ * 为什么不用 fetch：宿主里可能装着会包住 `fetch` 的插件（billion-context 就是），
+ * 它把每个经过 fetch 的目标都当成自己的"上游"去探测，连不上就挂一条
+ * 「上游不可用 · connect-refused ×3」。转写请求发往 127.0.0.1:8000，一旦被那种
+ * 插件看见，就会被登记成一个假上游，界面上于是常年挂着一条"服务不可用"的提示 ——
+ * 而实际原因可能只是面板没刷新。用自己的 http 通道，这条请求就只属于我们。
+ */
+function send(urlStr, { method = 'POST', headers = {}, body = null, signal, timeoutMs = 30_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let url;
+    try {
+      url = new URL(urlStr);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const mod = url.protocol === 'https:' ? httpsRequest : httpRequest;
+    const req = mod(url, { method, headers }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        const status = res.statusCode ?? 0;
+        resolve({
+          ok: status >= 200 && status < 300,
+          status,
+          text: async () => text,
+          json: async () => JSON.parse(text),
+        });
+      });
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`请求超时（${timeoutMs}ms）`)));
+    if (signal) {
+      if (signal.aborted) {
+        req.destroy(new Error('aborted'));
+        return;
+      }
+      signal.addEventListener('abort', () => req.destroy(new Error('aborted')), { once: true });
+    }
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+/** 手写 multipart：只要一个文件 + 几个文本字段，不值得为它引一个依赖。 */
+function buildMultipart(fields, boundary) {
+  const parts = [];
+  for (const f of fields) {
+    parts.push(Buffer.from(`--${boundary}\r\n`));
+    if (f.filename) {
+      parts.push(
+        Buffer.from(
+          `Content-Disposition: form-data; name="${f.name}"; filename="${f.filename}"\r\n` +
+            `Content-Type: ${f.type || 'application/octet-stream'}\r\n\r\n`,
+        ),
+      );
+      parts.push(Buffer.from(f.data));
+      parts.push(Buffer.from('\r\n'));
+    } else {
+      parts.push(Buffer.from(`Content-Disposition: form-data; name="${f.name}"\r\n\r\n${f.value}\r\n`));
+    }
+  }
+  parts.push(Buffer.from(`--${boundary}--\r\n`));
+  return Buffer.concat(parts);
+}
+export function httpTranscriber(cfg, { timeoutMs = 30_000, log = () => {} } = {}) {  if (!cfg?.baseUrl) return null;
+  const chat = cfg.api === 'chat-audio';
   return async function viaHttp(wav) {
-    const form = new FormData();
-    form.append('file', new Blob([wav], { type: 'audio/wav' }), 'a.wav');
-    form.append('model', cfg.model);
-    form.append('response_format', 'json');
-    form.append('language', cfg.language || 'zh');
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), timeoutMs);
     try {
-      const res = await fetch(`${cfg.baseUrl}/audio/transcriptions`, {
-        method: 'POST',
-        headers: cfg.key ? { authorization: `Bearer ${cfg.key}` } : {},
-        body: form,
-        signal: ac.signal,
-      });
+      const res = chat
+        ? await postChatAudio(cfg, wav, ac.signal, timeoutMs)
+        : await postOpenAiAudio(cfg, wav, ac.signal, timeoutMs);
       if (!res.ok) throw new Error(`HTTP ${res.status}：${(await res.text()).slice(0, 120)}`);
       const j = await res.json();
-      return String(j?.text ?? '').trim();
+      return chat ? chatAudioText(j) : String(j?.text ?? '').trim();
     } catch (e) {
       log(`转写失败：${e?.message ?? e}`);
       // **必须抛**。以前这里 `return ''`，于是上层看到的只是"这段没说话"：
@@ -215,6 +301,70 @@ export function httpTranscriber(cfg, { timeoutMs = 30_000, log = () => {} } = {}
   };
 }
 
+function postOpenAiAudio(cfg, wav, signal, timeoutMs) {
+  const boundary = `----seenow${Math.random().toString(16).slice(2)}`;
+  const body = buildMultipart(
+    [
+      { name: 'file', filename: 'a.wav', type: 'audio/wav', data: wav },
+      { name: 'model', value: cfg.model },
+      { name: 'response_format', value: 'json' },
+      { name: 'language', value: cfg.language || 'zh' },
+    ],
+    boundary,
+  );
+  return send(`${cfg.baseUrl}/audio/transcriptions`, {
+    headers: {
+      'content-type': `multipart/form-data; boundary=${boundary}`,
+      'content-length': String(body.length),
+      ...(cfg.key ? { authorization: `Bearer ${cfg.key}` } : {}),
+    },
+    body,
+    signal,
+    timeoutMs,
+  });
+}
+
+function postChatAudio(cfg, wav, signal, timeoutMs) {
+  const body = {
+    model: cfg.model,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'input_audio',
+            // 纯 base64 + format，不用 data URL：OpenAI 原生与小米两种写法都认这种，
+            // 而 data URL 只有部分服务认。
+            input_audio: { data: Buffer.from(wav).toString('base64'), format: 'wav' },
+          },
+        ],
+      },
+    ],
+  };
+  if (cfg.language) body.asr_options = { language: cfg.language };
+  const payload = Buffer.from(JSON.stringify(body), 'utf8');
+  return send(`${cfg.baseUrl}/chat/completions`, {
+    headers: {
+      'content-type': 'application/json',
+      'content-length': String(payload.length),
+      ...(cfg.key ? { authorization: `Bearer ${cfg.key}` } : {}),
+    },
+    body: payload,
+    signal,
+    timeoutMs,
+  });
+}
+
+/** `choices[0].message.content` 可能是字符串，也可能是分段数组。 */
+function chatAudioText(j) {
+  const c = j?.choices?.[0]?.message?.content;
+  if (typeof c === 'string') return c.trim();
+  if (Array.isArray(c)) {
+    return c.map((p) => (typeof p === 'string' ? p : (p?.text ?? ''))).join('').trim();
+  }
+  return '';
+}
+
 // ------------------------------------------------------------------ 本地服务
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -223,7 +373,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export async function probeService(baseUrl, { timeoutMs = 2000 } = {}) {
   try {
     const origin = new URL(baseUrl).origin;
-    const res = await fetch(`${origin}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+    const res = await send(`${origin}/health`, { method: 'GET', timeoutMs });
     return res.ok;
   } catch { return false; }
 }

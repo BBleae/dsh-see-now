@@ -1,12 +1,13 @@
 /**
- * 设置页背后的两条路由，全在 `/api/see-now/` 下。
+ * 设置页背后的三条路由，全在 `/api/see-now/` 下。
  *
  * | 方法 | 路径 | 作用 |
  * |---|---|---|
  * | GET  | `/status` | 当前生效的值、默认值、文件路径、校验警告 |
- * | POST | `/config` | 提交要改的键；校验通过才落盘 |
+ * | POST | `/config` | 提交要改的键；校验通过才落盘（`see-now.json`） |
+ * | POST | `/local`  | 改转写服务的地址与凭据（`asr.json`） |
  *
- * ## 为什么只有两条
+ * ## 为什么这么几条
  *
  * 这套配置没有长任务 —— 没有安装、没有下载、没有子进程。读一次文件、写一次文件
  * 都是毫秒级，用不着 ui-locate 那种「POST 起任务 + GET 轮询进度」的形状。
@@ -21,9 +22,11 @@
  */
 
 import { rejectionFor } from './settings-trust.js';
+import { asrPath, readAsrConfig, writeAsrConfig } from './asr-store.mjs';
 import {
   readTuning,
   writeTuning,
+  tuningPath,
   TUNING_DEFAULTS,
   LISTEN_DEFAULTS,
   PACES_KEYS,
@@ -44,6 +47,26 @@ function defaultsPayload() {
     idleStopMs: TUNING_DEFAULTS.idleStopMin * 60 * 1000,
     listen: { ...LISTEN_DEFAULTS },
   };
+}
+
+/** `baseUrl` → `DSH_ASR_BASE_URL`。给面板标出"这个值正被环境变量盖着"。 */
+function envKeyOf(name) {
+  return `DSH_ASR_${name.replace(/[A-Z]/g, (m) => `_${m}`).toUpperCase()}`;
+}
+
+/**
+ * `asr.json` 的现状 —— 面板上「转写服务」到底指哪个文件、里面写了什么。
+ *
+ * 文件在 `$DSH_HOME/asr.json`，与 video-storyboard 共用一份。两个插件都读它，
+ * 所以面板既能看也能改（只动认得的键，别的键原样留着）。
+ */
+function localPayload() {
+  const info = readAsrConfig(asrPath(tuningPath()));
+  // 环境变量优先于文件。面板要能把"你改的那个文件没生效"说出来。
+  const envKeys = ['api', 'baseUrl', 'key', 'model', 'language'].filter(
+    (k) => Boolean(process.env[envKeyOf(k)]),
+  );
+  return { ...info, envOverrides: envKeys.length > 0, envKeys };
 }
 
 /** 把 `readTuning()` 的结果拆成「值」与「警告」两半 —— 前端要分开用。 */
@@ -83,6 +106,23 @@ export function createSettingsApi({ logger } = {}) {
     return JSON.parse(text);
   }
 
+  /** `{patch}` 包一层，理由见 `/config` 里的注释。 */
+  async function patchOf(req, res) {
+    let body;
+    try {
+      body = await readJson(req);
+    } catch (err) {
+      send(res, 400, { ok: false, rejected: [`请求体不是合法 JSON：${err?.message ?? err}`] });
+      return undefined;
+    }
+    const patch = body && typeof body === 'object' ? body.patch : undefined;
+    if (patch === undefined) {
+      send(res, 400, { ok: false, rejected: ['缺少 patch'] });
+      return undefined;
+    }
+    return patch;
+  }
+
   return async function handle(req, res, connection) {
     // 第一件事永远是过信任栅栏：前缀比内核 `/api` 长，这些请求没经过内核准入。
     const rejection = rejectionFor(req, connection);
@@ -116,6 +156,7 @@ export function createSettingsApi({ logger } = {}) {
           defaults: defaultsPayload(),
           paces: PACES_KEYS,
           writable: { keys: WRITABLE_KEYS, listen: WRITABLE_LISTEN_KEYS },
+          local: localPayload(),
           warnings: tuning.warnings,
         });
         return;
@@ -126,21 +167,10 @@ export function createSettingsApi({ logger } = {}) {
           send(res, 405, { ok: false, rejected: ['只支持 POST'] });
           return;
         }
-        let body;
-        try {
-          body = await readJson(req);
-        } catch (err) {
-          send(res, 400, { ok: false, rejected: [`请求体不是合法 JSON：${err?.message ?? err}`] });
-          return;
-        }
-
         // 包一层 `patch` 而不是整个 body 当补丁：以后加 `dryRun` 之类的元数据时
         // 不用改协议，也不会把元数据误当成配置键。
-        const patch = body && typeof body === 'object' ? body.patch : undefined;
-        if (patch === undefined) {
-          send(res, 400, { ok: false, rejected: ['缺少 patch'] });
-          return;
-        }
+        const patch = await patchOf(req, res);
+        if (patch === undefined) return;
 
         const result = writeTuning(patch);
         if (result.ok) log(`see-now: 配置已写回 ${result.path}`);
@@ -155,6 +185,27 @@ export function createSettingsApi({ logger } = {}) {
           path: after.path,
           values: valuesOf(after),
           warnings: result.warnings,
+          rejected: result.rejected,
+        });
+        return;
+      }
+
+      if (route === '/local') {
+        if (method !== 'POST') {
+          send(res, 405, { ok: false, rejected: ['只支持 POST'] });
+          return;
+        }
+        const patch = await patchOf(req, res);
+        if (patch === undefined) return;
+
+        const result = writeAsrConfig(patch, { path: asrPath(tuningPath()) });
+        if (result.ok) log(`see-now: 转写服务配置已写回 ${result.path}`);
+        else log(`see-now: 转写服务配置被拒 ${JSON.stringify(result.rejected)}`);
+
+        send(res, 200, {
+          ok: result.ok,
+          path: result.path,
+          local: localPayload(),
           rejected: result.rejected,
         });
         return;
