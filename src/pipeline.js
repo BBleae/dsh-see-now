@@ -152,7 +152,7 @@ export const DEFAULTS = Object.freeze({
   cutFutureRefWindow: 24,
   /** 外圈变化低于这个值（0–255）且背景仍稳定时，判为停住的大面积前景。 */
   cutFutureBorderMax: 10,
-  /** 低/中分候选若背景仍有一块没变，也做未来帧确认。 */
+  /** 低/中分候选若背景仍有一块没变，也做未来帧确认。**0 = 整条关闭低分未来帧确认**。 */
   cutFutureLowBgMax: 160,
   /** 低/中分候选的外圈被改掉多少（大面积前景盖到边缘）才值得未来确认。 */
   cutFutureLowBorderMin: 60,
@@ -690,10 +690,19 @@ export function createPipeline(opts = {}) {
     return border !== null && border.score < o.cutFutureBorderMax;
   }
 
-  /** 低/中分但背景还有一块没被换掉、外圈也没动：可能是大手/产品挡住，也可能是真切。 */
+  /**
+   * 低/中分但背景还有一块没被换掉、外圈也没动：可能是大手/产品挡住，也可能是真切。
+   *
+   * `cutFutureLowBgMax <= 0` 整条关闭低分未来帧确认。
+   * 之前它只关低 bg 分支 —— 下面 `highBg`（bg 很高但稳定背景极少）是个独立出口，
+   * 排在 `bg >= cutFutureLowBgMax` 之外，所以设 0 关不掉它。
+   * 参数名叫 `...Max`、文档写"0 = 关闭"，实际留着一条路进来，是语义漏洞（issue #21 第 3 条）。
+   * 高分路径（`score >= cutFutureMinScore`）不受影响，仍由 `cutFutureDelay` 管。
+   */
   function lowAmbiguousFuture(entry) {
     if (o.cutFutureDelay <= 0
       || o.cutBgAbs <= 0
+      || o.cutFutureLowBgMax <= 0
       || entry.score === null
       || entry.score >= o.cutFutureMinScore
       || !entry.futureModel
