@@ -103,3 +103,75 @@ test('队列上限就是 wakeBatch —— 攒有上限，不会无限堆', { ski
     runner.stop();
   }
 });
+
+// ---------------------------------------------------------------------------
+// 叫醒判据：攒不够就不叫（这条是超省模式的全部意义，之前只有代码没有测试）
+// ---------------------------------------------------------------------------
+
+const { startLoop } = await import('../src/loop.js');
+
+/** 假宿主：`followup` 就是"叫醒"，记下每次的文案 */
+function fakeCtx() {
+  const wakes = [];
+  const services = {
+    sessionController: {
+      async resolveAgent() {
+        return {
+          agent: { followup: (m) => wakes.push(m.content?.[0]?.text ?? '') },
+          session: { id: 's1' },
+        };
+      },
+    },
+    sessions: { async flush() { return true; } },
+  };
+  return { wakes, ctx: { get: (n) => services[n] ?? undefined } };
+}
+
+/** 假 runner：`pending` 想设几张就设几张，用来直接喂判据 */
+function fakeRunner({ pending = 1, sheets = 3 } = {}) {
+  const st = { pending, sheets, running: true };
+  return {
+    st,
+    touch: () => st.running,
+    windowWasOpen: () => false,
+    status: () => ({
+      running: st.running, pending: st.pending, sheets: st.sheets, secondsSinceWake: 5,
+    }),
+    stop() { st.running = false; },
+    reserveSheet() {
+      st.pending = 0;
+      return { seq: st.sheets, from: 0, to: 1, frames: 1 };
+    },
+    releaseSheet() { st.pending = 1; return true; },
+  };
+}
+
+// 收工线全关，只留判据本身在起作用
+const quiet = { maxAutonomousWakes: 0, idleStopMs: 0 };
+
+/** 跑几拍（tick 是 2 秒一拍，等 2.6 秒保证至少判过一次） */
+async function runLoopTicks({ pending, wakeBatch }) {
+  const { ctx, wakes } = fakeCtx();
+  const runner = fakeRunner({ pending });
+  const loop = startLoop({
+    ctx, sessionId: 's1', runner, wakeMinGapSec: 0, tuning: { ...quiet, wakeBatch },
+  });
+  await sleep(2600);
+  loop.dispose();
+  return wakes.length;
+}
+
+test('判据：pending=2、wakeBatch=3 时一次都不叫', async () => {
+  const n = await runLoopTicks({ pending: 2, wakeBatch: 3 });
+  assert.equal(n, 0, `攒不够 3 张就叫了 ${n} 次 —— 判据还是 pending > 0`);
+});
+
+test('判据：pending=3、wakeBatch=3 时该叫', async () => {
+  const n = await runLoopTicks({ pending: 3, wakeBatch: 3 });
+  assert.ok(n >= 1, '攒够了还不叫，那超省模式就是死的');
+});
+
+test('判据：wakeBatch=1 时 pending=1 就叫（默认行为没变）', async () => {
+  const n = await runLoopTicks({ pending: 1, wakeBatch: 1 });
+  assert.ok(n >= 1, '默认应当"有新图就叫"，这是以前所有行为的前提');
+});
