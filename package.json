@@ -46,6 +46,7 @@
     "dsh.plugin.json",
     "README.md",
     "CHANGELOG.md",
+    "CREDITS.md",
     "LICENSE",
     "NOTICE",
     "docs/images"
@@ -80,6 +81,33 @@
       "inject": []
     }
   },
+  "author": "SAOS-3624",
+  "contributors": [
+    {
+      "name": "ggfgfgf-on",
+      "url": "https://github.com/ggfgfgf-on"
+    },
+    {
+      "name": "xingranya",
+      "url": "https://github.com/xingranya"
+    },
+    {
+      "name": "citydirector",
+      "url": "https://github.com/citydirector"
+    },
+    {
+      "name": "zhumengaoxuan",
+      "url": "https://github.com/zhumengaoxuan"
+    },
+    {
+      "name": "gao804",
+      "url": "https://github.com/gao804"
+    },
+    {
+      "name": "caijialin20051003-gif",
+      "url": "https://github.com/caijialin20051003-gif"
+    }
+  ],
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
