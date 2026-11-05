@@ -96,37 +96,29 @@ test('writeTuning：坏的 tierMap 会被拒，而不是悄悄写进去', () => 
   assert.ok(r.rejected.some((x) => x.includes('tierMap')), JSON.stringify(r.rejected));
 });
 
-// ---- 锁定档位：把"时间"和"空间"拆开 ---------------------------------------
+// ---- 「每帧固定多大」= 八项全指向同一档 ------------------------------------
+//
+// 这一组守的是一个**等价关系**：用户想要"密度不再影响尺寸"时，正确做法是把八项
+// 都填成同一档，而不是给系统再加一个"锁定"开关。曾经加过那样的开关，后来删了 ——
+// 它在数学上和"全映射到同一档"逐字节相同，多一个概念只会让人以为还有别的能力。
 
-test('lock：不管密度算出几档，全部压到锁定的那一档', () => {
-  const tiers = [1, 3, 6, 8];
-  assert.deepEqual(applyStrategy(tiers, 'native', null, 4), [4, 4, 4, 4]);
+test('八项全指向同一档 = 每帧一样大，密度被整表吃掉', () => {
+  // see-now 的表是**数组**（第 i 个数 = 档位 i+1），不是对象 —— 和 storyboard 那边不同
+  const same = (n) => Array.from({ length: 8 }, () => n);
+  // 不管密度算出几档，出来的都是 4
+  assert.deepEqual(applyStrategy([1, 3, 6, 8], 'custom', same(4)), [4, 4, 4, 4]);
+  assert.deepEqual(applyStrategy([1, 5], 'custom', same(2)), [2, 2]);
 });
 
-test('lock：**压过** strategy 和 tierMap（它就是"我说了算"）', () => {
-  const tiers = [1, 5, 8];
-  // 自定义映射本来会把 1→3、5→4，锁定时一条都不该生效
-  assert.deepEqual(applyStrategy(tiers, 'custom', { 1: 3, 5: 4 }, 2), [2, 2, 2]);
-  assert.deepEqual(applyStrategy(tiers, 'compact', null, 2), [2, 2, 2]);
+test('八项全指向同一档时，0 档（自由尺寸补位帧）仍然不动', () => {
+  const same = Array.from({ length: 8 }, () => 3);
+  assert.deepEqual(applyStrategy([0, 5], 'custom', same), [0, 3]);
 });
 
-test('lock：0 档是自由尺寸补位帧，锁也不动它', () => {
-  assert.deepEqual(applyStrategy([0, 3], 'native', null, 6), [0, 6]);
-});
-
-test('lock：0 / 越界 = 不锁，走原来的密度路径', () => {
-  const base = [1, 4, 8];
-  assert.deepEqual(applyStrategy(base, 'native', null, 0), base);
-  assert.deepEqual(applyStrategy(base, 'native', null, 9), base);
-  assert.deepEqual(applyStrategy(base, 'native', null, null), base);
-});
-
-test('readTuning：tierLock 必须是 0–8', () => {
-  writeFileSync(tuningPath({ DSH_HOME: home }), JSON.stringify({ tierLock: 12 }), 'utf8');
-  const t = readTuning({ env: { DSH_HOME: home } });
-  assert.equal(t.tierLock, 0, '越界回默认 0（不锁定）');
-  assert.ok(t.warnings.some((w) => w.includes('tierLock')), t.warnings.join(' | '));
-
-  writeFileSync(tuningPath({ DSH_HOME: home }), JSON.stringify({ tierLock: 5 }), 'utf8');
-  assert.equal(readTuning({ env: { DSH_HOME: home } }).tierLock, 5);
+test('它压过 native/full/compact —— 因为那三种是在"密度档位"上做加减', () => {
+  const same = Array.from({ length: 8 }, () => 2);
+  const base = [1, 5, 8];
+  assert.deepEqual(applyStrategy(base, 'custom', same), [2, 2, 2]);
+  // 对照：compact 是"每个档位 +1"，结果仍随密度变
+  assert.deepEqual(applyStrategy(base, 'compact'), [2, 6, 8]);
 });

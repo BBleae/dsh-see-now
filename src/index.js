@@ -230,8 +230,8 @@ function tierLine(hist, tuning) {
   const parts = entries
     .sort((a, b) => Number(a[0]) - Number(b[0]))
     .map(([k, n]) => `${k}档×${n}`);
-  const locked = tuning?.tierStyle === 'lock' && Number(tuning?.tierLock) > 0;
-  const head = locked ? `档位：锁定 ${tuning.tierLock} 档` : `档位：${tuning?.tierStyle ?? 'native'}`;
+  // 三种来源分开报：跟随密度 / 整体挪一档 / 逐档自定义
+  const head = `档位：${tuning?.tierStyle ?? 'native'}`;
   return `\n${head}（${parts.join(' ')}，共 ${total} 帧）`;
 }
 
@@ -534,7 +534,6 @@ async function registerAll(ctx) {
     // 档位映射：这张图里每帧占多大格子（设置页「高级」里那项）
     tierStyle: tuning.tierStyle,
     tierMap: tuning.tierMap,
-    tierLock: tuning.tierStyle === 'lock' ? tuning.tierLock : 0,
   });
   disposers.push(() => runner.stop());
 

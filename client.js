@@ -117,10 +117,10 @@ window.__ModuleLoader__.load({
       'tier.full': '更大 —— 在密度基础上整体降一档',
       'tier.compact': '更小 —— 在密度基础上整体升一档',
       'tier.custom': '自定义 —— 逐档指定映射',
-      'tier.lock': '固定一档 —— 不随密度变',
-      'field.tierLock': '固定用哪一档',
-      'field.tierLock.hint': '节奏怎么改都不影响尺寸，这就是把「时间」和「空间」拆开。'
-        + '代价：帧很稀的时候（省流档、游戏档）一格可能只放一两帧，剩下的画布是空的。',
+      'field.fillTierMap': '一键填满',
+      'field.fillTierMap.pick': '全设成…',
+      'field.fillTierMap.hint': '选一个档位，八项一起改成它。八项全一样 = 密度不再影响尺寸，'
+        + '节奏怎么改格子都是这么大。代价：帧很稀的时候一格只放一两帧，剩下画布是空的。',
       'field.tierMap': '逐档映射',
       'field.tierMap.hint': '左边是算出来的档位，右边选它实际落到哪一档。'
         + '想把"1 档"也缩小就把它改成 2；想让 8 档别那么碎就改成 6。',
@@ -275,12 +275,6 @@ window.__ModuleLoader__.load({
           : num(draft[key]);
       }
       if (draft.tierStyle !== values.tierStyle) patch.tierStyle = String(draft.tierStyle ?? '');
-      /**
-       * 锁定档位：**缺失也算 0**。直接 `Number(undefined) !== Number(undefined)` 是
-       * `NaN !== NaN`（恒真），values 里没有这个键时每次保存都会顺手写一个 `tierLock: NaN`。
-       */
-      const lockOf = (v) => (v === undefined || v === null || v === '' ? 0 : Number(v));
-      if (lockOf(draft.tierLock) !== lockOf(values.tierLock)) patch.tierLock = num(draft.tierLock);
       // 数组比引用永远不等，只能比内容；顺序有意义（第 i 个 = 档位 i+1）
       if (JSON.stringify(draft.tierMap ?? null) !== JSON.stringify(values.tierMap ?? null)) {
         patch.tierMap = (Array.isArray(draft.tierMap) ? draft.tierMap : []).map((n) => num(n));
@@ -607,20 +601,7 @@ window.__ModuleLoader__.load({
               ['full', t('tier.full')],
               ['compact', t('tier.compact')],
               ['custom', t('tier.custom')],
-              ['lock', t('tier.lock')],
             ]),
-            draft.tierStyle === 'lock'
-              ? select('tierLock', 'field.tierLock', 'field.tierLock.hint', [
-                [1, '1 档 —— 一格占满'],
-                [2, '2 档 —— 1/2 边'],
-                [3, '3 档 —— 1/3 边'],
-                [4, '4 档 —— 1/4 边'],
-                [5, '5 档 —— 1/5 边'],
-                [6, '6 档 —— 1/6 边'],
-                [7, '7 档 —— 1/7 边'],
-                [8, '8 档 —— 1/8 边'],
-              ])
-              : null,
             field('maxAutonomousWakes', 'field.wakes', 'field.wakes.hint', { min: 1, max: 200, step: 1 }),
             field('liveMin', 'field.liveMin', 'field.liveMin.hint', { min: 0.8, max: 6, step: 0.1 }),
             field('liveStep', 'field.liveStep', 'field.liveStep.hint', { min: 0.4, max: 4, step: 0.1 }),
@@ -635,6 +616,27 @@ window.__ModuleLoader__.load({
           draft.tierStyle === 'custom'
             ? h('div', { className: 'sn_grid', style: { marginTop: '12px' } },
               h('span', { className: 'sn_label', style: { gridColumn: '1 / -1' } }, t('field.tierMap')),
+              /**
+               * 一键填满：把八项一起改成同一个档。
+               *
+               * 这就是"每帧固定这么大"的做法 —— 八项都指向同一档时，密度算出来的档位
+               * 被整表吃掉，节奏怎么改都不影响尺寸。**不做成独立选项**：它和逐档自定义
+               * 是同一件事，多一个概念只会让人以为还有别的能力。
+               */
+              h('label', { className: 'sn_field', key: 'fill', style: { gridColumn: '1 / -1' } },
+                h('span', { className: 'sn_label' }, t('field.fillTierMap')),
+                h('select', {
+                  className: 'sn_select',
+                  defaultValue: '',
+                  onChange: (e) => {
+                    const v = Number(e.target.value);
+                    if (v >= 1 && v <= 8) set('tierMap', Array.from({ length: 8 }, () => v));
+                    e.target.selectedIndex = 0;
+                  },
+                },
+                h('option', { value: '' }, t('field.fillTierMap.pick')),
+                [1, 2, 3, 4, 5, 6, 7, 8].map((n) => h('option', { key: n, value: String(n) }, `${n} 档`))),
+                h('span', { className: 'sn_hint' }, t('field.fillTierMap.hint'))),
               [0, 1, 2, 3, 4, 5, 6, 7].map((i) => h('label', { className: 'sn_field', key: `tm${i}` },
                 h('span', { className: 'sn_label' }, `${i + 1} →`),
                 h('select', {
