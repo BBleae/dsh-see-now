@@ -80,9 +80,27 @@ export function windowConfigPath(env = process.env) {
   return join(dshHome(env), 'watch-window.json');
 }
 
+/**
+ * 本进程的会话标识。`hidden` 只有**本会话亲手藏的**才算数 ——
+ * 上一版把 `hidden` 写成永久状态，DSH 重启后窗口进程还残留着，就变成
+ * "进程活着、心跳在跳、屏幕上什么都没有"，且没有任何手段自愈（issue #32 第 1 点）。
+ *
+ * 用"会话"而不是时间戳：用户刚点完隐藏就重启，时间戳还没过期，
+ * 但意图已经属于上一个会话了。
+ */
+const SESSION_ID = `${process.pid}-${Date.now().toString(36)}`;
+
 /** 窗是不是被藏起来了。读不到就当没藏（不能因为一个坏文件把窗判成看不见）。 */
 export function windowHidden(env = process.env) {
-  return readJson(windowConfigPath(env)).hidden === true;
+  const cfg = readJson(windowConfigPath(env));
+  if (cfg.hidden !== true) return false;
+  // 没有 `hiddenBy` 的是旧版本写的（那时没有会话概念），一律当遗留
+  if (cfg.hiddenBy === SESSION_ID) return true;
+  // **遗留状态必须顺手改回去**：Python 侧只认 `hidden` 字段，这里"当它没藏"
+  // 并不会让窗口出现 —— 那就成了最坏的一种：Node 说"显示中"，屏幕上什么都没有。
+  // 写一次之后文件就是 hidden:false，下次直接走上面的早退。
+  try { setWindowHidden(false, { env }); } catch { /* 只读盘也照常回答 */ }
+  return false;
 }
 
 /**
@@ -92,6 +110,17 @@ export function windowHidden(env = process.env) {
  *
  * @returns {{changed:boolean, hidden:boolean, error?:string}}
  */
+/**
+ * `show` 是"让他看见"的开关，`hidden` 是它落盘后的形态 —— **两者方向相反**。
+ *
+ * 这里是唯一换算点：`show:true` 必须写 `hidden:false`。
+ * （以前 `index.js` 把 `show` 直接当 `hidden` 传给 `setWindowHidden`，于是
+ * "让它显示"这条救命指令恰恰把窗口藏了起来，见 issue #32 第 2 点。）
+ */
+export function hiddenForShow(show) {
+  return !show;
+}
+
 export function setWindowHidden(hidden, { log = () => {}, env = process.env } = {}) {
   const path = windowConfigPath(env);
   const cfg = readJson(path);
@@ -99,6 +128,9 @@ export function setWindowHidden(hidden, { log = () => {}, env = process.env } = 
   // 已经是目标状态就**不写**：多写一次会让 Python 侧多醒一轮，还会把 mtime 刷成"刚刚改过"
   if (Boolean(cfg.hidden) === want) return { changed: false, hidden: want };
   cfg.hidden = want;
+  // 记下是谁藏的：重启后这个字段对不上，`windowHidden()` 就当它没藏过
+  if (want) cfg.hiddenBy = SESSION_ID;
+  else delete cfg.hiddenBy;
   try {
     mkdirSync(dirname(path), { recursive: true });
     const tmp = `${path}.tmp`;

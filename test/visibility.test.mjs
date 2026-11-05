@@ -28,11 +28,22 @@ function seed(patch) {
   writeFileSync(cfgPath, JSON.stringify({ script: 'X/window.py', name: '大肥鱼', ...patch }, null, 2), 'utf8');
 }
 
-test('hidden:true 时 windowHidden 必须是 true（不能因为读失败就当成看得见）', () => {
-  seed({ hidden: true });
+test('本会话藏起来的，windowHidden 必须是 true', () => {
+  seed({});
+  setWindowHidden(true);
   assert.equal(windowHidden(), true);
   assert.equal(windowReport().hidden, true);
   assert.match(windowLine(), /藏起来的/);
+});
+
+test('上一会话遗留的 hidden 不许继续生效，且要顺手把文件改回去', () => {
+  // 旧版本写的：只有 hidden，没有 hiddenBy。Python 侧只认 hidden 字段，
+  // 所以光在 Node 这边"当它没藏"不够 —— 必须写回 false 窗口才会真出现。
+  seed({ hidden: true });
+  assert.equal(windowHidden(), false);
+  assert.equal(JSON.parse(readFileSync(cfgPath, 'utf8')).hidden, false,
+    '遗留状态没自愈 = 进程活着但永远看不见（issue #32 第 1 点）');
+  assert.equal(windowHidden(), false, '自愈后第二次读不再写盘');
 });
 
 test('显示出来：改 hidden 但不许动其它键', () => {

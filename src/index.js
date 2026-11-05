@@ -17,7 +17,7 @@ import { speechSubscribers, onSpeech } from './speech.js';
 import { markSpeaking } from './listen.js';
 import { startLoop, HANGUP_NOTE } from './loop.js';
 import { readTuning } from './tuning.js';
-import { windowAlive, windowHidden, setWindowHidden, windowReport, windowLine } from './window.js';
+import { windowAlive, windowHidden, setWindowHidden, hiddenForShow, windowReport, windowLine } from './window.js';
 import { pickRegion, loadRegion, clearRegion, regionText } from './region.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -884,7 +884,8 @@ async function registerAll(ctx) {
         const wants = typeof args.show === 'boolean' ? args.show : null;
         let changed = null;
         if (wants !== null) {
-          changed = setWindowHidden(wants, { log });
+          // `show` 和 `hidden` 方向相反，换算只在 hiddenForShow 一处
+          changed = setWindowHidden(hiddenForShow(wants), { log });
           log(`悬浮窗${wants ? '显示' : '隐藏'}${changed.changed ? '' : '（本来就是）'}`);
         }
         const r = windowReport();
