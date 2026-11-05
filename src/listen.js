@@ -40,7 +40,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { LISTEN_DEFAULTS } from './tuning.js';
+import { LISTEN_DEFAULTS, PREFER_KEYS } from './tuning.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const LISTEN_SCRIPT = join(HERE, '..', 'examples', 'floating-chat', 'listen.py');
@@ -264,14 +264,38 @@ export async function ensureService(cfg, { log = () => {}, waitMs = 60_000 } = {
   return { ok: false, reason: `等了 ${Math.round(waitMs / 1000)} 秒还没就绪` };
 }
 
-/** 选一个能用的转写器。宿主优先 —— 社区用户那边不用装任何东西。 */
-export function resolveTranscriber(ctx, { env = process.env, log = () => {} } = {}) {
-  const host = hostTranscriber(ctx);
-  if (host) return { kind: 'host', transcribe: host, label: '宿主 SenseVoice' };
-  const cfg = asrConfig(env);
-  const http = httpTranscriber(cfg, { log });
-  if (http) return { kind: 'http', transcribe: http, label: `本地 ${cfg.baseUrl}` };
-  return null;
+/**
+ * 选一个能用的转写器。
+ *
+ * `prefer`（`see-now.json` 的 `listen.prefer`）决定用哪个：
+ *
+ * - `auto`  —— 宿主优先，没有就回落 `~/.dsh/asr.json`。默认值，社区用户零安装。
+ * - `host`  —— 只用宿主自带的 `speechToText`。
+ * - `local` —— 只用 `~/.dsh/asr.json` 指的服务，**不碰宿主**。
+ *
+ * 后两个**不互相顶替**。用户之所以去指定，是因为他知道两边转出来的东西不一样
+ * （宿主 SenseVoice 走 CPU、70ms 级；自建服务往往在 GPU 上、带字级时间码）——
+ * 悄悄回落到他没选的那个，比"没有字幕"更难查：界面显示在听，说的却不是他以为的那个引擎。
+ */
+export function resolveTranscriber(ctx, { env = process.env, log = () => {}, prefer = 'auto' } = {}) {
+  const want = PREFER_KEYS.includes(prefer) ? prefer : 'auto';
+
+  const pickHost = () => {
+    const fn = hostTranscriber(ctx);
+    return fn ? { kind: 'host', transcribe: fn, label: '宿主 SenseVoice' } : null;
+  };
+  const pickLocal = () => {
+    const cfg = asrConfig(env);
+    // 没配 baseUrl 就别造一个必然失败的转写器 —— 那种失败要等到第一次真请求才暴露，
+    // 表现是"在听、0 句"，和"视频是默片"分不开
+    if (!cfg) return null;
+    const fn = httpTranscriber(cfg, { log });
+    return fn ? { kind: 'http', transcribe: fn, label: `本地 ${cfg.baseUrl}` } : null;
+  };
+
+  if (want === 'host') return pickHost();
+  if (want === 'local') return pickLocal();
+  return pickHost() ?? pickLocal();
 }
 
 // ------------------------------------------------------------------ 静音窗口
@@ -587,7 +611,8 @@ export function createListener({
       if (Date.now() < pausedUntil) return;
       pausedUntil = 0;
       fails = 0;
-      ensureService(asrConfig(env), { log }).catch(() => {});
+      // prefer=host 时本地服务根本不在候选里，拉起来只是白开一个进程再等它自己睡
+      if (cfg.prefer !== 'host') ensureService(asrConfig(env), { log }).catch(() => {});
     }
     busy = true;
     try {
@@ -728,9 +753,14 @@ export function createListener({
       enabled = false;
       return { ok: false, reason };
     }
-    transcriber = injected ?? resolveTranscriber(ctx, { env, log });
+    transcriber = injected ?? resolveTranscriber(ctx, { env, log, prefer: cfg.prefer });
     if (!transcriber) {
-      reason = '没有可用的转写服务（宿主没有 speechToText，也没有 ~/.dsh/asr.json）';
+      // 指定了引擎就直说**是哪个**没到位 —— 指定模式下还说"没有可用的转写服务"等于没说
+      reason = cfg.prefer === 'host'
+        ? 'listen.prefer 是 host，但宿主没有可用的 speechToText'
+        : cfg.prefer === 'local'
+          ? `listen.prefer 是 local，但 ${join(dshHome(env), 'asr.json')} 里没有配 baseUrl`
+          : '没有可用的转写服务（宿主没有 speechToText，也没有 ~/.dsh/asr.json）';
       enabled = false;
       return { ok: false, reason };
     }
