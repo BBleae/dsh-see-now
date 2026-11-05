@@ -17,6 +17,7 @@ import { speechSubscribers, onSpeech } from './speech.js';
 import { markSpeaking } from './listen.js';
 import { startLoop, HANGUP_NOTE } from './loop.js';
 import { readTuning } from './tuning.js';
+import { createSettingsApi, ROUTE_PREFIX } from './settings-api.mjs';
 import { windowAlive, windowHidden, setWindowHidden, windowReport, windowLine } from './window.js';
 import { pickRegion, loadRegion, clearRegion, regionText } from './region.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -365,6 +366,49 @@ export async function apply(ctx) {
   }
 }
 
+/**
+ * 挂设置页的两条路由（`/api/see-now/status` 与 `/api/see-now/config`）。
+ *
+ * `webServer` **刻意不写进 `inject`**：它是可选能力，写进去会让没有它的部署连
+ * 插件都起不来 —— 工具也跟着一起消失。改为 `ctx.inject` 按需拿。
+ *
+ * 而且它可能比本插件晚挂载，所以必须在这个回调里注册，不能在 apply 时读一次：
+ * 读一次会永远拿到 `undefined`，面板就永远不出现，宿主那头却毫无异样。
+ *
+ * 这里整段包在 try 里：面板是附加能力，挂不上只该少一页设置，不该影响看屏幕。
+ */
+function installSettings(ctx, log) {
+  try {
+    if (typeof ctx?.inject !== 'function') {
+      log('宿主没有 ctx.inject，跳过设置页接口');
+      return;
+    }
+    const handle = createSettingsApi({ logger: ctx?.logger });
+    ctx.inject(['webServer'], (scoped) => {
+      scoped.effect(
+        () =>
+          scoped.webServer.register({
+            kind: 'prefix',
+            path: ROUTE_PREFIX,
+            handler: (req, res) => handle(req, res, readConnection(scoped)),
+          }),
+        'dsh-see-now: settings routes',
+      );
+    });
+  } catch (e) {
+    log(`设置页接口没挂上：${e?.message ?? e}`);
+  }
+}
+
+/** 每次请求现取 `connection`：它同样晚挂载，缓存会缓存到 undefined。 */
+function readConnection(scoped) {
+  try {
+    return scoped.get('connection');
+  } catch {
+    return undefined;
+  }
+}
+
 /** 加载失败落盘（追加，超过 64KB 就重开一份；不抛）。 */
 function writeLoadError(e) {
   try {
@@ -396,6 +440,8 @@ async function registerAll(ctx) {
    */
   const tuning = readTuning();
   if (tuning.warnings.length) log?.(`[see-now] ${tuning.warnings.join('；')}`);
+
+  installSettings(ctx, log);
   const runner = createRunner({
     ffmpegPath: ffmpeg.path,
     log,

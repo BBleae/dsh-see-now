@@ -18,6 +18,7 @@
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./client": "./client.js",
     "./pack": "./src/pack.js",
     "./png": "./src/png.js",
     "./pipeline": "./src/pipeline.js",
@@ -40,6 +41,7 @@
     "examples/floating-chat/*.png",
     "examples/voice-say-mac.mjs",
     "scripts",
+    "client.js",
     "cordis.patch.yml",
     "dsh.plugin.json",
     "README.md",
@@ -71,6 +73,11 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": false,
+      "inject": []
     }
   },
   "license": "Apache-2.0",
