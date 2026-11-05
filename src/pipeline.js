@@ -241,6 +241,11 @@ export const DEFAULTS = Object.freeze({
   smoothFrames: 6,
   strategy: 'native',
   /**
+   * `> 0` = 锁定档位：所有帧都用这一档，**忽略密度和 strategy**（见 `applyStrategy`）。
+   * 0 = 走密度（默认）。
+   */
+  tierLock: 0,
+  /**
    * `strategy: 'custom'` 时的查表（档位 1..8 → 目标档位）。
    * 其它策略忽略它 —— 那份表只对"逐档自定义"有意义。
    */
@@ -373,6 +378,14 @@ export function createPipeline(opts = {}) {
   const stats = {
     frames: 0, kept: 0, cuts: 0, marks: 0, floors: 0, dupSkipped: 0,
     sheets: 0,
+    /**
+     * 留下的帧落在哪些档位：`{1: 3, 3: 12}`。
+     *
+     * 加它是因为"格子在变"有两级原因（节奏档位 → 密度 → 档位，再由 strategy 偏移），
+     * 用户看到图变了却不知道为什么。`status` 报一行分布，能直接看出是"帧太少所以格子大"
+     * 还是"映射被改了"。
+     */
+    tierHist: {},
     scoreSum: 0, scoreN: 0, scoreMax: 0,
     /** 多箱兜底触发次数（>0 说明调用方没切干净，画面会被丢帧而不是糊掉） */
     overflow: 0,
@@ -451,7 +464,7 @@ export function createPipeline(opts = {}) {
     // 这里**只按密度给档位**，不加假切点加成 —— 加成要等出图时按最终帧数决定
     // （见 DEFAULTS.markBoost 的实测表）。keep 阶段用它判断"装不装得下"，
     // 用不带加成（更大）的档位是保守的：判装不下而实际装得下，顶多多开一张，不会丢帧。
-    const tier = applyStrategy([lv], o.strategy, o.tierMap)[0];
+    const tier = applyStrategy([lv], o.strategy, o.tierMap, o.tierLock)[0];
     if (frames.length === 0) sheetStart = entry.t;
     // `score` / `mcRect` 一起带下去：出图时要拿它们写变化日志（见 `noteChange`）。
     // 以前只留在 `log` 里，而 `log` 是离线标定用的全量记录、不会交付。
@@ -476,6 +489,7 @@ export function createPipeline(opts = {}) {
     }
     lastKeepT = entry.t;
     stats.kept += 1;
+    stats.tierHist[tier] = (stats.tierHist[tier] ?? 0) + 1;
     if (via === 'cut') stats.cuts += 1;
     else if (via === 'mark') stats.marks += 1;
     else if (via === 'floor') stats.floors += 1;
@@ -741,7 +755,7 @@ export function createPipeline(opts = {}) {
       const raw = via === 'mark' ? o.markBoost : via === 'floor' ? o.floorBoost : 0;
       return Math.max(0, Number(raw) || 0);
     };
-    return batch.map((f) => applyStrategy([Math.min(8, f.level + boostFor(f.via))], o.strategy, o.tierMap)[0]);
+    return batch.map((f) => applyStrategy([Math.min(8, f.level + boostFor(f.via))], o.strategy, o.tierMap, o.tierLock)[0]);
   }
 
   /** 停住的大面积前景：外圈还是旧背景，且背景变化不到整片。 */
@@ -967,7 +981,7 @@ export function createPipeline(opts = {}) {
         if (!frames.length) sheetStart = lastSeen.t;
         frames.push({
           t: lastSeen.t, buf: lastSeen.buf, via: why === 'user' ? 'user' : 'now', level: lv,
-          tier: applyStrategy([lv], o.strategy, o.tierMap)[0],
+          tier: applyStrategy([lv], o.strategy, o.tierMap, o.tierLock)[0],
           // 「此刻那一帧」也要带 wall —— 漏了它，`sheet.wallTo` 会是 null，
           // 台词就按 `Date.now()` 兜底，时间窗对不上（实测最后一张的台词取不到）
           wall: lastSeen.wall ?? Date.now(),

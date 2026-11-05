@@ -84,7 +84,20 @@ function applyTierMap(tiers, map) {
  * @param {string} strategy `native` / `full` / `compact` / `single` / **`custom`**
  * @param {number[]|null} map 只在 `custom` 时用：8 个数，第 i 个是"档位 i+1 映射到哪一档"
  */
-export function applyStrategy(tiers, strategy = 'native', map = null) {
+export function applyStrategy(tiers, strategy = 'native', map = null, lock = 0) {
+  /**
+   * **锁定档位**：不管密度算出来几档，全部压到同一档。
+   *
+   * 这是"把时间和空间拆开"的开关。默认走密度（帧越密格子越小，一张图覆盖的时长恒定），
+   * 但用户有时就想"每帧固定这么大"，不想让节奏档位（cutAbs/积分）间接决定尺寸。
+   *
+   * ⚠️ 锁定的代价要清楚：帧稀的时候（比如 `game-economic` 只有 0.1 帧/秒）锁到 8 档，
+   * 一张图里只有一两帧、剩下全是空白 —— 画布白扔掉。锁定是"我说了算"，不是"更省"。
+   */
+  const fixed = Math.trunc(Number(lock));
+  if (Number.isFinite(fixed) && fixed >= TIER_MIN && fixed <= TIER_MAX) {
+    return tiers.map((t) => (Number(t) === 0 ? 0 : fixed));
+  }
   if (strategy === 'custom') return applyTierMap(tiers, map);
   const s = STRATEGIES[strategy] ?? STRATEGIES.native;
   // 固定档：不管原来算出来是几档，全部压到同一档

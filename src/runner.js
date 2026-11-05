@@ -197,6 +197,8 @@ export function createRunner({
    */
   tierStyle = 'native',
   tierMap = null,
+  /** `> 0` = 锁定档位（时间与空间解耦）；设置页选「固定一档」时生效。 */
+  tierLock = 0,
 } = {}) {
   let pipeline = null;   // 当前（或刚停的）引擎 —— 停采集后仍留着，好把队列里剩的图发完
   let running = false;
@@ -506,6 +508,11 @@ export function createRunner({
        */
       strategy: opts.strategy ?? tierStyle,
       tierMap: opts.tierMap ?? tierMap,
+      /**
+       * 锁定档位：**优先于 strategy**，且逐帧模式也照锁（`single` 是"整幅"= 1 档，
+       * 和锁定语义一致，所以不冲突）。0 = 不锁，走密度。
+       */
+      tierLock: opts.tierLock ?? tierLock,
       // 音量条：直接问听声音那条链要 —— 那边已经在算 RMS 了（断句要用），
       // 这里只是把它按时间窗取出来画成柱子，**不额外解码一次音频**。
       audio: { levels: (a, b) => listener.levelsBetween(a, b) },

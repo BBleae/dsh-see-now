@@ -217,6 +217,24 @@ export function linesText(sheet) {
  * **必须在模块顶层**：它原来写在 `route()` 里面（靠函数提升才没报错），
  * 于是每次工具调用都要重新创建三个闭包，而且缩进是 0 —— 读代码的人会以为它在外面。
  */
+/**
+ * 一行档位分布。`hist` = `{1: 3, 3: 12}`。
+ *
+ * 为什么要有：用户看到"格子变了"时，原因可能是**节奏**（帧变稀 → 密度档位变小）、
+ * **映射**（strategy/tierMap）、或者**锁定**。三者都改尺寸，只报节奏那一行分不出来。
+ */
+function tierLine(hist, tuning) {
+  const entries = Object.entries(hist ?? {}).filter(([, n]) => Number(n) > 0);
+  if (!entries.length) return '';
+  const total = entries.reduce((sum, [, n]) => sum + Number(n), 0);
+  const parts = entries
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([k, n]) => `${k}档×${n}`);
+  const locked = tuning?.tierStyle === 'lock' && Number(tuning?.tierLock) > 0;
+  const head = locked ? `档位：锁定 ${tuning.tierLock} 档` : `档位：${tuning?.tierStyle ?? 'native'}`;
+  return `\n${head}（${parts.join(' ')}，共 ${total} 帧）`;
+}
+
 function loopLine(lp) {
   if (!lp) return '没起（还没调过 watch）';
   if (lp.mode === 'listen') return '只听（采集已停，窗口里的输入还收得到；要看就调 peek）';
@@ -516,6 +534,7 @@ async function registerAll(ctx) {
     // 档位映射：这张图里每帧占多大格子（设置页「高级」里那项）
     tierStyle: tuning.tierStyle,
     tierMap: tuning.tierMap,
+    tierLock: tuning.tierStyle === 'lock' ? tuning.tierLock : 0,
   });
   disposers.push(() => runner.stop());
 
@@ -1126,6 +1145,11 @@ async function registerAll(ctx) {
             + `最多 ${sceneMode ? 4 : PACES[paceMode].wakeGapSec} 秒叫一次）`
             // 超省模式是"一次交几张"，和"多久叫一次"是两件事，单独说
             + (tuning.wakeBatch > 1 ? `\n超省模式：攒够 ${tuning.wakeBatch} 张才交（一轮看完，省上下文重算）` : '')
+            /**
+             * 档位分布：**"格子怎么变了"有两级原因**（节奏 → 密度 → 档位，再由映射偏移），
+             * 只报"节奏"看不清。这一行能分出"帧太少所以格子大"和"映射被改了"。
+             */
+            + tierLine(s.stats?.tierHist, tuning)
             // 收工线：用户改过 see-now.json 时要能看出来，否则"怎么陪我一会儿就停了"查不到
             + `\n收工线：连续 ${tuning.maxAutonomousWakes} 次叫醒没人理`
             + ` · ${tuning.idleStopMin > 0 ? `没开窗时 ${tuning.idleStopMin} 分钟没说话` : '空闲线已关闭'}`

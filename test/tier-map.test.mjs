@@ -95,3 +95,38 @@ test('writeTuning：坏的 tierMap 会被拒，而不是悄悄写进去', () => 
   assert.equal(r.ok, false, '少了五项应该被拒（补齐会长出一份用户没写过的默认值）');
   assert.ok(r.rejected.some((x) => x.includes('tierMap')), JSON.stringify(r.rejected));
 });
+
+// ---- 锁定档位：把"时间"和"空间"拆开 ---------------------------------------
+
+test('lock：不管密度算出几档，全部压到锁定的那一档', () => {
+  const tiers = [1, 3, 6, 8];
+  assert.deepEqual(applyStrategy(tiers, 'native', null, 4), [4, 4, 4, 4]);
+});
+
+test('lock：**压过** strategy 和 tierMap（它就是"我说了算"）', () => {
+  const tiers = [1, 5, 8];
+  // 自定义映射本来会把 1→3、5→4，锁定时一条都不该生效
+  assert.deepEqual(applyStrategy(tiers, 'custom', { 1: 3, 5: 4 }, 2), [2, 2, 2]);
+  assert.deepEqual(applyStrategy(tiers, 'compact', null, 2), [2, 2, 2]);
+});
+
+test('lock：0 档是自由尺寸补位帧，锁也不动它', () => {
+  assert.deepEqual(applyStrategy([0, 3], 'native', null, 6), [0, 6]);
+});
+
+test('lock：0 / 越界 = 不锁，走原来的密度路径', () => {
+  const base = [1, 4, 8];
+  assert.deepEqual(applyStrategy(base, 'native', null, 0), base);
+  assert.deepEqual(applyStrategy(base, 'native', null, 9), base);
+  assert.deepEqual(applyStrategy(base, 'native', null, null), base);
+});
+
+test('readTuning：tierLock 必须是 0–8', () => {
+  writeFileSync(tuningPath({ DSH_HOME: home }), JSON.stringify({ tierLock: 12 }), 'utf8');
+  const t = readTuning({ env: { DSH_HOME: home } });
+  assert.equal(t.tierLock, 0, '越界回默认 0（不锁定）');
+  assert.ok(t.warnings.some((w) => w.includes('tierLock')), t.warnings.join(' | '));
+
+  writeFileSync(tuningPath({ DSH_HOME: home }), JSON.stringify({ tierLock: 5 }), 'utf8');
+  assert.equal(readTuning({ env: { DSH_HOME: home } }).tierLock, 5);
+});

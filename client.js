@@ -108,14 +108,19 @@ window.__ModuleLoader__.load({
       'field.silence.hint': '单位秒。0.35 是人喘口气的下限 —— 再低会把一句话从中间切开，后半截被当成新的一句。',
       'field.maxSeg': '一句最长多久',
       'field.maxSeg.hint': '单位秒。说到这么久还没停就强行断开，否则一句话一直不断，字幕永远出不来。',
-      'field.tierStyle': '档位映射（每帧占多大格子）',
-      'field.tierStyle.hint': '档位 1 最大（一格占满）、8 最小（1/8 边）。'
-        + '原生 = 按画面变化密度算出来什么样就什么样；更大 / 更小 = 整体挪一档；'
-        + '自定义 = 下面逐档指定。只影响"这张图里每帧多大"，不改抓哪几帧。',
-      'tier.native': '原生 —— 按变化密度算（默认）',
-      'tier.full': '更大 —— 整体降一档',
-      'tier.compact': '更小 —— 整体升一档',
-      'tier.custom': '自定义 —— 逐档指定',
+      'field.tierStyle': '每帧多大（档位）',
+      'field.tierStyle.hint': '档位 1 = 一格占满，8 = 只占 1/8 边。'
+        + '默认跟着变化密度走：帧越密格子越小，这样一张图覆盖的时长才稳定。'
+        + '所以换「节奏」时格子会跟着变 —— 那是设计，不是错。'
+        + '要自己说了算就选「固定一档」，两件事就分开了。',
+      'tier.native': '跟随密度 —— 算出来几档就是几档（默认）',
+      'tier.full': '更大 —— 在密度基础上整体降一档',
+      'tier.compact': '更小 —— 在密度基础上整体升一档',
+      'tier.custom': '自定义 —— 逐档指定映射',
+      'tier.lock': '固定一档 —— 不随密度变',
+      'field.tierLock': '固定用哪一档',
+      'field.tierLock.hint': '节奏怎么改都不影响尺寸，这就是把「时间」和「空间」拆开。'
+        + '代价：帧很稀的时候（省流档、游戏档）一格可能只放一两帧，剩下的画布是空的。',
       'field.tierMap': '逐档映射',
       'field.tierMap.hint': '左边是算出来的档位，右边选它实际落到哪一档。'
         + '想把"1 档"也缩小就把它改成 2；想让 8 档别那么碎就改成 6。',
@@ -270,6 +275,12 @@ window.__ModuleLoader__.load({
           : num(draft[key]);
       }
       if (draft.tierStyle !== values.tierStyle) patch.tierStyle = String(draft.tierStyle ?? '');
+      /**
+       * 锁定档位：**缺失也算 0**。直接 `Number(undefined) !== Number(undefined)` 是
+       * `NaN !== NaN`（恒真），values 里没有这个键时每次保存都会顺手写一个 `tierLock: NaN`。
+       */
+      const lockOf = (v) => (v === undefined || v === null || v === '' ? 0 : Number(v));
+      if (lockOf(draft.tierLock) !== lockOf(values.tierLock)) patch.tierLock = num(draft.tierLock);
       // 数组比引用永远不等，只能比内容；顺序有意义（第 i 个 = 档位 i+1）
       if (JSON.stringify(draft.tierMap ?? null) !== JSON.stringify(values.tierMap ?? null)) {
         patch.tierMap = (Array.isArray(draft.tierMap) ? draft.tierMap : []).map((n) => num(n));
@@ -596,7 +607,20 @@ window.__ModuleLoader__.load({
               ['full', t('tier.full')],
               ['compact', t('tier.compact')],
               ['custom', t('tier.custom')],
+              ['lock', t('tier.lock')],
             ]),
+            draft.tierStyle === 'lock'
+              ? select('tierLock', 'field.tierLock', 'field.tierLock.hint', [
+                [1, '1 档 —— 一格占满'],
+                [2, '2 档 —— 1/2 边'],
+                [3, '3 档 —— 1/3 边'],
+                [4, '4 档 —— 1/4 边'],
+                [5, '5 档 —— 1/5 边'],
+                [6, '6 档 —— 1/6 边'],
+                [7, '7 档 —— 1/7 边'],
+                [8, '8 档 —— 1/8 边'],
+              ])
+              : null,
             field('maxAutonomousWakes', 'field.wakes', 'field.wakes.hint', { min: 1, max: 200, step: 1 }),
             field('liveMin', 'field.liveMin', 'field.liveMin.hint', { min: 0.8, max: 6, step: 0.1 }),
             field('liveStep', 'field.liveStep', 'field.liveStep.hint', { min: 0.4, max: 4, step: 0.1 }),

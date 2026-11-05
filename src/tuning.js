@@ -44,6 +44,13 @@ export const TUNING_DEFAULTS = Object.freeze({
   tierStyle: 'native',
   /** `custom` 时的查表：第 i 个数 = "档位 i+1 映射到哪一档"。默认恒等。 */
   tierMap: [1, 2, 3, 4, 5, 6, 7, 8],
+  /**
+   * `tierStyle: 'lock'` 时所有帧用的档位（1..8）。0 = 不锁定。
+   *
+   * 和 `native` 的区别：native 是"密度算出来几档就是几档"（仍随节奏变），
+   * lock 是"**永远这一档**"，节奏怎么改都不影响尺寸 —— 这就是"时间与空间解耦"。
+   */
+  tierLock: 0,
   // 「上一句说多久，就等多久再叫下一轮」（见 pacing.js）。false = 退回固定 8 秒。
   speechPacing: true,
   /**
@@ -108,7 +115,7 @@ export const PREFER_KEYS = Object.freeze(['auto', 'host', 'local']);
  * `custom` 是设置页展开八个下拉的那一档（走 `tierMap`）。
  * 注意 `single`（逐帧模式固定整幅）**不在这里**：它是逐帧模式的内部约定，不该被用户改。
  */
-export const TIER_STYLES = Object.freeze(['native', 'full', 'compact', 'custom']);
+export const TIER_STYLES = Object.freeze(['native', 'full', 'compact', 'custom', 'lock']);
 
 function dshHome(env) {
   return env.DSH_HOME || join(env.USERPROFILE || env.HOME || homedir(), '.dsh');
@@ -223,6 +230,11 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
    * 逐档映射。**坏值逐项忽略，不整份作废** —— 用户手改 `see-now.json` 时写错一个数字，
    * 不该让另外 7 档也跟着回到默认。长度不足按默认补齐，超出截断。
    */
+  let tierLock = clampInt(raw.tierLock, 0, 8, TUNING_DEFAULTS.tierLock);
+  if (raw.tierLock !== undefined && Number(raw.tierLock) !== tierLock) {
+    warnings.push('tierLock 必须是 0–8 的整数（0 = 不锁定），已用默认 0');
+  }
+
   let tierMap = [...TUNING_DEFAULTS.tierMap];
   if (raw.tierMap !== undefined) {
     if (Array.isArray(raw.tierMap)) {
@@ -271,6 +283,7 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     idleStopMs: idleStopMin * 60 * 1000,
     tierStyle,
     tierMap,
+    tierLock,
     defaultPace,
     speechPacing,
     changeLog,
@@ -284,7 +297,7 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
 
 /** 面板能改的顶层键。`idleStopMs` 是派生的，不在这里 —— 传进来会被拒。 */
 export const WRITABLE_KEYS = Object.freeze([
-  'maxAutonomousWakes', 'idleStopMin', 'wakeBatch', 'tierStyle', 'tierMap',
+  'maxAutonomousWakes', 'idleStopMin', 'wakeBatch', 'tierStyle', 'tierMap', 'tierLock',
   'defaultPace', 'speechPacing', 'listen',
 ]);
 
