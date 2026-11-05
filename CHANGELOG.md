@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-05
+
 ### Added — 超省模式：攒够几张图再交（`wakeBatch`）
 
 设置页「常用」里多了一项。默认 1（攒满一张就交），可调到 2/3/4。
@@ -25,6 +27,39 @@
 
 工具结果里多两个字段：`meta.batch`（这次交了几张）、`meta.sheets[]`（逐张的区间与帧数）；
 单张时 `frames` / `from` / `to` / `fill` / `why` / `bytes` 语义不变。
+
+### Added — 设置页（社区 PR #24 / #25）
+
+`~/.dsh/see-now.json` 里的节奏参数终于有了界面：「用得久、多久醒一次、一句话听到哪儿算完」
+都在设置页的「看你看的东西」里，不用再改源码或手写 JSON。同一版还能选**用哪个转写器**
+（`listen.prefer`：宿主自带 SenseVoice / 自建 asr.json / 自动）。
+
+### Added — 交付时附「这期间屏幕怎么动的」（社区 PR #29）
+
+`changeLog: true` 打开后，每张图下面多一段变化摘要（时间 / 变化分 / 方位）。
+默认关 —— 每张加约 100 token，属于按需打开的能力。`queueDepth: 1` 挤掉的那些画面，
+靠这条日志才补得回来。
+
+### Added — 窗口状态协议（社区 PR #23）
+
+窗口可以显式上报 `ready` / `closed` / `failed`，不再只靠 pid + 心跳去猜。
+`windowPidAlive()` 与 `windowVerdict()` 的三拍判据原样保留 —— 那是 `0.0.6` 为了
+"心跳抖一下别把会话判死"专门修的，协议层不动它。
+
+### Changed — 悬浮窗默认帧率 120 → 60（社区 PR #54）
+
+单次 `mss` 抓屏约 7ms，120fps 的 8.3ms 预算贴着边，低配机/高分屏会一直落在
+"差一点来得及"的区间。默认降到 60（16.6ms），`DSH_GLASS_MAX_FPS=120` 可显式开回。
+显示循环还会记录 Tk 实际绘制耗时，画得慢时把下一拍往后挪。
+
+顺带带上 #52（输入框光标跟着插入点走、530ms 闪烁）和 #53（被截断的长消息点一下展开，
+独占整个消息区）—— 这两条在 0.1.1 发版之后才进的 main，装 npm 包的人一直没拿到。
+
+### Changed — `ddagrab` 起不来时换个 DXGI 输出再试
+
+`Selected output not supported` 以前直接退到 gdigrab。现在会先枚举其余输出重试一轮
+（`DXGI_ERROR_UNSUPPORTED` 的那个适配器不行，别的可能行）。降级路径和 `output_idx`
+的坑写在 `src/capture.js` 的注释里。
 
 ### Fixed — `status` 说"显示中"，屏幕上一片空
 
@@ -74,6 +109,22 @@ loop 看到 pending=1 ──▶ wake() 1~3 秒 ──▶ 模型 peek
   和 `peek 空过 N/M 次`。下次复现直接看数，不用再猜三层。
 
 采集、打分、出图一概没动 —— 挪的只是一张**已经拼好的图**。
+
+### Fixed — `show:true` 反而把窗藏起来
+
+`index.js` 把 `show` 当 `hidden` 直接传下去了，所以"救命指令"恰恰写的是 `hidden: true`，
+而且每次都会。换算收进 `window.js` 的 `hiddenForShow()` 一处，现在有测试守着。
+顺带：`hidden` 加了会话归属，上个会话留下的 `hidden: true` 不再粘住窗口（issue #32）。
+
+### Fixed — 不再扫 WindowsApps 下的 `python.exe` 存根
+
+Windows 上 `WindowsApps` 里那几个是应用执行别名，探测会卡住或返回一个假解释器。
+候选列表跳过它，找不到就说清楚"缺哪个、装哪个"。
+
+### Fixed — 交付门槛整条关掉低分未来帧确认（社区 PR #30）
+
+`cutFutureLowBgMax: 0` 现在真的是"整条关闭"，不是"阈值设成 0 继续判"。
+带了合成回归，防止下次改动又把它打开。
 
 ## [0.1.1] - 2026-11-04
 
