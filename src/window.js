@@ -150,6 +150,23 @@ export function setWindowHidden(hidden, { log = () => {}, env = process.env } = 
  * `status` / `watch` 都把它带给模型 —— 以前模型只能去读 pid 和心跳文件自己猜，
  * 猜错就说"只有读权限"。
  */
+/**
+ * 心跳内容（新版窗口写 JSON：`{at, visible, hidden, state}`）。
+ *
+ * 老版本窗口写的是空文件 —— 那时只能看 mtime。所以这里读不到 JSON 就返回 null，
+ * 调用方退回"看配置文件"的老行为，不把老窗口判死。
+ */
+export function readHeartbeat() {
+  try {
+    const raw = readFileSync(heartbeatPath(), 'utf8').trim();
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    return typeof o?.visible === 'boolean' ? o : null;
+  } catch {
+    return null;
+  }
+}
+
 export function windowReport({ env = process.env } = {}) {
   let pid = null;
   try {
@@ -160,15 +177,46 @@ export function windowReport({ env = process.env } = {}) {
   try {
     heartbeatAgeSec = Math.max(0, Math.round((Date.now() - statSync(heartbeatPath()).mtimeMs) / 1000));
   } catch { /* 老窗口不写心跳 */ }
-  const hidden = windowHidden(env);
+  const intentHidden = windowHidden(env);
+  /**
+   * **意图和事实要分开**（issue #32 第 3 点）。
+   *
+   * `intentHidden` 读的是配置文件 —— 它只说明"有人要求藏起来"，不说明窗口现在什么样。
+   * 实测过最难查的一种：配置写 `hidden:false`、进程活着、心跳在跳，屏幕上一片空，
+   * 而 `status` 说"显示中"（Python 侧 withdraw 了但没写回文件）。
+   *
+   * 新版窗口每秒钟把 `visible` 写进心跳，那一份就是事实，优先用。
+   * 没有心跳内容（老窗口）才退回配置。
+   */
+  const beat = readHeartbeat();
+  const hidden = beat ? !beat.visible : intentHidden;
   return {
     pid,
     alive: windowPidAlive(),
     heartbeatAgeSec,
     heartbeatStale: heartbeatAgeSec === null ? null : heartbeatAgeSec > HEARTBEAT_STALE_SEC,
     hidden,
+    /** 窗口自己报的可见性：true/false 是事实，null = 老窗口没报（只能信配置）。 */
+    visible: beat ? beat.visible : null,
+    /** 配置文件里的意图。和 `hidden` 不一致时说明两边脱节了。 */
+    intentHidden,
+    /** Tk 的窗口状态：`normal` / `withdrawn` / `iconic` / null（老窗口）。 */
+    state: beat?.state ?? null,
     disabled: env.DSH_SEE_NO_WINDOW === '1',
   };
+}
+
+/** `windowReport()` → 一句中文。`visible` 优先，说不清才退回配置。 */
+function visText(r) {
+  if (r.visible === true) return '显示中';
+  if (r.visible === false) {
+    // `state` 来自心跳，心跳新鲜本身就说明窗口刚活过 —— 比 pid 探测更可信
+    if (r.state === 'iconic' || r.state === 'icon') return '**最小化了（用户看不见）**';
+    if (r.intentHidden || r.state === 'withdrawn') return '**藏起来的（用户看不见）**';
+    if (!r.alive) return '看不见（进程不在了）';
+    return '**看不见（窗口没画出来）**';
+  }
+  return r.hidden ? '**藏起来的（用户看不见）**' : '显示中';
 }
 
 /** `windowReport()` → 一行中文。 */
@@ -178,8 +226,7 @@ export function windowLine(r = windowReport()) {
   const hb = r.heartbeatAgeSec === null ? '没心跳'
     : r.heartbeatStale ? `心跳 ${r.heartbeatAgeSec}s 前（过期）`
       : `心跳 ${r.heartbeatAgeSec}s 前`;
-  const vis = r.hidden ? '**藏起来的（用户看不见）**' : '显示中';
-  return `窗口：${proc} · ${hb} · ${vis}`;
+  return `窗口：${proc} · ${hb} · ${visText(r)}`;
 }
 
 function logPath() {

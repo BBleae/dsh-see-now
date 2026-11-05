@@ -9,9 +9,9 @@
 //   2. 状态已经是目标值时**不写盘**（少刷一次 mtime）
 //   3. 状态行必须把"藏着"说出来 —— 模型靠它判断用户到底看不看得见
 
-import { test } from 'node:test';
+import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -23,6 +23,17 @@ const { windowConfigPath, windowHidden, setWindowHidden, windowReport, windowLin
   await import('../src/window.js');
 
 const cfgPath = windowConfigPath();
+const beatPath = join(home, 'see-now', 'window-heartbeat');
+
+/** 写窗口心跳。`null` = 老版本窗口写的空文件（只有 mtime，没有可见性）。 */
+function seedBeat(obj) {
+  mkdirSync(join(home, 'see-now'), { recursive: true });
+  writeFileSync(beatPath, obj === null ? '' : JSON.stringify(obj), 'utf8');
+}
+
+// 默认按"老窗口（空心跳）"跑，各条沿用它们原本的前提；
+// 要测可见性上报的在自己里面 seedBeat()。
+beforeEach(() => { try { rmSync(beatPath, { force: true }); } catch { /* 本来就没有 */ } });
 
 function seed(patch) {
   writeFileSync(cfgPath, JSON.stringify({ script: 'X/window.py', name: '大肥鱼', ...patch }, null, 2), 'utf8');
@@ -79,4 +90,55 @@ test('没有配置文件也不抛（第一次装、还没开过窗）', () => {
   assert.equal(existsSync(cfgPath), false);
   assert.equal(windowHidden(), false);
   assert.equal(setWindowHidden(false).changed, false);
+});
+
+// ---- 可见性上报：意图 vs 事实（issue #32 第 3 点）----------------------------
+//
+// 现场是：用户调 status，一次说"显示中"、10 秒后调 window 又说"藏起来的"，
+// 中间窗口一动没动 —— 因为 `windowReport()` 只读配置文件，从来不知道窗口什么样。
+// 现在窗口每秒把 `visible` 写进心跳，事实优先。
+
+test('窗口说自己可见：配置里的 hidden 不许覆盖事实', () => {
+  seed({});
+  setWindowHidden(true);                       // 意图：藏（本会话写的，带 hiddenBy）
+  seedBeat({ at: 1, visible: true, hidden: false, state: 'normal' });
+  const r = windowReport();
+  assert.equal(r.visible, true);
+  assert.equal(r.intentHidden, true, '意图仍然是藏');
+  assert.equal(r.hidden, false, '事实看得见 → 不许再报"藏起来的"');
+  assert.match(windowLine(), /显示中/);
+  assert.doesNotMatch(windowLine(), /藏起来的/);
+});
+
+test('窗口说看不见：配置写着不藏也必须说出来', () => {
+  seed({ hidden: false });
+  seedBeat({ at: 1, visible: false, hidden: false, state: 'withdrawn' });
+  const r = windowReport();
+  assert.equal(r.visible, false);
+  assert.equal(r.intentHidden, false);
+  assert.equal(r.hidden, true);
+  assert.match(windowLine(), /看不见/);
+});
+
+test('最小化和"被藏起来"是两回事，文案要分开', () => {
+  seed({ hidden: false });
+  seedBeat({ at: 1, visible: false, hidden: false, state: 'iconic' });
+  assert.match(windowLine(), /最小化了/);
+});
+
+test('老窗口写空心跳：退回看配置，不把窗判死', () => {
+  seed({});
+  setWindowHidden(true);
+  seedBeat(null);
+  const r = windowReport();
+  assert.equal(r.visible, null, '空文件 = 老版本窗口，没有可见性可报');
+  assert.equal(r.hidden, true, '没有事实就信意图');
+  assert.match(windowLine(), /藏起来的/);
+});
+
+test('心跳是坏 JSON：当成没上报，不许抛', () => {
+  seed({ hidden: false });
+  mkdirSync(join(home, 'see-now'), { recursive: true });
+  writeFileSync(beatPath, '{"visible": tr', 'utf8');
+  assert.equal(windowReport().visible, null);
 });

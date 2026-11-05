@@ -905,13 +905,23 @@ async function registerAll(ctx) {
             meta: { ...out.meta, windowOpen: false },
           };
         }
-        if (!windowHidden()) return out;
+        /**
+         * 判断"用户是不是真的看不见"，**以窗口自报的可见性为准**。
+         *
+         * `windowHidden()` 只读配置文件（意图）；这里要回答的是事实。
+         * 实测踩过：配置写着 `hidden:true`，窗口其实好好的（残留状态已被自愈写回，
+         * 只是这一拍还没刷盘）—— 照着配置提示"用户看不见"就是纯噪音；
+         * 反过来配置 `hidden:false`、Python 侧 withdraw 了，提示就该出现。
+         */
+        const wr = windowReport();
+        const invisible = wr.visible === null ? windowHidden() : !wr.visible;
+        if (!invisible) return out;
         return {
           ...out,
-          text: `${out.text}\n\n${windowLine()}\n`
+          text: `${out.text}\n\n${windowLine(wr)}\n`
             + '**用户看不到你的 `say`** —— 窗是藏起来的。'
             + '要他看见就调 `see_now({action:"window", show:true})`。',
-          meta: { ...out.meta, windowHidden: true },
+          meta: { ...out.meta, windowHidden: true, windowState: wr.state },
         };
       }
 
@@ -966,6 +976,13 @@ async function registerAll(ctx) {
           log(`悬浮窗${wants ? '显示' : '隐藏'}${changed.changed ? '' : '（本来就是）'}`);
         }
         const r = windowReport();
+        /**
+         * 刚写完配置的这一拍，窗口那边还没跟上：`_sync_visible()` 每 250ms 读一次，
+         * 心跳每秒才写一次。所以 `visible` 可能还是上一秒的值。
+         * 不区分的话，`show:true` 刚成功就会输出"已让悬浮窗显示出来 \n 窗口：**藏起来的**"，
+         * 自相矛盾，还会顺带触发下面那条"用户现在看不到任何东西"的警告。
+         */
+        const lagging = Boolean(changed?.changed) && r.hidden !== (wants === true);
         const head = wants === null
           ? '悬浮窗现在是这样：'
           : wants
@@ -973,8 +990,9 @@ async function registerAll(ctx) {
             : (changed?.error ? `没改成隐藏（${changed.error}），现状：` : '已把悬浮窗藏起来（采集照常，只是看不见）。');
         return {
           text: `${head}\n${windowLine(r)}`
+            + (lagging ? '\n（这一行还是上一秒的状态，最多 1 秒后刷新。）' : '')
             + (r.alive ? '' : '\n窗没开着 —— 下一次 `watch` 会重新开一个。')
-            + (r.alive && r.hidden && wants !== false
+            + (r.alive && r.hidden && wants !== false && !lagging
               ? '\n**用户现在看不到任何东西**：要么 `see_now({action:"window", show:true})`，'
                 + '要么就别再用 `say` 说话，等他主动问。'
               : ''),
