@@ -13,9 +13,9 @@
  * 所有字段都可选；写错类型就退回默认值并记一条 warn —— 配置永远不该把插件弄挂。
  */
 
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 /** 与 loop.js 的常量保持一致；这里放默认值是为了不形成反向依赖。 */
 export const TUNING_DEFAULTS = Object.freeze({
@@ -40,6 +40,15 @@ export const TUNING_DEFAULTS = Object.freeze({
  * 而长句要等 `maxSeg`（3 秒）强切才动 —— **等断句的时间是转写本身的 20 倍**。
  */
 export const LISTEN_DEFAULTS = Object.freeze({
+  /**
+   * 用哪个转写器（`auto` / `host` / `local`，见 listen.js 的 `resolveTranscriber`）。
+   *
+   * 默认 `auto` = 宿主优先、没有就回落本地 —— 社区用户那边不用装任何东西。
+   * 另外两个是**说到做到**：指定了就不偷偷换成另一个。之所以要这个开关：
+   * 两者转出来的东西不一样（宿主 SenseVoice 走 CPU、70ms 级；自建服务往往是 GPU、
+   * 带字级时间码），而原来写死宿主优先，等于自己搭了服务也用不上。
+   */
+  prefer: 'auto',
   /** 长句「边说边出字幕」：说满 `liveMin` 秒就先转一版，整句落盘后覆盖它。 */
   live: true,
   /** 说满这么多秒才发第一版快照。1.0 秒的片段质量明显掉（实测丢一半），1.5 可用，1.8 稳。 */
@@ -57,6 +66,14 @@ export const LISTEN_DEFAULTS = Object.freeze({
 /** 可用节奏。和 runner.js 的 PACES 同步，但不在模块层 import（避免环形依赖）。 */
 export const PACES_KEYS = Object.freeze(['calm', 'normal', 'dense', 'game-economic']);
 
+/**
+ * 转写服务的三种选择。
+ *
+ * `auto` 的顺序就是回落方向：宿主能用就用宿主，没有再找本地。
+ * `host` / `local` 是严格的（找不到就明说没有，不换一个顶上）。
+ */
+export const PREFER_KEYS = Object.freeze(['auto', 'host', 'local']);
+
 function dshHome(env) {
   return env.DSH_HOME || join(env.USERPROFILE || env.HOME || homedir(), '.dsh');
 }
@@ -70,11 +87,6 @@ const clampInt = (value, min, max, fallback) => {
   return Number.isInteger(n) && n >= min && n <= max ? n : fallback;
 };
 
-const clampNum = (value, min, max, fallback) => {
-  const n = Number(value);
-  return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
-};
-
 /**
  * `listen` 段。每项都夹在自己那段区间里，越界退回默认并记一条 warn ——
  * 写成 `"silence": "0.3"`（字符串）这种也必须能跑，配置不该把听声音弄停。
@@ -84,15 +96,24 @@ function readListen(raw) {
   const out = { ...LISTEN_DEFAULTS };
   const bad = [];
 
+  if (src.prefer !== undefined) {
+    if (PREFER_KEYS.includes(src.prefer)) out.prefer = src.prefer;
+    else bad.push(`listen.prefer 只能是 ${PREFER_KEYS.join(' / ')}，已用默认 auto`);
+  }
   if (src.live !== undefined) {
     if (typeof src.live === 'boolean') out.live = src.live;
     else bad.push('listen.live 只能是 true / false');
   }
+  // 判据必须看**原始值**，不能看夹回后的值：`clampNum(x, min, max, out[key])` 越界时
+  // 返回的 fallback 就是 `out[key]` 本身，于是 `v !== out[key]` 恒为 false ——
+  // 越界的值悄悄被夹回、一条警告都不留（用户以为改生效了）。反方向也错：合法但
+  // 不等于默认的值（`silence: 0.5`）会被报成"必须在 0.15–1.5 之间"。
   const num = (key, min, max) => {
     if (src[key] === undefined) return;
-    const v = clampNum(src[key], min, max, out[key]);
-    if (v !== out[key]) bad.push(`listen.${key} 必须在 ${min}–${max} 之间（秒）`);
-    out[key] = v;
+    const want = Number(src[key]);
+    const ok = Number.isFinite(want) && want >= min && want <= max;
+    if (!ok) bad.push(`listen.${key} 必须在 ${min}–${max} 之间（秒）`);
+    out[key] = ok ? want : out[key];
   };
   num('liveMin', 0.8, 6);
   num('liveStep', 0.4, 4);
@@ -100,9 +121,10 @@ function readListen(raw) {
   num('maxSeg', 0.8, 15);
 
   if (src.pollMs !== undefined) {
-    const v = clampInt(src.pollMs, 50, 1000, out.pollMs);
-    if (v !== out.pollMs) bad.push('listen.pollMs 必须是 50–1000 的整数（毫秒）');
-    out.pollMs = v;
+    const n = Number(src.pollMs);
+    const ok = Number.isInteger(n) && n >= 50 && n <= 1000;
+    if (!ok) bad.push('listen.pollMs 必须是 50–1000 的整数（毫秒）');
+    out.pollMs = ok ? n : out.pollMs;
   }
   // 快照间隔必须小于强切上限，否则一遍都发不出来
   if (out.live && out.liveStep > out.maxSeg) {
@@ -178,3 +200,109 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     warnings,
   };
 }
+
+// ------------------------------------------------------------------ 写回（设置面板）
+
+/** 面板能改的顶层键。`idleStopMs` 是派生的，不在这里 —— 传进来会被拒。 */
+export const WRITABLE_KEYS = Object.freeze([
+  'maxAutonomousWakes', 'idleStopMin', 'defaultPace', 'speechPacing', 'listen',
+]);
+
+/** `listen` 段能改的键。 */
+export const WRITABLE_LISTEN_KEYS = Object.freeze([
+  'prefer', 'live', 'liveMin', 'liveStep', 'silence', 'maxSeg', 'pollMs',
+]);
+
+/**
+ * 读原始 JSON（不做校验）。`readTuning` 内部那份是内联的，写回需要一个"原样"的副本 ——
+ * 合并时要保住用户手写、而面板不认识的键，所以不能拿 `readTuning` 的返回值当底稿
+ * （那个已经被夹过、也只含九个字段）。
+ */
+function readRaw(env, readFile) {
+  const path = tuningPath(env);
+  try {
+    const raw = JSON.parse(readFile(path, 'utf8')) ?? {};
+    return (typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * 把设置面板提交的值合并进 `see-now.json`。
+ *
+ * 三条规矩，都是为了"配置不该把插件弄挂"这一条：
+ *
+ * 1. **只动白名单里的键**。文件里其它键原样保留 —— 用户手写过什么、以后版本加了什么，
+ *    面板不认识就不该碰。认不出来的键直接拒，而不是静默丢掉。
+ * 2. **校验复用 `readTuning`，不另写一套**。把合并后的内容喂给它，如果警告**变多**了，
+ *    说明是这次提交引入的，整份拒写并把原话返回前端。用"变多"而不是"有没有"，
+ *    是因为文件里可能本来就躺着一处历史错误，不该因此让面板永远存不进去。
+ * 3. **只写用户提交过的键**。改一个值就只多一行，不把九个键全刷一遍 ——
+ *    否则用户改完打开文件，会看到一堆他从没设过的默认值。
+ *
+ * @param {object} patch 面板提交的片段，例如 `{ idleStopMin: 10, listen: { silence: 0.4 } }`
+ * @returns {{ok:boolean, path:string, values:object, warnings:string[], rejected:string[]}}
+ *   - `values`：规范化之后**实际写进去**的那几个键（越界的值进不来，见规矩 2）
+ *   - `warnings`：读取时文件里本来就有的警告（给面板做提醒，不阻塞保存）
+ *   - `rejected`：本次被拒的原因，直接显示给用户
+ */
+export function writeTuning(patch, {
+  env = process.env, readFile = readFileSync, writeFile = writeFileSync, mkdir = mkdirSync,
+} = {}) {
+  const path = tuningPath(env);
+  const fail = (...rejected) => ({ ok: false, path, values: {}, warnings: [], rejected });
+
+  if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+    return fail('提交的内容必须是 JSON 对象');
+  }
+  const unknown = Object.keys(patch).filter((k) => !WRITABLE_KEYS.includes(k));
+  if (unknown.length) return fail(`面板不认识这些字段：${unknown.join(', ')}`);
+
+  const raw = readRaw(env, readFile);
+  const next = { ...raw, ...patch };
+
+  if (patch.listen !== undefined) {
+    const src = patch.listen;
+    if (src === null || typeof src !== 'object' || Array.isArray(src)) {
+      return fail('listen 必须是一个对象');
+    }
+    const bad = Object.keys(src).filter((k) => !WRITABLE_LISTEN_KEYS.includes(k));
+    if (bad.length) return fail(`listen 里不认识这些字段：${bad.join(', ')}`);
+    const base = (raw.listen && typeof raw.listen === 'object' && !Array.isArray(raw.listen)) ? raw.listen : {};
+    next.listen = { ...base, ...src };
+  }
+
+  // 规矩 2：拿他自己的校验器判，警告变多就是这次提交的问题
+  const before = readTuning({ env, readFile });
+  const after = readTuning({ env, readFile: () => JSON.stringify(next) });
+  const added = after.warnings.filter((w) => !before.warnings.includes(w));
+  if (added.length) return { ok: false, path, values: {}, warnings: before.warnings, rejected: added };
+
+  // 规矩 3：只写提交过的键，值取规范化之后的
+  const values = {};
+  for (const key of Object.keys(patch)) {
+    if (key !== 'listen') values[key] = after[key];
+  }
+  if (patch.listen !== undefined) {
+    values.listen = {};
+    for (const key of Object.keys(patch.listen)) values.listen[key] = after.listen[key];
+  }
+
+  const out = { ...raw, ...values };
+  if (values.listen !== undefined) {
+    const base = (raw.listen && typeof raw.listen === 'object' && !Array.isArray(raw.listen)) ? raw.listen : {};
+    out.listen = { ...base, ...values.listen };
+  }
+
+  try {
+    mkdir(dirname(path), { recursive: true });
+    writeFile(path, `${JSON.stringify(out, null, 2)}\n`, 'utf8');
+  } catch (err) {
+    // 写不进去要说清楚是哪一步，否则用户看到的是"保存没反应"
+    return fail(`写 ${path} 失败：${err?.message ?? err}`);
+  }
+
+  return { ok: true, path, values, warnings: before.warnings, rejected: [] };
+}
+
