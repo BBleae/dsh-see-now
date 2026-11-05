@@ -58,7 +58,34 @@ export const STRATEGIES = Object.freeze({
   single: { fixed: 1, label: '整幅' },
 });
 
-export function applyStrategy(tiers, strategy = 'native') {
+/**
+ * 逐档查表：档位 1..8 → 目标档位。
+ *
+ * 表里的坏值（非数字、越界）**逐项忽略，保留原档位** —— 一份手改坏的
+ * `tierMap` 不该把整个画面搞崩，最多是那几档没按预期排。
+ */
+function applyTierMap(tiers, map) {
+  const table = Array.isArray(map) ? map : null;
+  if (!table) return tiers.map((t) => Number(t));
+  return tiers.map((t) => {
+    const n = Number(t);
+    // 0 = 自由尺寸的补位帧，不参与映射（它本来就"占剩下的地方"）
+    if (!Number.isFinite(n) || n === 0) return n;
+    const idx = Math.max(TIER_MIN, Math.min(TIER_MAX, Math.round(n))) - 1;
+    const v = Number(table[idx]);
+    return Number.isFinite(v) ? Math.max(TIER_MIN, Math.min(TIER_MAX, Math.round(v))) : n;
+  });
+}
+
+/**
+ * 档位映射。
+ *
+ * @param {number[]} tiers 原始档位（1..8，0 = 自由尺寸补位帧）
+ * @param {string} strategy `native` / `full` / `compact` / `single` / **`custom`**
+ * @param {number[]|null} map 只在 `custom` 时用：8 个数，第 i 个是"档位 i+1 映射到哪一档"
+ */
+export function applyStrategy(tiers, strategy = 'native', map = null) {
+  if (strategy === 'custom') return applyTierMap(tiers, map);
   const s = STRATEGIES[strategy] ?? STRATEGIES.native;
   // 固定档：不管原来算出来是几档，全部压到同一档
   if (s.fixed) return tiers.map((t) => (Number(t) === 0 ? 0 : s.fixed));
@@ -68,6 +95,9 @@ export function applyStrategy(tiers, strategy = 'native') {
     return Math.max(TIER_MIN, Math.min(TIER_MAX, v));
   });
 }
+
+/** 默认映射：恒等（档位 i → i）。设置页"自定义"的初始值就是这个。 */
+export const DEFAULT_TIER_MAP = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8]);
 
 export function createTiers({
   fps = 12, dtFrames = 12, smoothFrames = 6,

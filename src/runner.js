@@ -189,6 +189,14 @@ export function createRunner({
    * 模型还是得一轮一轮来。
    */
   wakeBatch = 1,
+  /**
+   * 全局档位映射（`~/.dsh/see-now.json` 的 `tierStyle` / `tierMap`）。
+   *
+   * 只在**调用方没显式传** `opts.strategy` 时生效 —— 逐帧模式（`SCENE_OPTS`）必须
+   * 把整幅写死，不能被用户设的"更小"打回 1/4 格子。
+   */
+  tierStyle = 'native',
+  tierMap = null,
 } = {}) {
   let pipeline = null;   // 当前（或刚停的）引擎 —— 停采集后仍留着，好把队列里剩的图发完
   let running = false;
@@ -492,6 +500,12 @@ export function createRunner({
        * 第 3 张出来时前两张已经被挤掉了，`takeSheets()` 只能拿到一张。
        */
       queueDepth: Math.max(1, Math.trunc(wakeBatch) || 1),
+      /**
+       * 档位映射：调用方指定优先，否则用设置页里的全局值。
+       * `opts.strategy` 单独传了（比如逐帧模式的 `'single'`）就完全不动它。
+       */
+      strategy: opts.strategy ?? tierStyle,
+      tierMap: opts.tierMap ?? tierMap,
       // 音量条：直接问听声音那条链要 —— 那边已经在算 RMS 了（断句要用），
       // 这里只是把它按时间窗取出来画成柱子，**不额外解码一次音频**。
       audio: { levels: (a, b) => listener.levelsBetween(a, b) },

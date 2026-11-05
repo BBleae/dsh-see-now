@@ -33,6 +33,17 @@ export const TUNING_DEFAULTS = Object.freeze({
    * 等于又变回三轮。所以 `takeSheets()` 必须把队列里攒下的一次全给出去。
    */
   wakeBatch: 1,
+  /**
+   * 档位映射：这张图里每帧占多大格子。
+   *
+   * `native` 按密度算出来的原样；`full` 整体降一档（格子更大）；`compact` 整体升一档
+   * （格子更小）；`custom` 走 `tierMap` 逐档查表。
+   *
+   * 以前这条只能用 `watch({opts:{strategy}})` 传，而模型从来不会传 —— 等于没得配。
+   */
+  tierStyle: 'native',
+  /** `custom` 时的查表：第 i 个数 = "档位 i+1 映射到哪一档"。默认恒等。 */
+  tierMap: [1, 2, 3, 4, 5, 6, 7, 8],
   // 「上一句说多久，就等多久再叫下一轮」（见 pacing.js）。false = 退回固定 8 秒。
   speechPacing: true,
   /**
@@ -89,6 +100,15 @@ export const PACES_KEYS = Object.freeze(['calm', 'normal', 'dense', 'game-econom
  * `host` / `local` 是严格的（找不到就明说没有，不换一个顶上）。
  */
 export const PREFER_KEYS = Object.freeze(['auto', 'host', 'local']);
+
+/**
+ * 档位映射的四种取法。
+ *
+ * `native` / `full` / `compact` 和 `tiers.js` 的 `STRATEGIES` 同名，
+ * `custom` 是设置页展开八个下拉的那一档（走 `tierMap`）。
+ * 注意 `single`（逐帧模式固定整幅）**不在这里**：它是逐帧模式的内部约定，不该被用户改。
+ */
+export const TIER_STYLES = Object.freeze(['native', 'full', 'compact', 'custom']);
 
 function dshHome(env) {
   return env.DSH_HOME || join(env.USERPROFILE || env.HOME || homedir(), '.dsh');
@@ -192,6 +212,34 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     warnings.push('wakeBatch 必须是 1–4 的整数（攒够几张图才交），已用默认 1');
   }
 
+  let tierStyle = TUNING_DEFAULTS.tierStyle;
+  if (raw.tierStyle !== undefined) {
+    const want = String(raw.tierStyle ?? '').trim();
+    if (TIER_STYLES.includes(want)) tierStyle = want;
+    else warnings.push(`tierStyle 只能是 ${TIER_STYLES.join(' / ')}，已用默认 native`);
+  }
+
+  /**
+   * 逐档映射。**坏值逐项忽略，不整份作废** —— 用户手改 `see-now.json` 时写错一个数字，
+   * 不该让另外 7 档也跟着回到默认。长度不足按默认补齐，超出截断。
+   */
+  let tierMap = [...TUNING_DEFAULTS.tierMap];
+  if (raw.tierMap !== undefined) {
+    if (Array.isArray(raw.tierMap)) {
+      // 数组没有"只写想改的那一项"这回事 —— 少写就是漏配，说清楚比默默补齐好
+      if (raw.tierMap.length !== 8) {
+        warnings.push(`tierMap 必须是 8 个数（现在是 ${raw.tierMap.length} 个），缺的按默认补齐`);
+      }
+      for (let i = 0; i < 8; i += 1) {
+        const n = Number(raw.tierMap[i]);
+        if (Number.isInteger(n) && n >= 1 && n <= 8) tierMap[i] = n;
+        else if (raw.tierMap[i] !== undefined) warnings.push(`tierMap[${i + 1}] 必须是 1–8 的整数，已用 ${i + 1}`);
+      }
+    } else {
+      warnings.push('tierMap 必须是 8 个数字的数组，已用默认映射');
+    }
+  }
+
   let defaultPace = TUNING_DEFAULTS.defaultPace;
   if (typeof raw.defaultPace === 'string' && raw.defaultPace.trim()) {
     const want = raw.defaultPace.trim();
@@ -221,6 +269,8 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     idleStopMin,
     wakeBatch,
     idleStopMs: idleStopMin * 60 * 1000,
+    tierStyle,
+    tierMap,
     defaultPace,
     speechPacing,
     changeLog,
@@ -234,7 +284,8 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
 
 /** 面板能改的顶层键。`idleStopMs` 是派生的，不在这里 —— 传进来会被拒。 */
 export const WRITABLE_KEYS = Object.freeze([
-  'maxAutonomousWakes', 'idleStopMin', 'wakeBatch', 'defaultPace', 'speechPacing', 'listen',
+  'maxAutonomousWakes', 'idleStopMin', 'wakeBatch', 'tierStyle', 'tierMap',
+  'defaultPace', 'speechPacing', 'listen',
 ]);
 
 /** `listen` 段能改的键。 */

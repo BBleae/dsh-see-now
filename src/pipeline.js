@@ -241,6 +241,11 @@ export const DEFAULTS = Object.freeze({
   smoothFrames: 6,
   strategy: 'native',
   /**
+   * `strategy: 'custom'` 时的查表（档位 1..8 → 目标档位）。
+   * 其它策略忽略它 —— 那份表只对"逐档自定义"有意义。
+   */
+  tierMap: null,
+  /**
    * **积分假切点的档位加成**（照抄 storyboard 的 `MARK_BOOST`，但加了帧数门槛）。
    *
    * 真切点是"换镜头"，假切点是"这一段一直在变、攒够了才切"——后者没有硬边界，
@@ -446,7 +451,7 @@ export function createPipeline(opts = {}) {
     // 这里**只按密度给档位**，不加假切点加成 —— 加成要等出图时按最终帧数决定
     // （见 DEFAULTS.markBoost 的实测表）。keep 阶段用它判断"装不装得下"，
     // 用不带加成（更大）的档位是保守的：判装不下而实际装得下，顶多多开一张，不会丢帧。
-    const tier = applyStrategy([lv], o.strategy)[0];
+    const tier = applyStrategy([lv], o.strategy, o.tierMap)[0];
     if (frames.length === 0) sheetStart = entry.t;
     // `score` / `mcRect` 一起带下去：出图时要拿它们写变化日志（见 `noteChange`）。
     // 以前只留在 `log` 里，而 `log` 是离线标定用的全量记录、不会交付。
@@ -736,7 +741,7 @@ export function createPipeline(opts = {}) {
       const raw = via === 'mark' ? o.markBoost : via === 'floor' ? o.floorBoost : 0;
       return Math.max(0, Number(raw) || 0);
     };
-    return batch.map((f) => applyStrategy([Math.min(8, f.level + boostFor(f.via))], o.strategy)[0]);
+    return batch.map((f) => applyStrategy([Math.min(8, f.level + boostFor(f.via))], o.strategy, o.tierMap)[0]);
   }
 
   /** 停住的大面积前景：外圈还是旧背景，且背景变化不到整片。 */
@@ -962,7 +967,7 @@ export function createPipeline(opts = {}) {
         if (!frames.length) sheetStart = lastSeen.t;
         frames.push({
           t: lastSeen.t, buf: lastSeen.buf, via: why === 'user' ? 'user' : 'now', level: lv,
-          tier: applyStrategy([lv], o.strategy)[0],
+          tier: applyStrategy([lv], o.strategy, o.tierMap)[0],
           // 「此刻那一帧」也要带 wall —— 漏了它，`sheet.wallTo` 会是 null，
           // 台词就按 `Date.now()` 兜底，时间窗对不上（实测最后一张的台词取不到）
           wall: lastSeen.wall ?? Date.now(),

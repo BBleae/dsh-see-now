@@ -513,6 +513,9 @@ async function registerAll(ctx) {
     changeLog: tuning.changeLog,
     // 超省模式：攒够几张图才交（`wakeBatch`，默认 1 = 现在这样）
     wakeBatch: tuning.wakeBatch,
+    // 档位映射：这张图里每帧占多大格子（设置页「高级」里那项）
+    tierStyle: tuning.tierStyle,
+    tierMap: tuning.tierMap,
   });
   disposers.push(() => runner.stop());
 

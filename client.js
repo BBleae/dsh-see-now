@@ -108,6 +108,18 @@ window.__ModuleLoader__.load({
       'field.silence.hint': '单位秒。0.35 是人喘口气的下限 —— 再低会把一句话从中间切开，后半截被当成新的一句。',
       'field.maxSeg': '一句最长多久',
       'field.maxSeg.hint': '单位秒。说到这么久还没停就强行断开，否则一句话一直不断，字幕永远出不来。',
+      'field.tierStyle': '档位映射（每帧占多大格子）',
+      'field.tierStyle.hint': '档位 1 最大（一格占满）、8 最小（1/8 边）。'
+        + '原生 = 按画面变化密度算出来什么样就什么样；更大 / 更小 = 整体挪一档；'
+        + '自定义 = 下面逐档指定。只影响"这张图里每帧多大"，不改抓哪几帧。',
+      'tier.native': '原生 —— 按变化密度算（默认）',
+      'tier.full': '更大 —— 整体降一档',
+      'tier.compact': '更小 —— 整体升一档',
+      'tier.custom': '自定义 —— 逐档指定',
+      'field.tierMap': '逐档映射',
+      'field.tierMap.hint': '左边是算出来的档位，右边选它实际落到哪一档。'
+        + '想把"1 档"也缩小就把它改成 2；想让 8 档别那么碎就改成 6。',
+      'tier.from': '档',
       'field.wakes': '自主唤醒上限',
       'field.wakes.hint': '你一句话都没说，它自己最多醒几次就收工。',
       'field.live': '说长句时先出半截字幕',
@@ -257,6 +269,11 @@ window.__ModuleLoader__.load({
           ? draft[key]
           : num(draft[key]);
       }
+      if (draft.tierStyle !== values.tierStyle) patch.tierStyle = String(draft.tierStyle ?? '');
+      // 数组比引用永远不等，只能比内容；顺序有意义（第 i 个 = 档位 i+1）
+      if (JSON.stringify(draft.tierMap ?? null) !== JSON.stringify(values.tierMap ?? null)) {
+        patch.tierMap = (Array.isArray(draft.tierMap) ? draft.tierMap : []).map((n) => num(n));
+      }
       const listen = {};
       for (const key of ['prefer', 'live', 'liveMin', 'liveStep', 'silence', 'maxSeg', 'pollMs']) {
         if (draft[key] === values.listen[key]) continue;
@@ -344,6 +361,19 @@ window.__ModuleLoader__.load({
         setSavedAt(0);
         setRejected([]);
         setDraft(current => ({ ...current, [key]: value }));
+      };
+
+      /**
+       * 改逐档映射里的一项。
+       *
+       * 必须**整份数组换新**（不能原地改）：`patchOf` 靠比较两份 draft 来算补丁，
+       * 原地改会让"改过"和"没改"看起来一样，那一项就永远提交不上去。
+       */
+      const setTierMap = (i, v) => {
+        const base = Array.isArray(draft?.tierMap) ? draft.tierMap : [1, 2, 3, 4, 5, 6, 7, 8];
+        const next = base.map((x) => Number(x));
+        next[i] = Number(v);
+        set('tierMap', next);
       };
 
       const save = async () => {
@@ -561,10 +591,37 @@ window.__ModuleLoader__.load({
         h('details', { className: 'sn_det sn_card' },
           h('summary', {}, t('sec.advanced')),
           h('div', { className: 'sn_grid', style: { marginTop: '12px' } },
+            select('tierStyle', 'field.tierStyle', 'field.tierStyle.hint', [
+              ['native', t('tier.native')],
+              ['full', t('tier.full')],
+              ['compact', t('tier.compact')],
+              ['custom', t('tier.custom')],
+            ]),
             field('maxAutonomousWakes', 'field.wakes', 'field.wakes.hint', { min: 1, max: 200, step: 1 }),
             field('liveMin', 'field.liveMin', 'field.liveMin.hint', { min: 0.8, max: 6, step: 0.1 }),
             field('liveStep', 'field.liveStep', 'field.liveStep.hint', { min: 0.4, max: 4, step: 0.1 }),
             field('pollMs', 'field.pollMs', 'field.pollMs.hint', { min: 50, max: 1000, step: 10 })),
+
+          /**
+           * 选了「自定义」才展开这 8 个下拉。
+           *
+           * 左边是**算出来的档位**，右边选它实际落到哪一档 —— 不是"把第 i 格画多大"，
+           * 是"这一档的帧应该长多大"。两者容易搞混，所以第一列写 `i →` 而不是"第 i 档"。
+           */
+          draft.tierStyle === 'custom'
+            ? h('div', { className: 'sn_grid', style: { marginTop: '12px' } },
+              h('span', { className: 'sn_label', style: { gridColumn: '1 / -1' } }, t('field.tierMap')),
+              [0, 1, 2, 3, 4, 5, 6, 7].map((i) => h('label', { className: 'sn_field', key: `tm${i}` },
+                h('span', { className: 'sn_label' }, `${i + 1} →`),
+                h('select', {
+                  className: 'sn_select',
+                  value: String(draft.tierMap?.[i] ?? i + 1),
+                  onChange: (e) => setTierMap(i, e.target.value),
+                }, [1, 2, 3, 4, 5, 6, 7, 8].map((n) => h('option', { key: n, value: String(n) }, String(n)))))))
+            : null,
+          draft.tierStyle === 'custom'
+            ? h('span', { className: 'sn_hint' }, t('field.tierMap.hint'))
+            : null,
           h('label', { className: 'sn_check', style: { marginTop: '12px' } },
             h('input', {
               type: 'checkbox',
