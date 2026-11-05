@@ -10,6 +10,7 @@ import { createRunner, SCENE_OPTS, PACES, DEFAULT_PACE } from './runner.js';
 import { resolveFfmpeg } from './binaries.js';
 import { parseRegion } from './layout.js';
 import { seeNowToolSpec, TOOL_TIMEOUT_MS, DEFAULT_BLOCK_SEC, TOOL_NAME } from './tool-spec.js';
+import { SEE_NOW_HELP } from './help.js';
 import { interjectNote, replyReminder, clearInterjected } from './interject.js';
 import { appendSpoken, appendChat, lastSaidNote, lastSaidText, chatDir } from './chat.js';
 import { ensureConfiguredVoice, detachAdapters, attachedAdapters, configuredVoiceAdapter, lastVoiceError } from './voice.js';
@@ -795,6 +796,17 @@ async function registerAll(ctx) {
       }
 
       /**
+       * `help` —— 手册按需取。
+       *
+       * 工具契约是**每一轮都要重发**的常驻文案，所以"为什么/多少 token/实测数字"这类
+       * 一辈子问不了一次的东西搬到了 `help.js`，模型不确定时自己调一次。
+       * 放在 `say` 之后、采集之前：`help` 不该启动采集，也别让用户看不见它附带的那句话。
+       */
+      if (action === 'help') {
+        return { text: SEE_NOW_HELP, meta: { action } };
+      }
+
+      /**
        * 模式开关（粘性）。
        *
        * 变了就必须**把管线拆掉重开**：`maxFrames` / `strategy` 是建管线时定死的参数，
@@ -1199,7 +1211,7 @@ async function registerAll(ctx) {
         };
       }
 
-      return { text: `未知 action: ${action}（可用 watch / peek / start / stop / status）`, meta: { action } };
+      return { text: `未知 action: ${action}（可用 watch / peek / start / stop / status / window / region / help）`, meta: { action } };
     },
   };
 

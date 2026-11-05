@@ -325,7 +325,7 @@ macOS 自带一个：`examples/voice-say-mac.mjs`，走系统的 `say`，音色�
 
 | 参数 | 说明 |
 |---|---|
-| `action` | `watch`（默认，阻塞取图）/ `peek` / `start` / `stop` / `status` / `window` / `region` |
+| `action` | `watch`（默认，阻塞取图）/ `peek` / `start` / `stop` / `status` / `window` / `region` / `help` |
 | `show` | 配 `action:"window"`：`true` 把悬浮窗叫回来，`false` 藏起来，不传只报状态 |
 | `region` | 只看屏幕上一块：`"x,y,w,h"`（屏幕物理像素），或 `"off"` 取消。**一般不用手填** —— 说"框这块"让它自己框，见下 |
 | `say` | **唯一能进悬浮窗、能被念出来的通道**。普通回复不进气泡，但会被记进小窗的对话记录 |
@@ -335,6 +335,11 @@ macOS 自带一个：`examples/voice-say-mac.mjs`，走系统的 `say`，音色�
 | `seconds` | `watch` 的阻塞上限（默认 300，封顶 860）。只是上限，攒够一张就提前返回 |
 | `minFrames` | 少于这么多帧的图就别给我了（省 token） |
 | `source` / `path` / `realtime` | 采集源：屏幕 / 摄像头 / 回放一个视频文件 |
+
+> `see_now({action:"help"})` 返回一份完整手册（各节奏的具体门槛、档位换算、区域成本、
+> `status` 每行什么意思、变化日志怎么用）。**工具契约里只留"什么时候调、默认值是多少"**：
+> description 是每一轮请求都要重发的常驻文案，"为什么/多少 token/实测数字"搬进手册现取，
+> 不确定时调一次 `help` 就行。
 
 ### 只看一块（`region` / `action:"region"`）
 
