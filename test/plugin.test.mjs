@@ -75,6 +75,20 @@ test('未知 action 列可用项，而不是静默什么都不做', { skip }, as
   assert.match(v.text, /watch/);
 });
 
+test('action:"help" 给手册，且不启动采集（它是常驻文案瘦身的那一半）', { skip }, async () => {
+  process.env.DSH_TOOLS_PATH = TOOLS_PATH;
+  const mod = await import('../src/index.js');
+  const { ctx, registered, saved } = fakeCtx();
+  await mod.apply(ctx);
+  const v = await registered[0].execute({ action: 'help' });
+  // 契约里删掉的那些"为什么/多少 token"必须在这里找得到，否则就是真丢了
+  assert.match(v.text, /手册/);
+  assert.match(v.text, /pace/);
+  assert.match(v.text, /变化日志/);
+  assert.equal(saved.length, 0, 'help 不能提交图片');
+  assert.doesNotMatch(v.text, /没在采集/, 'help 不该去碰采集状态');
+});
+
 /** 递归找出 undefined / 非有限数 —— 宿主就是拿这个判 "not lossless JSON" 的 */
 function badJson(v, path = '$') {
   if (v === undefined) return `${path} is undefined`;
