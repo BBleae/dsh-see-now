@@ -270,26 +270,18 @@ export function hasTkinter(python) {
 }
 
 /**
- * 商店版的真实路径。
+ * **不去扫 `%LOCALAPPDATA%\Microsoft\WindowsApps`**（这里以前有一个 `storePython()`）。
  *
- * 坑：`WindowsApps\PythonSoftwareFoundation.Python.3.13_*` 下的 `python.exe` 是
- * **App Execution Alias（重解析点）**，`existsSync()` 对它返回 false，
- * 但 `readdirSync()` 能列出、直接 spawn 也能跑。所以这里只认目录列举，不再二次探测。
+ * 那里的 `PythonSoftwareFoundation.Python.*` 是 **App Execution Alias**（重解析点）：
+ * `existsSync()` 对它返回 false，`readdirSync()` 却列得出来，而 Store 包没完整注册时
+ * spawn 它**会拉起微软商店**——用户眼前突然跳一个窗口，比"找不到 python"糟得多。
+ *
+ * 更坏的是它不会立刻退出，`openWindow()` 的 `settleMs` 探测会把它当成"窗口起来了"。
+ * 社区实测（Win10 19045 / i7-8750H）就是被这条坑到的。
+ *
+ * 所以候选只留 PATH 和显式配置。Store 版用户请用 `DSH_SEE_PYTHON` 指向真实解释器
+ * （`py -0p` 能列出来）。
  */
-function storePython() {
-  const dir = join(process.env.LOCALAPPDATA ?? '', 'Microsoft', 'WindowsApps');
-  const out = [];
-  try {
-    for (const name of readdirSync(dir)) {
-      if (!/^PythonSoftwareFoundation\.Python\.\d/.test(name)) continue;
-      for (const exe of ['pythonw.exe', 'python.exe']) {
-        out.push(join(dir, name, exe));
-      }
-    }
-  } catch { /* 读不了目录就算了 */ }
-  return out;
-}
-
 export function pythonCandidates() {
   const cfg = seeConfig();
   const list = [];
@@ -297,7 +289,7 @@ export function pythonCandidates() {
     if (c) list.push(c);
   }
   if (process.platform === 'win32') {
-    list.push('pythonw.exe', 'python.exe', ...storePython());
+    list.push('pythonw.exe', 'python.exe');
   } else {
     list.push('python3', 'python');
   }
