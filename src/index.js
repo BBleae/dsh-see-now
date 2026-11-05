@@ -1043,6 +1043,10 @@ async function registerAll(ctx) {
             + `\n循环：${loopLine(lp)}`
             // 队列：手上有没有攒着没取走的图 —— `pending` 一直是 1 时模型不会收到新图，只会一直被叫
             + `\n队列：${s.pending ? `有 ${s.pending} 张没取走（出图序号 ${s.sheets}）` : '空'}`
+            // 预留：**"叫醒了却没图"这两个数一起看** —— `pending 空 + 预留有` 是正常的
+            // （图已经叫醒、等人来 peek）；两个都空而模型说没图，才是真的空手
+            + `${s.reserved ? ` · 预留 1 张（${s.reserved.ageSec}s 前叫醒的，等 peek 取）` : ''}`
+            + `${s.takes?.peekEmpty ? ` · peek 空过 ${s.takes.peekEmpty}/${s.takes.peek} 次` : ''}`
             // 窗口：**"它在看但我什么都没看到"时第一个要看的就是这一行**
             + `\n${windowLine()}`
             + (s.window?.ok === false && s.window?.reason ? `\n  ↳ 开窗失败：${s.window.reason}` : '')

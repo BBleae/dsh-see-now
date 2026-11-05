@@ -454,8 +454,30 @@ export function startLoop({
           + '调 `see_now({action:"peek"})` 拿图看一眼，然后：值得说就用 `say` 说一句，'
           + '不值得说就什么都别做（沉默是允许的，别为了刷存在感而说话）。'
           + lastSaidHint();
+
+      /**
+       * ⑤.2 **先把这一张占住，再叫醒。**
+       *
+       * 文案让模型"调 `peek` 拿这一张"，可从叫醒到它真的 peek 隔着 1~3 秒
+       * （宿主冷启动更久）。这期间只要有一条路径把队列取空（另一条 `watch`、
+       * 插话截断、换管线），模型醒了就是空手 —— 社区实报的"110 秒叫了 6 次、
+       * 多数唤醒没带图"就是这么来的（图确实出了，出在了别人手里）。
+       *
+       * 占住之后这张已经不在队列里，`peek` 优先给预留的（见 `runner.reserveSheet`）。
+       * 占不到 = 这一张在叫醒之前就被取走了，**这一拍不叫** —— 叫醒一个空手的人
+       * 只会让它白跑一轮、还看不见东西，比不叫更糟。
+       *
+       * ⚠️ 这里挪的只是**一张已经拼好的图**：采集、打分、出图一概照旧，
+       * "停的只是叫醒，采集和打分从不停"这条不变量没动。
+       */
+      const held = typeof runner.reserveSheet === 'function' ? runner.reserveSheet() : true;
+      if (!held) return;
+
       const ok = await wake(text);
       if (ok) { lastKey = key; wakesSinceUser += 1; }
+      // 叫醒失败要把预留放回队列 —— 不然这一张就被我们自己吞了
+      // （下一拍 `key` 没变还会重试，所以**不能**记账成"叫过了"）。
+      else if (typeof runner.releaseSheet === 'function') runner.releaseSheet();
     },
   });
 

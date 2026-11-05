@@ -173,6 +173,14 @@ export function createRunner({
   listen = null,
   /** `~/.dsh/see-now.json` 的 `changeLog`：交付时附「这期间屏幕怎么动的」摘要（默认关） */
   changeLog = false,
+  /**
+   * 叫醒时预留的那张图最多留多久（秒）。
+   *
+   * 模型压根没 `peek`（比如它回了一句话就收工）时，预留不能被无限占着 ——
+   * 否则下一次出图会被"旧的那张还在手里"顶掉，等于少给一张。60 秒够覆盖
+   * "宿主冷启动 + 模型思考"的最坏情况，又远短于"用户已经不看这一屏了"。
+   */
+  reserveSec = 60,
 } = {}) {
   let pipeline = null;   // 当前（或刚停的）引擎 —— 停采集后仍留着，好把队列里剩的图发完
   let running = false;
@@ -185,6 +193,41 @@ export function createRunner({
   let graceTimer = null;
   let busy = false;
   let quality = DEFAULT_QUALITY;
+
+  /**
+   * **叫醒时预留的那一张**（`{ sheet, at, seq }`）。
+   *
+   * ## 为什么必须有这一层
+   *
+   * 唤醒文案让模型"调 `peek` 拿这一张"，但一条链上有三个时间差：
+   *
+   * ```
+   * loop 看到 pending=1 ──▶ reserveSheet() ──▶ wake() 1~3 秒 ──▶ 模型 peek
+   *                          ↑ 图从这里开始就不在队列里了
+   * ```
+   *
+   * 社区实报（0.0.8，逐场景 + dense，110 秒叫了 6 次）：**多数唤醒之后 peek 拿到空**。
+   * 图确实出了（叫醒靠出图序号驱动），问题在"出图"和"取图"之间隔着 1~3 秒，
+   * 这期间任何一条路径把队列取空（另一条 `watch`、`flushNow` 截断、换管线），
+   * 模型醒了就是空手。
+   *
+   * 所以：**叫醒前先把这一张从队列里抢到手里**。抢出来之后：
+   *   - `peek` 优先给预留的（`takeSheet`），不管队列被别人怎么折腾；
+   *   - `watch` 也走同一个口（它要的本来就是"最早攒好的那张"）；
+   *   - 叫醒失败就 `releaseSheet()` 放回队首 —— 不能因为叫不醒就把图弄丢。
+   *
+   * ⚠️ 这**不影响**"采集和打分从不停"：预留只是挪一张已经拼好的图，
+   * 不参与采集、不触发采集、也不改变 `queueDepth`（队列里照样只留最新的一张）。
+   */
+  let reserved = null;
+
+  /**
+   * 取图记账：`peek` 取走几张、空了几次、其中几次是预留给的。
+   *
+   * 没有这三个数，"叫醒了却没图"只能靠猜（这次就是猜了三轮才定位到"图被别的路径取走了"）。
+   * 它们出现在 `see_now({action:"status"})` 的 meta 里，下次复现直接看数。
+   */
+  const takes = { peek: 0, peekEmpty: 0, watch: 0, watchEmpty: 0, reserved: 0 };
 
   /**
    * 听声音（视频里在说什么）。**可选能力**：装不上（没有 pyaudiowpatch、没有转写服务、
@@ -225,6 +268,70 @@ export function createRunner({
     if (ch.length) sheet.changes = ch;
     return sheet;
   }
+
+  /** 丢掉预留（换管线 / 插话截断 / 已取走）。 */
+  function dropReserved() { reserved = null; }
+
+  /**
+   * **取一张排队中的图** —— `watch` 和 `peek` 唯一的取图口。
+   *
+   * 两条路径各写一句 `pipeline.take()` 的话，预留的那张永远拿不到（peek 只看队列），
+   * 等于白留。所以必须收成一个函数，顺手把"谁取的、空了几次"记下来。
+   *
+   * @param {'peek'|'watch'} [by] 记账用（不传就是内部调用，不计数）
+   */
+  function takeSheet(by) {
+    let sheet = null;
+    if (reserved) {
+      const r = reserved;
+      reserved = null;
+      // 过期就**当它不存在**：模型没来取，这张已经旧了，交给队列里更新的那张
+      if (Date.now() - r.at <= reserveSec * 1000) {
+        sheet = r.sheet;
+        takes.reserved += 1;
+      }
+    }
+    sheet ??= pipeline?.take() ?? null;
+    if (by) {
+      takes[by] += 1;
+      if (!sheet) takes[`${by}Empty`] += 1;
+    }
+    return sheet;
+  }
+
+  /**
+   * **唤醒前占住这一张**（见 `reserved` 的注释）。
+   *
+   * @returns {{seq:number, from:number, to:number, frames:number}|null}
+   *   `null` = 队列已经空了（这一张在叫醒之前就被别人取走了）——
+   *   调用方**不该叫醒**：叫醒了也是空手，那正是这次要修的病。
+   */
+  function reserveSheet() {
+    const p = pipeline;
+    const sheet = p?.take() ?? null;
+    if (!sheet) return null;
+    // 上一次预留没被取走 = 模型压根没 peek。新的一张更新，按 queueDepth 的口径让它顶掉。
+    reserved = { sheet, at: Date.now(), seq: p?.stats?.sheets ?? 0 };
+    return {
+      seq: reserved.seq,
+      from: sheet.from,
+      to: sheet.to,
+      frames: sheet.frames?.length ?? 0,
+    };
+  }
+
+  /**
+   * 叫醒失败：把预留的这张**放回队首**。
+   *
+   * 不放回去就是"图出了又没了"—— 这次是我们自己弄丢的，比被别的路径抢走更难查。
+   */
+  function releaseSheet() {
+    if (!reserved) return false;
+    const sheet = reserved.sheet;
+    reserved = null;
+    return pipeline?.restore?.(sheet) ?? false;
+  }
+
   /**
    * 建当前管线时用的**调用方参数**（不含 oneShot）。
    *
@@ -368,6 +475,8 @@ export function createRunner({
     quality = q ?? DEFAULT_QUALITY;
     frames = 0;
     lastError = null;
+    // 换了一根管道：上一根预留的图跟着作废（它属于旧管线的时间窗，交出去只会更旧）
+    dropReserved();
     pipeline = p;
     running = true;
     source = s;
@@ -625,6 +734,17 @@ export function createRunner({
           return said.map((e) => e.text).join(' / ').slice(0, 800);
         };
 
+        /**
+         * 截断出图（插话 / 冷启动首帧 / 超时兜底）。
+         *
+         * **预留的那张同时作废**：这三条路交出去的都是"此刻"，而预留的是叫醒时的那一刻 ——
+         * 留着它只会让下一次 `peek` 拿到一张比手上更旧的图。
+         */
+        const flushNow = (t = null, why = 'user') => {
+          dropReserved();
+          return pipeline?.flushNow(t, why) ?? null;
+        };
+
         /** 用这句话截断出图（插话优先于一切：不等判据、不排队） */
         const interjectNow = async (text) => {
           // 记一条待回执：下一轮工具结果里如果还没带 `say`，就把「你还没回她」顶出来。
@@ -633,7 +753,7 @@ export function createRunner({
           // 刚开采集时可能一帧都还没到（-probe 那几百毫秒）—— 用户问"这是什么"，
           // 空着手回去等于没看。最多等 0.8s 让第一帧到，再截断。
           for (let i = 0; i < 8 && pipeline && !pipeline.hasFrame; i += 1) await sleep(100);
-          const now = pipeline?.flushNow(null, 'user');
+          const now = flushNow(null, 'user');
           const waited = (Date.now() - t0) / 1000;
           return now
             ? { ok: true, sheet: attachLines(now), waited, quality, userText: text }
@@ -665,7 +785,7 @@ export function createRunner({
               const said = pollUser();
               if (said) return await interjectNow(said);
               if (pipeline?.hasFrame) {
-                const first = pipeline.flushNow(null, 'first');
+                const first = flushNow(null, 'first');
                 if (first) {
                   return {
                     ok: true, sheet: attachLines(first), waited: (Date.now() - t0) / 1000,
@@ -685,7 +805,10 @@ export function createRunner({
             // **插话优先于一切**：用户说话了就立刻截断，不等判据、不排队
             const said = pollUser();
             if (said) return await interjectNow(said);
-            const s = pipeline?.take();
+            // **走 `takeSheet` 而不是 `pipeline.take()`**：叫醒时预留的那张也在这里交付
+            // （它是队列里最早的一张，本来就该先给 `watch`）。两条路径各取各的话，
+            // 预留的那张只能在 peek 里取到，`watch` 会以为队列是空的。
+            const s = takeSheet('watch');
             if (s) {
               // **正常返回也要过 minFrames**。以前只有超时分支检查，于是
               // `minFrames: 5` 在队列先到的路径上会被无视，照样交一张 1 帧的图
@@ -705,14 +828,15 @@ export function createRunner({
                 };
               }
             }
-            if (!running && !pipeline?.pending) break;   // 采集停了，队列也空了
+            // 采集停了、队列和预留都空了 = 再等也不会有了
+            if (!running && !pipeline?.pending && !reserved) break;
             await sleep(120);
           }
         } finally {
           leaveChan();
         }
         // 到点了：手上攒的半张也算数（用户已经在等），但不够 minFrames 就不给
-        const last = pipeline?.flushNow(null, 'timeout');
+        const last = flushNow(null, 'timeout');
         if (last && last.frames.length >= minFrames) {
           return { ok: true, sheet: attachLines(last), waited: (Date.now() - t0) / 1000, partial: true, quality };
         }
@@ -742,13 +866,27 @@ export function createRunner({
      *
      * 顺便支窗（**不等它**）：走 peek 路线的会话没有 watch 的阻塞点，
      * 不在这里开窗的话，用户永远没有可以打字的入口，也就没有"关窗 = 不看了"。
+     *
+     * **先给"叫醒时预留的那张"**（`takeSheet`）：从叫醒到这一声 `peek` 隔着 1~3 秒，
+     * 这期间队列可能已经被别的路径取空了 —— 那正是"叫了 6 次、多数 peek 是空"的原因。
      */
     peek() {
-      const queued = pipeline?.take() ?? null;
+      const queued = takeSheet('peek');
       if (running) armGrace();
       if (!windowState?.ok && !windowPending) void ensureWindow();
       return attachLines(queued);
     },
+
+    /**
+     * **唤醒前占住这一张**（常驻循环专用，见 `reserved` 的注释）。
+     *
+     * `null` = 队列已经空了：这一张在叫醒之前就被取走了，**不该叫醒** ——
+     * 叫醒了也是空手，只会让模型白跑一轮还看不见东西。
+     */
+    reserveSheet,
+
+    /** 叫醒失败：把预留的那张放回队首（不然图就被我们自己弄丢了） */
+    releaseSheet,
 
     /** 常驻循环每拍续命（见 touch 的注释） */
     touch,
@@ -782,6 +920,16 @@ export function createRunner({
         idleSec: stoppedAt ? Math.round((Date.now() - stoppedAt) / 1000) : 0,
         stats: pipeline?.stats ?? null,
         pending: pipeline?.pending ?? 0,
+        // 叫醒时预留的那张还在手上没有（`peek` 会先给这张）。
+        // `pending: 0` 但这里不为空 **不是**异常：说明叫醒已经发生、图在等人来取。
+        reserved: reserved ? {
+          seq: reserved.seq,
+          ageSec: Math.round((Date.now() - reserved.at) / 1000),
+          to: reserved.sheet.to,
+        } : null,
+        // 取图记账。「叫醒了却没图」时看这三个数：`peekEmpty` 涨 = 真的是空手，
+        // 不涨而模型说没图 = 它根本没 peek（或者 peek 的不是这个会话）。
+        takes: { ...takes },
         // 出图序号（单调递增）：常驻循环靠它保证"同一张图只叫醒一次"。
         // `pending` 只说明"队列里有"，不说明"是不是新的一张"—— 模型不取的话它一直是 1。
         sheets: pipeline?.stats?.sheets ?? 0,

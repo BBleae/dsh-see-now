@@ -997,6 +997,23 @@ export function createPipeline(opts = {}) {
     },
 
     /**
+     * 把一张**刚取出来、还没交付**的图放回队首。
+     *
+     * 为什么需要它：`take()` 是"取走即清"。取出来之后如果"交付"这件事没成 ——
+     * 叫醒失败（会话没了、宿主不接）—— 这张图就凭空消失了，用户看到的是
+     * "它说有新画面，然后什么都没发生"。留一条放回去的路，才不会自己弄丢图。
+     *
+     * `queueDepth > 0` 且队列已经满了就**不放**：队列里那张更新，按 `queueDepth`
+     * 的设计宁可丢老画面（"不给模型看十几秒前的事"）。返回值告诉调用方放没放成。
+     */
+    restore(sheet) {
+      if (!sheet) return false;
+      if (o.queueDepth > 0 && sheets.length >= o.queueDepth) return false;
+      sheets.unshift(sheet);
+      return true;
+    },
+
+    /**
      * 取走自上次交付以来的变化摘要并清空（见 `noteChange`）。
      * 没开 `changeLog` 时永远是空数组 —— 调用方不用关心开关。
      */
