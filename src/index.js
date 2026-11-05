@@ -260,6 +260,35 @@ function listenLine(l) {
   return `在听（${l.backend}，累计 ${l.total} 句${last}${lag}${part}）`;
 }
 
+/** 变化区域 → 「中右」这种方位词。`box` 是 0..1 的比例（见 pipeline 的 `noteChange`）。 */
+function whereText(box) {
+  if (!box) return '';
+  const cx = (box.x0 + box.x1) / 2;
+  const cy = (box.y0 + box.y1) / 2;
+  const h = cx < 0.34 ? '左' : cx > 0.66 ? '右' : '';
+  const v = cy < 0.34 ? '上' : cy > 0.66 ? '下' : '';
+  if (!h && !v) return '中心';
+  return `${v}${h}`;
+}
+
+/**
+ * 变化日志 → 一段文本。每行是「这期间屏幕变了多少、哪里变」。
+ *
+ * 它补的正是 `queueDepth: 1` 挤掉的那些画面：模型只看到"现在"的时候，
+ * 靠它知道"刚才"。`changeLog` 关着时 `sheet.changes` 不存在，这里什么都不输出。
+ */
+function changeText(changes) {
+  if (!Array.isArray(changes) || !changes.length) return '';
+  const rows = changes.map((c) => {
+    const what = c.peak < 2 ? '静止' : c.cut ? '⚡切场景' : '变化';
+    const pos = whereText(c.box);
+    const area = c.box ? Math.round((c.box.x1 - c.box.x0) * (c.box.y1 - c.box.y0) * 100) : 0;
+    const at = c.at >= 60 ? `${Math.floor(c.at / 60)}分${Math.round(c.at % 60)}秒` : `${c.at.toFixed(1)}s`;
+    return `  ${at} · 分 ${c.peak} · ${what}${pos ? ` · ${pos}` : ''}${area ? ` ${area}%` : ''}`;
+  });
+  return `\n变化日志（${changes.length} 段；图被挤掉时只有这个）：\n${rows.join('\n')}`;
+}
+
 /** 一张图 → 模型看得懂的清单。数字都是「这张图里第几格」，不是抽象指标。 */
 function sheetText(sheet, { waited = 0, partial = false, userText = null, say = null, looping = false } = {}) {
   const { frames, from, to, why } = sheet;
@@ -296,7 +325,7 @@ function sheetText(sheet, { waited = 0, partial = false, userText = null, say = 
       + '你现在只要做一件事 —— 值得说就用 `say` 说一句，不值得说就别出声。'
       + '用户关掉悬浮窗我就停。'
     : '';
-  return `${head}\n${lines.join('\n')}${linesText(sheet)}${ask}${lastSaidNote()}${loopNote}\n（${whyText}；想看下一段就再调一次 \`see_now({action:"watch"})\`。）${replyReminder({ answered: Boolean(say) })}`;
+  return `${head}\n${lines.join('\n')}${linesText(sheet)}${changeText(sheet.changes)}${ask}${lastSaidNote()}${loopNote}\n（${whyText}；想看下一段就再调一次 \`see_now({action:"watch"})\`。）${replyReminder({ answered: Boolean(say) })}`;
 }
 
 /**
@@ -402,6 +431,8 @@ async function registerAll(ctx) {
     // 听声音要宿主 `speechToText`（社区用户那边零安装）；给不到就只降级成"没字幕"
     ctx,
     listen: tuning.listen,
+    // 变化日志（`~/.dsh/see-now.json` 的 `changeLog`，默认关）
+    changeLog: tuning.changeLog,
   });
   disposers.push(() => runner.stop());
 

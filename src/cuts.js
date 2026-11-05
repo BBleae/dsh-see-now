@@ -151,6 +151,14 @@ export function mcStats(prev, cur, { tau = 15, radius = 2 } = {}) {
     bbox: ((w * h) / n) * 255,
     fill: changed === 0 ? 0 : changed / (w * h),
     spanY: h / SCAN_H,
+    /**
+     * 变化格的包围矩形（网格坐标 0..SCAN_W / 0..SCAN_H，含端点）。`null` = 整帧没变。
+     *
+     * 取它只是为了回答「刚才**哪里**变了」—— 没有它，模型只知道"变了多少"，
+     * 不知道是右下角弹了个框还是整屏换页，回看的优先级只能瞎猜。
+     * 位置换算成比例放在交付层做（见 `pipeline.js` 的 `noteChange`）。
+     */
+    box: changed === 0 ? null : { x0: minX, y0: minY, x1: maxX, y1: maxY },
   };
 }
 
@@ -324,6 +332,7 @@ export function createScorer({
     let s = null;
     let mcScore = null;
     let mcBox = null;
+    let mcRect = null;
     let mcFill = null;
     let mcSpanY = 0;
     let bgScore = null;
@@ -344,6 +353,7 @@ export function createScorer({
       const mc = mcStats(prev, cur, { tau: mcTau, radius: gateMcRadius });
       mcScore = mc.score;
       mcBox = mc.bbox;
+      mcRect = mc.box;
       mcFill = mc.fill;
       mcSpanY = mc.spanY;
       if (scoreMode === 'mc') {
@@ -378,7 +388,7 @@ export function createScorer({
       if (refHistory.length > bgRefWindow) refHistory.shift();
     }
     return {
-      score: s, mcScore, mcBox, mcFill, mcSpanY, activeY, guardY, bgScore, bgStable, bgChanged,
+      score: s, mcScore, mcBox, mcRect, mcFill, mcSpanY, activeY, guardY, bgScore, bgStable, bgChanged,
       bgModel: bgModelOut, futureModel, prevHsv, hsv: cur,
     };
   };

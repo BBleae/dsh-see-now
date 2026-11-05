@@ -171,6 +171,8 @@ export function createRunner({
   ffmpegPath = 'ffmpeg', log = () => {}, graceSec = 60, ctx = null,
   /** 「听声音」的延迟参数（`~/.dsh/see-now.json` 的 `listen` 段，见 tuning.js） */
   listen = null,
+  /** `~/.dsh/see-now.json` 的 `changeLog`：交付时附「这期间屏幕怎么动的」摘要（默认关） */
+  changeLog = false,
 } = {}) {
   let pipeline = null;   // 当前（或刚停的）引擎 —— 停采集后仍留着，好把队列里剩的图发完
   let running = false;
@@ -214,6 +216,13 @@ export function createRunner({
     const got = listener.between(from - 400, to + 800);
     if (to > lastSheetWallTo) lastSheetWallTo = to;
     if (got.length) sheet.lines = got;
+    /**
+     * 变化日志：挂到这张图上，交付层拼进文本（见 index.js 的 `sheetText`）。
+     * `drainChanges` 取走即清 —— 同一段变化不该在下一张图里重复出现。
+     * 没开 `changeLog` 时它永远返回空数组，这里连字段都不加。
+     */
+    const ch = pipeline?.drainChanges?.() ?? [];
+    if (ch.length) sheet.changes = ch;
     return sheet;
   }
   /**
@@ -346,6 +355,8 @@ export function createRunner({
     // oneShot 由调用方（watch）决定：**只有换清晰度**时置 true（缓冲区刚扔，等攒满等于白等一个窗口）
     const p = createPipeline({
       ...opts, width: w, height: h, ...regionOpts,
+      // 变化日志是会话级偏好（配置项），不该被单次 watch 的 opts 覆盖
+      changeLog,
       // 音量条：直接问听声音那条链要 —— 那边已经在算 RMS 了（断句要用），
       // 这里只是把它按时间窗取出来画成柱子，**不额外解码一次音频**。
       audio: { levels: (a, b) => listener.levelsBetween(a, b) },

@@ -82,6 +82,14 @@ export function seeNowToolSpec() {
       + 'instead of guessing from faces. Two caveats: it is **machine-transcribed** (homophones happen — '
       + 'never quote it as an exact line), and it only appears when audio capture is available; if the '
       + 'block is missing, just work from the pictures and do not claim the video was silent.\n\n'
+      + '**Change log** (only when the user enabled `changeLog` in `~/.dsh/see-now.json`): the text may '
+      + 'carry a block starting with `变化日志`. It is one line per sheet produced since your last '
+      + 'delivery — **including sheets that were dropped before you saw them** (the queue keeps only the '
+      + 'newest one). Each line gives when, how much (0–255 change score), where (nine-grid position + '
+      + 'share of the screen) and whether a scene cut happened — it does NOT say what the screen showed. '
+      + 'Use it to judge what happened while you were thinking or acting (e.g. "the click did nothing"), '
+      + 'then look at the image for content. When the block is present, do not assume nothing happened '
+      + 'just because the current picture looks unchanged.\n\n'
       + 'If you cannot read something (small text, filenames, a menu), do NOT guess: call again with '
       + '`quality:"high"` and you get one sharp frame of the current screen in about half a second.',
     parameters: {

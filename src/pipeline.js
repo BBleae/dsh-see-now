@@ -17,7 +17,7 @@
  *    只数切点会让档位永远 1 档、一张图只放 4 帧。见 tiers.js 的推导。
  */
 
-import { bgBorderChanged, bgKeep, createScorer, scorePair } from './cuts.js';
+import { SCAN_H, SCAN_W, bgBorderChanged, bgKeep, createScorer, scorePair } from './cuts.js';
 import { createTiers, applyStrategy } from './tiers.js';
 import { solve, toRects, splitOneBin } from './pack.js';
 import { composePacked, drawAudioStrip, stripHeight } from './sheet.js';
@@ -281,6 +281,15 @@ export const DEFAULTS = Object.freeze({
   binCost: 1000,
   /** 出图队列深度。0 = 不丢（离线跑用），线上是 1：宁可丢老画面，不给模型看十几秒前的事。 */
   queueDepth: 1,
+  /**
+   * 变化日志：交付时在图下面附一段「这期间屏幕怎么动的」（时间/变化分/方位）。
+   *
+   * 默认关 —— 它给交付文本加约 100 token，属于"按需打开"的能力，不该改所有人的
+   * 默认成本。`queueDepth: 1` 挤掉的画面恰恰是这条日志唯一能补回来的东西。
+   */
+  changeLog: false,
+  /** 变化日志最多留多少条（超出丢最旧）。60 条 ≈ normal 档十几分钟。 */
+  changeLogMax: 60,
   /** 只发一帧就截断。刚开/刚换清晰度时用：让模型马上拿到"现在是什么"，不用等攒满一张。 */
   oneShot: false,
   /**
@@ -365,6 +374,51 @@ export function createPipeline(opts = {}) {
   };
 
   /**
+   * 变化日志：每出一张图记一条**摘要**（不是图）。
+   *
+   * 为什么要有它：`queueDepth: 1` 在模型没跟上时会把旧图挤掉 —— 模型回来只看到
+   * "现在"，不知道刚过去那十几秒屏幕怎么动的。摘要每条几十字节，交付时压在
+   * 图下面，模型就能判断"这期间是弹了窗、滚了页，还是根本没动"。
+   *
+   * 开关是 `opts.changeLog`（`~/.dsh/see-now.json` 的 `changeLog`），默认关：
+   * 不改变现有交付体积。键名和 `log` 区分开 —— `log` 是离线标定用的全量记录。
+   */
+  const changes = [];
+
+  function noteChange(sheet, used) {
+    if (!o.changeLog) return;
+    const scored = used.filter((f) => typeof f.score === 'number' && Number.isFinite(f.score));
+    const peak = scored.length ? Math.max(...scored.map((f) => f.score)) : 0;
+    let box = null;
+    const boxes = used.map((f) => f.mcRect).filter(Boolean);
+    if (boxes.length) {
+      const x0 = Math.min(...boxes.map((b) => b.x0));
+      const y0 = Math.min(...boxes.map((b) => b.y0));
+      const x1 = Math.max(...boxes.map((b) => b.x1));
+      const y1 = Math.max(...boxes.map((b) => b.y1));
+      // 网格坐标 → 0..1 比例：交付层只关心"在画面哪个位置"，不关心 64×36 的格号
+      box = {
+        x0: +(x0 / (SCAN_W - 1)).toFixed(2),
+        y0: +(y0 / (SCAN_H - 1)).toFixed(2),
+        x1: +(x1 / (SCAN_W - 1)).toFixed(2),
+        y1: +(y1 / (SCAN_H - 1)).toFixed(2),
+      };
+    }
+    changes.push({
+      at: +sheet.at.toFixed(2),
+      from: +sheet.from.toFixed(2),
+      to: +sheet.to.toFixed(2),
+      n: used.length,
+      peak: +peak.toFixed(1),
+      cut: used.some((f) => f.via === 'cut'),
+      box,
+    });
+    // 只留最近 `changeLogMax` 条：旧条目价值掉得快，留太多只是把交付文本拉长
+    const max = o.changeLogMax > 0 ? o.changeLogMax : 60;
+    while (changes.length > max) changes.shift();
+  }
+
+  /**
    * 积分阈值：**固定的绝对值**，不随画面变化。
    *
    *     need = REF_SCORE × fps × integralSeconds
@@ -394,7 +448,12 @@ export function createPipeline(opts = {}) {
     // 用不带加成（更大）的档位是保守的：判装不下而实际装得下，顶多多开一张，不会丢帧。
     const tier = applyStrategy([lv], o.strategy)[0];
     if (frames.length === 0) sheetStart = entry.t;
-    frames.push({ t: entry.t, buf: entry.buf, tier, via, level: lv, wall: entry.wall });
+    // `score` / `mcRect` 一起带下去：出图时要拿它们写变化日志（见 `noteChange`）。
+    // 以前只留在 `log` 里，而 `log` 是离线标定用的全量记录、不会交付。
+    frames.push({
+      t: entry.t, buf: entry.buf, tier, via, level: lv, wall: entry.wall,
+      score: entry.score, mcRect: entry.mcRect,
+    });
     if (entry.hsv) {
       lastKeptHsv ??= new Float32Array(entry.hsv.length);
       lastKeptHsv.set(entry.hsv);
@@ -588,6 +647,7 @@ export function createPipeline(opts = {}) {
     };
     sheets.push(sheet);
     stats.sheets += 1;
+    noteChange(sheet, batch);
     return sheet;
   }
 
@@ -656,6 +716,7 @@ export function createPipeline(opts = {}) {
       cells: rects.map((r) => ({ px: r.px, py: r.py, pw: r.pw, ph: r.ph, tier: r.t })),
     });
     stats.sheets += 1;
+    noteChange(sheets[sheets.length - 1], used);
     return sheets[sheets.length - 1];
   }
 
@@ -833,7 +894,7 @@ export function createPipeline(opts = {}) {
       // `wall` 是这一帧被处理时的墙上时间（epoch ms）。台词（ASR）只有时间码没有帧号，
       // 对齐只能靠同一个时钟 —— `t` 是"第几秒"，掉帧就漂，不能拿来对字幕。
       const entry = {
-        t, buf, score: s, mc: r.mcScore, mcBox: r.mcBox, mcFill: r.mcFill, mcSpanY: r.mcSpanY, activeY: r.activeY, guardY: r.guardY, bg: r.bgScore, bgStable: r.bgStable, bgChanged: r.bgChanged, bgModel: r.bgModel, futureModel: r.futureModel, prevHsv: r.prevHsv, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
+        t, buf, score: s, mc: r.mcScore, mcBox: r.mcBox, mcRect: r.mcRect, mcFill: r.mcFill, mcSpanY: r.mcSpanY, activeY: r.activeY, guardY: r.guardY, bg: r.bgScore, bgStable: r.bgStable, bgChanged: r.bgChanged, bgModel: r.bgModel, futureModel: r.futureModel, prevHsv: r.prevHsv, prev: lastScore, hsv: Float32Array.from(r.hsv), wall: Date.now(),
       };
       lastSeen = entry;
       lastScore = s;
@@ -933,6 +994,16 @@ export function createPipeline(opts = {}) {
     /** 取走队列里最老的一张（阻塞语义由调用方实现）。 */
     take() {
       return sheets.shift() ?? null;
+    },
+
+    /**
+     * 取走自上次交付以来的变化摘要并清空（见 `noteChange`）。
+     * 没开 `changeLog` 时永远是空数组 —— 调用方不用关心开关。
+     */
+    drainChanges() {
+      const out = changes.slice();
+      changes.length = 0;
+      return out;
     },
 
     peek() {
