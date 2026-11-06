@@ -90,8 +90,10 @@ def _die_missing(missing: list) -> None:
         log_path.write_text(text + "\n", encoding="utf-8")
     except Exception:
         pass
+    # 弹窗标题跟着"谁拉起的这个窗"走：see-now 的用户看到 dsh-watch-together 会以为装错了包
     try:
-        ctypes.windll.user32.MessageBoxW(None, text, "dsh-watch-together", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, text,
+                                         os.environ.get("DSH_WINDOW_BRAND") or "dsh-watch-together", 0x10)
     except Exception:
         print(text, flush=True)
     raise SystemExit(2)
