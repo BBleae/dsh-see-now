@@ -535,6 +535,8 @@ async function registerAll(ctx) {
     // 档位映射：这张图里每帧占多大格子（设置页「高级」里那项）
     tierStyle: tuning.tierStyle,
     tierMap: tuning.tierMap,
+    // 亮度归一 + 黑边补偿（默认开；关掉 = 回到 0.1.3 的绝对分）
+    scoreNormalize: tuning.scoreNormalize,
   });
   disposers.push(() => runner.stop());
 
@@ -1184,6 +1186,8 @@ async function registerAll(ctx) {
             + ` · 节奏：${sceneMode ? 'dense（跟逐帧走）' : paceMode}`
             + `（切点门槛 ${(sceneMode ? PACES.dense : PACES[paceMode]).cutAbs}，`
             + `最多 ${sceneMode ? 4 : PACES[paceMode].wakeGapSec} 秒叫一次）`
+            // 门槛是常数，归一之后它的含义变了（"参考亮度下"的 12）—— 不写出来会对不上账
+            + (tuning.scoreNormalize ? ' · 亮度归一开（暗场/黑边已补偿）' : ' · 亮度归一关')
             // 超省模式是"一次交几张"，和"多久叫一次"是两件事，单独说
             + (tuning.wakeBatch > 1 ? `\n超省模式：攒够 ${tuning.wakeBatch} 张才交（一轮看完，省上下文重算）` : '')
             /**

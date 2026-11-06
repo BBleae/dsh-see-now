@@ -51,6 +51,14 @@ export const TUNING_DEFAULTS = Object.freeze({
    * 默认关 —— 每次交付加约 100 token，属于按需打开的能力，不该改所有人的默认成本。
    */
   changeLog: false,
+  /**
+   * 亮度归一 + 黑边补偿（见 `cuts.js` 的 `normalizeScore`）。默认开。
+   *
+   * 关掉等于回到 0.1.3 的绝对分：夜戏/暗调影视剧的真切点只有约 5 分，门槛 12 够不着；
+   * 2.39:1 的片子上下黑边把分数打了 75 折。**亮场（V ≥ 160）无黑边时它逐位不变**，
+   * 所以留着不影响日常屏幕，只在暗场/宽银幕上起作用。
+   */
+  scoreNormalize: true,
 });
 
 /**
@@ -261,6 +269,14 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     else warnings.push('changeLog 只能是 true / false，已用默认 false');
   }
 
+  // 只认真正的布尔：写成 `0` / `"false"` 是最容易踩的坑 —— `"false"` 是真值，
+  // 用户以为关掉了，实际一直开着。所以类型不对就报出来并回默认。
+  let scoreNormalize = TUNING_DEFAULTS.scoreNormalize;
+  if (raw.scoreNormalize !== undefined) {
+    if (typeof raw.scoreNormalize === 'boolean') scoreNormalize = raw.scoreNormalize;
+    else warnings.push('scoreNormalize 只能是 true / false，已用默认 true');
+  }
+
   const listenCfg = readListen(raw.listen);
   warnings.push(...listenCfg.warnings);
 
@@ -274,6 +290,7 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     defaultPace,
     speechPacing,
     changeLog,
+    scoreNormalize,
     listen: listenCfg.listen,
     path,
     warnings,
@@ -285,7 +302,7 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
 /** 面板能改的顶层键。`idleStopMs` 是派生的，不在这里 —— 传进来会被拒。 */
 export const WRITABLE_KEYS = Object.freeze([
   'maxAutonomousWakes', 'idleStopMin', 'wakeBatch', 'tierStyle', 'tierMap',
-  'defaultPace', 'speechPacing', 'listen',
+  'defaultPace', 'speechPacing', 'scoreNormalize', 'listen',
 ]);
 
 /** `listen` 段能改的键。 */
