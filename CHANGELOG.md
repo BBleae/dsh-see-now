@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### Added — 发布闸门、schema 审计、token 对拍（从 storyboard 搬来的工程化）
+
+这三件事 storyboard 早就有、这个包一直没有，而它恰恰是实时那一侧、出事最难查：
+
+- `scripts/guard-publish.mjs` + `prepublishOnly`：**工作区不干净就拒绝发布**。npm 打包的是
+  磁盘文件、不是 git 提交 —— 0.1.3 发布前 `lib/client.js` 里就躺着没提交的一行。
+- `scripts/check-syntax.mjs`（`npm run check:syntax`）：`node --check` 的跨平台批量版。
+- `test/schema-audit.test.mjs`：宿主**按 schema 过滤参数**，没声明的静默丢弃、不报错。审计四件事：
+  handler 读的 `args.X` 都在 schema 里、参数没有重复键、`action` 的枚举和 `route()` 分支一一对应
+  （写了没实现 / 实现了没写都算错）、`dsh.plugin.json` 与 `package.json` 版本一致。
+- `scripts/verify-image-tokens.mjs`（`npm run verify-tokens`）：拿宿主的 `deepSeekImageTokens`
+  给我方的 `tokens.js` 打分，18 组尺寸全对。这个包对外报的每一个价钱都出自那一个函数。
+- 两条**常驻文案预算**断言（`description ≤ 3800`、合计 ≤ 6500），防止这次砍掉的 26% 长回去。
+
 ### Fixed — 超省模式下一次交 N 张时，台词会跨张重复
 
 取台词的窗口两头各留了 400/800ms 余量（迟到转写不能丢），于是**跨在边界上的那句话

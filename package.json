@@ -59,8 +59,12 @@
     "debug:live": "node debug/live.mjs",
     "install-dev": "node scripts/install-dev.mjs",
     "check": "node scripts/install-dev.mjs --check",
+    "check:syntax": "node scripts/check-syntax.mjs",
+    "guard": "node scripts/guard-publish.mjs",
+    "verify-tokens": "node scripts/verify-image-tokens.mjs",
     "sync:window": "node scripts/sync-window.mjs",
     "check:window": "node scripts/sync-window.mjs --check",
+    "prepublishOnly": "node scripts/guard-publish.mjs && node scripts/check-syntax.mjs && npm test",
     "prepack": "node scripts/sync-window.mjs"
   },
   "peerDependencies": {
