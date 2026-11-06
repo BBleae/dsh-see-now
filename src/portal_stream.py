@@ -327,6 +327,11 @@ def main():
     CTRL = {"lock": threading.Lock(), "restart": False}
     CUR = {"gst": None}
 
+    STOP = {"flag": False}
+    # 当前 portal 会话（stdin EOF / 父进程消失时要**主动 Close** —— 不关的话
+    # GNOME 的 portal 会把会话留在表里，后面的 CreateSession 就不返回了）
+    LIVE = {"portal": p, "session": session}
+
     def read_stdin():
         """宿主发来的 update；stdin EOF = 父进程没了 → 收工。"""
         try:
@@ -354,6 +359,13 @@ def main():
                     except Exception:
                         pass
         except (OSError, ValueError):
+            pass
+        # 父进程没了：不能直接 os._exit —— 那会把 portal 会话丢在表里（实测反复几次后
+        # GNOME 的 CreateSession 就不返回了）。先尽力关会话，再退。
+        STOP["flag"] = True
+        try:
+            close_session(LIVE["portal"], LIVE["session"])
+        except Exception:
             pass
         os._exit(0)
 
@@ -394,7 +406,6 @@ def main():
             f"fdsink fd=1"
         )
 
-    STOP = {"flag": False}
 
     def on_signal(*_):
         # 信号处理器里只置标志（主线程可能正阻塞在读 gst.stdout / D-Bus）

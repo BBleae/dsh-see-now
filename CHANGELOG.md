@@ -38,7 +38,9 @@ Wayland 下 ffmpeg 没有正路（`x11grab` 只抓到 XWayland 根窗口，`kmsg
 
 - GNOME 的 screencast 节点在 portal 私有 pipewire 实例里，要 `OpenPipeWireRemote` 拿 fd；
 - Mutter/KWin 按 damage 发帧，静止桌面要 `keepalive-time=250`；
-- 会话常驻：换 `region` / 清晰度只重起 gst，不重新握手（帧协议带 4 字节长度头，尺寸可变）。
+- 会话常驻：换 `region` / 清晰度只重起 gst，不重新握手（帧协议带 4 字节长度头，尺寸可变）；
+- **父进程消失时先 `Session.Close` 再退**：以前的 EOF 路径是 `os._exit(0)`，会话留在 portal 表里，
+  反复几次后 GNOME 的 `CreateSession` 直接不返回（实测必现，只能重启机器）。
 
 ### Added — 指示框 / `region`
 
