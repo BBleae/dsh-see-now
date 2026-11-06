@@ -29,6 +29,29 @@
 非 Windows 上按"抓到自己就填掉"处理，不再递归拍到自己。启动失败时的弹窗标题
 也会显示 `dsh-see-now`（`DSH_WINDOW_BRAND`）。
 
+### Added — Linux 屏幕采集（xdg-desktop-portal ScreenCast）
+
+Wayland 下 ffmpeg 没有正路（`x11grab` 只抓到 XWayland 根窗口，`kmsgrab` 要 root），
+所以走 portal：`握手 → PipeWire → gst → rgb24`。帧契约与 ffmpeg 那条完全一致
+（`{done, stop}` + `onFrame({i,t,buf})`），判帧 / 拼图 / 工具契约一行没改。
+断流（退出码 3/4）自动重连最多 3 次；0 帧超过 12 秒重开，3 次仍 0 帧给出可照做的报错。
+
+- GNOME 的 screencast 节点在 portal 私有 pipewire 实例里，要 `OpenPipeWireRemote` 拿 fd；
+- Mutter/KWin 按 damage 发帧，静止桌面要 `keepalive-time=250`；
+- 会话常驻：换 `region` / 清晰度只重起 gst，不重新握手（帧协议带 4 字节长度头，尺寸可变）。
+
+### Added — 指示框 / `region`
+
+- 指示框：四边 26px 光晕 + 顶部状态条（PySide6，可选；没装就只少这一层，采集照旧）。
+- `region`：坐标统一成采集流坐标（portal 的 `Start` 会报 `size`），在流上直接 `videocrop`，
+  越界报错；取框窗把 Tk 的物理像素按比例换算过去（实测 ×1.0 / ×1.25 / ×1.5）。
+
+### Fixed — 唤醒在会话里排队
+
+宿主把每条叫醒渲染成一轮对话；模型只回文本时，循环以前会继续投递。现在一次只允许一条在飞，
+45 秒没人接就整个收工。另外 `quality` 不传时保持当前档、显式 `region` 会落盘
+（这两个以前都会导致每次 watch 重开采集）。
+
 ## [0.1.4] - 2026-11-06
 
 ### Added — 设置页能换悬浮窗外观（新增「静态磨砂」不吃性能）
@@ -87,88 +110,6 @@ gain 2.32，有效行 V=92.7 → gain 1.03。修完两组素材的归一结果�
 
 关掉：`~/.dsh/see-now.json` 写 `{ "scoreNormalize": false }`（**布尔**，写 `"false"`
 字符串是真值，会失效并留一条 warn），或者单次 `watch({opts:{scoreNormalize:false}})`。
-
-### Changed — portal 会话常驻，换 region / 清晰度只换 gst 管线（热切换）
-
-以前换 region / 清晰度 = teardown → 重开进程 → 重新握手。会话握手是贵且脆的那部分
-（授权、PipeWire 节点、fd），在 KDE 上重开太快还会撞上"旧会话没回收"（0 帧）。
-
-现在 worker **只握手一次**：宿主通过 stdin 发 `{"cmd":"update", width,height,fps,region,…}`，
-worker 只杀/重起 `gst-launch`，会话、节点、fd 全部复用。帧协议改成
-**每帧 4 字节大端长度头 + 负载**（仅 portal 链路），尺寸变了也自带边界。
-
-实测：KDE Wayland（2560×1600）与 Ubuntu GNOME/X11（1280×800）上，
-整屏 low → region + high 来回切，**同一个 PipeWire 节点**、不重握手，
-帧长 172800 → 691200 正确切换，帧率稳定（~10-12fps）。
-
-### Fixed — 没传 quality 会悄悄退回默认档
-
-`watch` 不带 `quality` 时传下来的是 `null`，而 `start()` 里写的是
-`quality = q ?? DEFAULT_QUALITY` —— 上次调到 high、下次没提就退回 low，
-尺寸一变就重开采集。现在改成 `q ?? 当前档`。
-
-### Fixed — 显式传的 region 不落盘，下一轮就丢
-
-只有 `action:"region"` 的拖框结果会落盘；模型直接传 `region:"x,y,w,h"`
-只在这一次生效，下一次 watch 就"回到整屏"。现在显式 region 也落盘。
-
-### Fixed — 0 帧干等 / 停完立刻重开会"假启动"
-
-- 12 秒没出第一帧就杀掉重开（最多 3 次）；仍为 0 帧就明确报
-  「可能是 xdg-desktop-portal 卡住了，`systemctl --user restart xdg-desktop-portal`」。
-- 新采集在旧采集停掉后至少等 1.5 秒再开新会话（KDE 上旧会话未回收时新会话会 0 帧）。
-
-### Added — Linux 屏幕采集（xdg-desktop-portal ScreenCast）
-
-原版在 Linux 上直接抛「屏幕采集还没接 linux」。现在走 Wayland 的正路：
-portal ScreenCast → PipeWire → gst → rgb24，帧契约与 ffmpeg 那条完全一致，
-判帧 / 拼图 / 工具契约一行没改。
-
-- `src/portal_stream.py`：portal 握手（restore_token 持久化）+ `gst-launch` 收流。
-  限帧放在 convert/scale 之前；`videoscale add-borders=true` 让 16:10 屏进 16:9 画布时留边。
-- `src/portal-capture.js`：`spawnPortalFrames()` 与 `spawnFrames()` **同契约**
-  （`{done, stop}` + `onFrame({i,t,buf})`），帧切分复用零拷贝路径；断流（退出码 3/4）
-  自动重连最多 3 次，缺依赖 / 用户拒绝（1/2）不重连。
-- `runner`：Linux 上 `source:"screen"` 自动落 `engine: 'portal'`，不再调
-  `pickScreenEngine()`；带 region 时也不再把 engine 钉成 `gdigrab`。
-- 错误分类按发行版给装包命令；没有 portal（服务器 / 容器）直接报清楚，不干等。
-
-### Added — 屏幕指示框
-
-采集期间四边 26 逻辑像素的渐变光晕 + 顶部状态条（强调色圆点 + 「…正在看屏幕」+ 见 now），
-PySide6 实现，点击穿透、不抢焦点；Wayland 下用 KWin 脚本置顶。
-`teardown` 后延迟 2 秒关（换清晰度不闪）。实测它**不会**进 ScreenCast 的采集流，
-所以默认不裁；`SEE_NOW_CROP_OVERLAY=1` 可强制按逻辑像素裁掉四边 26/顶 55。
-
-### Added — Linux 悬浮窗
-
-`examples/floating-chat/window-linux.py`：Windows 那份 `window.py` 用了 `ctypes.windll`，
-Linux 上一启动就 AttributeError（以前会被误报成「缺 mss」）。Tk 版保持同一套线格式：
-`chat.jsonl` 读写、`window-heartbeat`、`watch-window.json` 的 hidden、可选的协议行。
-`window.js` 按平台选脚本，Linux 上没自定义脚本时给出准确原因。
-
-### Added — Linux 上的 `region`
-
-坐标统一成采集流坐标（portal `Start` 会报 `size`，KDE 上是逻辑像素，如 2048×1280）；
-worker 在流上直接 `videocrop`，越界 exit 5 并报出范围，不静默裁偏。
-拖框窗把 Tk 的屏幕坐标按比例换算成流坐标（XWayland 下两者不是 1:1）。
-
-### Fixed — 静止画面上一帧都没有
-
-`pipewiresrc` 是「有 damage 才发帧」，桌面不动时上游一帧都不给。加 `keepalive-time=250`
-后帧率稳定；重复帧本来就会被判帧层跳过。
-
-### Fixed — 停采集会把 GNOME 的 portal 挂死
-
-以前 SIGTERM 直接退出，portal 会话留在表里，下一次 CreateSession 不返回。
-现在信号只置标志、主循环用 `select` 带 200ms 超时读，退出前调
-`org.freedesktop.portal.Session.Close`。
-
-### Fixed — 叫醒会在会话里排队
-
-叫醒是往会话里投递消息；模型正忙时没回应，循环却按 `wakeMinGapSec` 继续投递，
-宿主把它们排成队（实测积过十几条「有新画面了」）。现在**一次只允许一条在飞**：
-上一条叫醒之后没有新的 `see_now` 调用（`loop.noteActivity()`）就不再叫。
 
 ### Added — 发布闸门、schema 审计、token 对拍（从 storyboard 搬来的工程化）
 

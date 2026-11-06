@@ -90,7 +90,15 @@ export function spawnPortalFrames({
   workerPath = WORKER,
   // 指示框裁剪：{logicalWidth, logicalHeight, edge, top}（全是**逻辑像素**）
   crop = null,
-  // 只看一块：{x,y,w,h}，坐标是**采集流坐标系**（KDE = 逻辑像素）
+  /**
+   * 只看一块：{x,y,w,h}，坐标是**采集流坐标系**（portal `Start` 报的 size，不是屏幕物理像素）。
+   *
+   * 实测两套坐标（同一台 2560×1600 屏、KDE Wayland）：
+   *   缩放 125% → 流 2048×1280 ↔ 物理 2560×1600（×1.25）
+   *   缩放 150% → 流 1707×1067 ↔ 物理 2560×1600（×1.5）
+   * GNOME/X11 100%（1280×800）两者相同（×1.0）。比例**不保证整数**，取框窗那边按 x/y
+   * 各自换算后再夹回流范围（见 `pick_region.py: scale_rect`）。
+   */
   region = null,
   // worker 报到时回调一次：{stream_width, stream_height, region, node}
   onReady = null,

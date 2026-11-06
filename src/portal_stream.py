@@ -368,6 +368,9 @@ def main():
         lw, lh = int(p_now.get("logical_width") or 0), int(p_now.get("logical_height") or 0)
         keepalive = max(20, int(p_now.get("keepalive") or 250))
 
+        # region 的 x,y,w,h 是**采集流坐标**（portal Start 报的 size），直接裁原始流：
+        # 实测 125% 时流 2048×1280 对应物理 2560×1600（×1.25），150% 时 1707×1067（×1.5），
+        # 比例不保证整数 —— 换算在取框窗那侧做（pick_region.py: scale_rect），这里只吃流坐标。
         crop = ""
         if reg and stream_w and stream_h:
             x, y, w, h = [int(v) for v in reg]

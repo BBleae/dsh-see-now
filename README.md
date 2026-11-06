@@ -187,19 +187,33 @@ portal 握手（一次授权，restore_token 存 ~/.dsh/see-now/portal-token.jso
   → gst：pipewiresrc → videorate → videoconvert → [videocrop] → videoscale → rgb24
 ```
 
-- **依赖**：`pacman -S python-gobject gstreamer gst-plugin-pipewire`（Debian/Ubuntu：
-  `sudo apt install python3-gi gstreamer1.0-tools gstreamer1.0-pipewire`）。提示会按发行版给。
+**依赖**（缺了会直接影响能不能看屏幕，所以逐项列清楚）：
+
+| 组件 | Arch | Ubuntu 24.04 | 缺了会怎样 |
+|---|---|---|---|
+| `python3-gi`（Gio） | `python-gobject` | `python3-gi` | **采集起不来**：直接报错并给出对应发行版的装包命令 |
+| GStreamer 基础插件<br>（`videorate` / `videoconvert` / `videoscale` / `videocrop` / `fdsink`） | `gstreamer` | `gstreamer1.0-tools` + `gstreamer1.0-plugins-base` | 同上 |
+| `pipewiresrc` | `gst-plugin-pipewire` | `gstreamer1.0-pipewire` | 同上 |
+| **PySide6**（只用于指示框） | `pyside6` 或 venv | 没有发行版包 → venv + `DSH_SEE_PYTHON` | **采集照旧**，只是没有光晕和顶部状态条（`SEE_NOW_INDICATOR=0` 等价） |
+| tkinter + Pillow + mss + numpy（只用于悬浮窗，上游 `window.py`） | `tk` `python-pillow` `python-mss` `python-numpy` | `python3-tk` `python3-pil` `python3-mss` `python3-numpy` | **采集照旧**，窗打不开；Wayland 下建议设置里选 `frost`/`solid`（这两档不抓屏） |
+| ffmpeg（只用于 `source:"file"` / `"rtmp"`） | `ffmpeg` | `ffmpeg` | 屏幕采集不受影响 |
+
+PySide6 装进 venv 之后，用 `DSH_SEE_PYTHON=~/.venvs/pyside/bin/python` 指给插件；Qt 的 xcb 插件
+还需要 `libxcb-cursor0`（Ubuntu 上不装会 `Could not load the Qt platform plugin "xcb"`）。
+
 - **静止画面**：Mutter/KWin 只在有 damage 时发帧，所以 gst 加了 `keepalive-time=250`
   （每 250ms 重发最后一帧），否则桌面不动时一帧都不来。
-- **`region`**：坐标是**采集流的坐标系**（`status` 里的「采集流 W×H」，KDE 上是逻辑像素）；
-  `action:"region"` 的拖框窗会把 Tk 的屏幕坐标自动换算成流坐标。
-- **指示框**：采集期间屏幕四边一圈 26px 渐变光晕 + 顶部状态条（PySide6）。Ubuntu 没有
-  `python3-pyside6` 包，可以装进 venv 再用 `DSH_SEE_PYTHON=~/.venvs/pyside/bin/python` 指过来；
-  Qt 的 xcb 插件还需要 `libxcb-cursor0`。
+- **`region`**：坐标是**采集流的坐标系**（`status` 里的「采集流 W×H」）。取框窗拿到的是
+  Tk 的**物理像素**，两者比例不保证整数（实测 100% → ×1.0、125% → ×1.25、150% → ×1.5），
+  所以按 x/y 各自换算、再夹回流范围内。
 - **无桌面环境**（服务器 / 容器 / 纯 SSH）用不了：portal 不响应，插件会直接报清楚。
 - **已知问题**：反复 SIGKILL 采集进程可能让 KDE 的 `xdg-desktop-portal` 卡住（表现为
   握手成功但 0 帧、不报错）；正常 stop 会调 `Session.Close`，不会留下这个状态。
-  真卡住了：`systemctl --user restart xdg-desktop-portal`。
+  真卡住了：`systemctl --user restart xdg-desktop-portal`（GNOME 上还要重启
+  `xdg-desktop-portal-gnome`）。
+- **悬浮窗**：用的是上游 `window.py`。它在 Linux 上要 0.2.15+（`42d2f91` 起 ctypes.windll
+  已按平台收口）；`-transparentcolor` 这个 Windows 专有 Tk 属性还需要平台判断，
+  否则仍会 `TclError`（见 issue #40）。
 
 然后让模型调：
 
