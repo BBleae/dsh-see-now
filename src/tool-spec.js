@@ -57,6 +57,10 @@ export function seeNowToolSpec() {
       + '- `see_now({action:"window", show:true|false})` — **whenever a result or `status` says the window '
       + 'is hidden, the user sees nothing you say**; show it again before you say anything else.\n'
       + '- `see_now({action:"stop"})`.\n\n'
+      + '**Local video playback** (only when source:"file"): `pause` / `resume` / '
+      + '`seek` with `position` (seconds) / `configure` with `quality`. Screen and camera capture have '
+      + 'no notion of pausing or seeking, so those actions are refused explicitly instead of pretending '
+      + 'to work.\n\n'
       + 'Safety net: if you stop calling `watch`, the plugin keeps capturing and wakes you with a short '
       + 'note when a sheet fills up (then `peek`). It stops the moment the user closes the floating '
       + 'window and tells you — when that note appears, do NOT call `see_now` again until the user asks.\n\n'
@@ -82,7 +86,13 @@ export function seeNowToolSpec() {
     parameters: {
       action: {
         type: 'string',
-        description: 'watch (default) | peek | start | stop | status | window | region | help',
+        description: 'watch (default) | peek | start | stop | status | window | region | help '
+          + '| pause | resume | seek | configure',
+      },
+      position: {
+        type: 'number',
+        description: 'With action:"seek": 跳到第几秒（**非负秒数**，0 = 从头）。\n'
+          + '只对本地视频（source:"file"）有效；屏幕和摄像头没有"跳转"这回事，会被明确拒绝。',
       },
       region: {
         type: 'string',

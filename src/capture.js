@@ -199,9 +199,12 @@ export function sourceArgs(
         return ['-f', 'lavfi', '-i', `ddagrab=${dda.join(':')}`];
       }
     }
-    case 'file':
+    case 'file': {
+      const seek = s.seek ?? s.startSec;
+      if (seek != null && (!Number.isFinite(seek) || seek < 0)) throw new RangeError('file seek 必须是非负秒数');
       // `realtime` 才加 -re；离线跑要看的是「管线本身多快」，不能被播放速度骗了
-      return [...(s.realtime ? ['-re'] : []), '-i', String(s.path)];
+      return [...(s.realtime ? ['-re'] : []), ...(seek > 0 ? ['-ss', String(seek)] : []), '-i', String(s.path)];
+    }
     case 'rtmp':
       return s.listen === false ? ['-i', String(s.url)] : ['-listen', '1', '-i', String(s.url)];
     default:
@@ -274,6 +277,9 @@ export function captureArgs({
  */export function spawnFrames({
   source, width, height, fps, ffmpegPath = 'ffmpeg', engine = 'auto',
   onFrame, onStderr = null, onFirst = null,
+  // 文件源的起点秒数：seek 之后时间戳必须从这里起算，否则每帧都差一个偏移，
+  // 台词（按 wallTo 对齐）会和画面对不上。
+  baseSec = source?.seek ?? source?.startSec ?? 0,
 } = {}) {
   const args = captureArgs({ source, width, height, fps, ffmpegPath, engine }).slice(1);
   // windowsHide：Windows 上 spawn 控制台程序会新开一个黑框，采集是常驻的，
@@ -292,16 +298,19 @@ export function captureArgs({
   let n = 0;
   const t0 = Date.now();
   let err = '';
+  // 暂停：停止读 stdout，让 ffmpeg 的管道写满后自然背压，进程不退出。
+  let paused = false;
 
   const deliver = (buf) => {
     const i = n;
     n += 1;
     if (i === 0) onFirst?.(Date.now() - t0);
-    onFrame?.({ i, t: i / fps, buf });
+    onFrame?.({ i, t: Number(baseSec || 0) + i / fps, buf });
   };
 
   const done = new Promise((resolve, reject) => {
     child.stdout.on('data', (chunk) => {
+      if (paused) return;
       let off = 0;
       while (off < chunk.length) {
         // `filled` 填满就立刻交付并清零，所以这里 room 永远 > 0
@@ -381,6 +390,19 @@ export function captureArgs({
 
   return {
     done,
+    /** 暂停解码：不再读 stdout，ffmpeg 写满管道后自然背压，进程保持存活。 */
+    pause() {
+      if (paused) return;
+      paused = true;
+      child.stdout.pause();
+    },
+    /** 继续解码：先消费暂停期间缓冲的字节，再恢复流。 */
+    resume() {
+      if (!paused) return;
+      paused = false;
+      child.stdout.resume();
+    },
+    get paused() { return paused; },
     stop() {
       try { child.kill('SIGKILL'); } catch { /* 已经没了 */ }
     },
