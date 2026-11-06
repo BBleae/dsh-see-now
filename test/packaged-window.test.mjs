@@ -47,6 +47,8 @@ const REQUIRED = [
   'window_widgets.py',
   'window_protocol.py',
   'mic.py',
+  // mic.py 顶层 import 了 aec（issue #36：0.0.2–0.1.3 全缺，麦克风永远起不来）
+  'aec.py',
 ];
 
 test('包里必须自带整套窗口文件（发版兜底，不能只靠兄弟仓库）', () => {

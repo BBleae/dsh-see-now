@@ -276,7 +276,9 @@ export function captureArgs({
   onFrame, onStderr = null, onFirst = null,
 } = {}) {
   const args = captureArgs({ source, width, height, fps, ffmpegPath, engine }).slice(1);
-  const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  // windowsHide：Windows 上 spawn 控制台程序会新开一个黑框，采集是常驻的，
+  // 不加就是"每几秒闪一下"（issue #37）。非 Windows 平台这个键被忽略。
+  const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   const need = width * height * 3;
   /**
    * 拼帧缓冲：**一帧只分配一次、只拷贝一次**。
@@ -486,7 +488,7 @@ function grabOneFrame({ ffmpegPath, fps, width, height, pixelFormat, timeoutMs }
   const need = width * height * 3;
 
   return new Promise((resolve) => {
-    const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     let buf = Buffer.alloc(0);
     let settled = false;
     const finish = () => {
@@ -550,7 +552,7 @@ function probeDdagrab({ ffmpegPath, fps, timeoutMs }) {
     args.splice(args.length - 1, 0, '-frames:v', '1');
     let child;
     try {
-      child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     } catch {
       resolve({ ok: false, stderr: '' });
       return;

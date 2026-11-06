@@ -148,7 +148,7 @@ if (same) {
  * 在只装了 see-now、没装 watch-together 的机器上必崩。
  */
 const ASSETS = [
-  'mic-dsh.png', 'mic.py', 'window_protocol.py',
+  'mic-dsh.png', 'mic.py', 'aec.py', 'window_protocol.py',
   'glass_geometry.py', 'glass_capture.py', 'glass_cpu.py', 'glass_gpu.py',
   'glass_static.py',
   'glass_window.py', 'glass_window_gpu.py', 'window_widgets.py',

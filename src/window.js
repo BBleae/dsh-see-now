@@ -540,6 +540,9 @@ export async function openWindow({ force = false, log = () => {}, settleMs = 700
           // 关键：窗口按这个目录找 chat.jsonl，指到我们自己的目录，
           // 既不会读到陪看的消息，也不会把我们的消息写进陪看那条流
           DSH_VIDEO_CACHE_DIR: chatDir(),
+          // 启动失败时那个 MessageBox 的标题跟着走，否则用户看到
+          // "dsh-watch-together" 会以为自己装错了包（issue #32 第 1 条）
+          DSH_WINDOW_BRAND: 'dsh-see-now',
         },
       });
     } catch (e) {

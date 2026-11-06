@@ -544,6 +544,13 @@ export function createRunner({
     // 走到这里就是"明确要开始看"（watch 的自动重启已经在前面被硬闸挡住了）。
     hungUp = false;
     endedSource = null;
+    /**
+     * 台词水位线归零。`lastSheetWallTo` 是"上一张图取到哪儿"，跨会话留着会让
+     * 新一轮第一张的时间窗从**上一轮结束**算起 —— 上一轮最後那几句（甚至更早）
+     * 会被当成这一轮说的话挂上去，偏移是负的（issue #39）。
+     * 归零之后走首次分支：从这张图往回看 20 秒。
+     */
+    lastSheetWallTo = 0;
     // **窗被用户关掉之后，这里必须复位**：`windowState` 缓存着 `{ok:true}`，
     // `windowOpened` 也还是 true —— 不复位的话下一次 watch 会（a）不再开窗，
     // （b）循环立刻又把"窗没了"判成用户关窗，落第二条挂断说明。

@@ -2,6 +2,33 @@
 
 本文件从 `0.0.4` 起记录；更早的版本见 GitHub Releases。
 
+## [Unreleased]
+
+### Fixed — 采集重启后第一张图挂着上一轮的台词（#39）
+
+`runner` 里的台词水位线 `lastSheetWallTo` 是跨会话留着的：新一轮第一张的时间窗
+从**上一轮结束**算起，于是上一轮最后那几句被当成这一轮说的话挂上去，偏移是负的。
+
+- `start()` 把水位线归零（首次分支：从这张图往回看 20 秒）；
+- 听音会话开始时清空台词缓冲（`createLineBuffer.reset()`）—— 上一轮的句子不属于这一轮。
+
+### Fixed — 子进程统一 `windowsHide`（#37）
+
+采集是常驻的，`ffmpeg` 三处 `spawn` 都没带 `windowsHide`，Windows 上每几秒闪一个黑框。
+`capture.js` 三处补齐（非 Windows 平台该键被忽略）。
+
+### Fixed — 麦克风永远起不来：发布包缺 `aec.py`（#36）
+
+`mic.py` 顶层 `from aec import ...`，而 `aec.py` 从来没进过 see-now 的同步清单
+（0.0.2–0.1.4 全部缺）。现在 `sync-window.mjs` 的 ASSETS 带上它，`mic.py` 也改成
+可缺省导入：没有 `aec.py` 时回声消除关掉、麦克风照常可用。
+
+### Fixed — macOS/Linux 悬浮窗必崩（#40）
+
+上游 `window.py` 的 `ctypes.windll` 收口到 `IS_WIN`，Windows 专有路径全部加守卫；
+非 Windows 上按"抓到自己就填掉"处理，不再递归拍到自己。启动失败时的弹窗标题
+也会显示 `dsh-see-now`（`DSH_WINDOW_BRAND`）。
+
 ## [0.1.4] - 2026-11-06
 
 ### Added — 设置页能换悬浮窗外观（新增「静态磨砂」不吃性能）

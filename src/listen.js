@@ -628,6 +628,16 @@ export function createLineBuffer({ keepMs = KEEP_MS } = {}) {
       }
       return false;
     },
+    /**
+     * 清空。
+     *
+     * 一次听音会话的台词只属于那一次会话：采集重启后（stop → watch），旧句子如果
+     * 还留在缓冲里，第一张图的时间窗会从"上一轮结束"算起，把它们当成这一轮说的话
+     * 挂上去，偏移还是负的（issue #39）。所以 `start()` 里先清一次。
+     */
+    reset() {
+      lines = [];
+    },
     get size() { return lines.length; },
     get all() { return lines.slice(); },
   };
@@ -919,6 +929,8 @@ export function createListener({
    */
   async function start() {
     if (child) return { ok: true, reason: 'already' };
+    // 新的一次听音会话：上一轮的台词不能留到这一轮（issue #39，偏移会是负的）
+    buffer.reset();
     if (env.DSH_SEE_AUDIO === '0') {
       reason = '被 DSH_SEE_AUDIO=0 关掉了';
       enabled = false;

@@ -92,6 +92,16 @@ test('台词缓冲：超长时从旧往新丢，最近的留下', () => {
   assert.equal(got[got.length - 1].text, '第9句十个字', '最后一句必须是新的');
 });
 
+test('台词缓冲：reset 之后取不到上一轮的句子（#39 采集重启）', () => {
+  const b = createLineBuffer();
+  b.add(0, 1_000, '上一轮说的话');
+  assert.equal(b.size, 1);
+  b.reset();
+  assert.equal(b.size, 0);
+  // 新一轮的窗口往回看 20 秒，也不该把旧的捞回来
+  assert.deepEqual(b.between(-20_000, 60_000), []);
+});
+
 test('台词缓冲：空文本不进缓冲（ASR 对纯静音会吐空/标点）', () => {
   const b = createLineBuffer();
   b.add(0, 1_000, '   ');
