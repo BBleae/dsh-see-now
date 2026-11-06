@@ -27,6 +27,37 @@ export function regionFile(env = process.env) {
   return join(chatDir(env), 'region.json');
 }
 
+/**
+ * 采集流的尺寸（逻辑像素），由 runner 每次采集启动时落盘。
+ *
+ * 取框窗用的是 Tk 的屏幕坐标（Linux 上走 XWayland = 设备像素，2560×1600），
+ * 而 region 的坐标系是**采集流**（逻辑像素，2048×1280）。这两个不是 1:1，
+ * 所以必须把流尺寸交给取框脚本去换算，否则框出来的区域整体偏大。
+ */
+export function streamSizeFile(env = process.env) {
+  return join(chatDir(env), 'stream-size.json');
+}
+
+export function loadStreamSize(env = process.env) {
+  try {
+    const raw = JSON.parse(readFileSync(streamSizeFile(env), 'utf8'));
+    const { width, height } = raw ?? {};
+    if (Number.isInteger(width) && Number.isInteger(height) && width > 0 && height > 0) {
+      return { width, height };
+    }
+  } catch { /* 还没采过 */ }
+  return null;
+}
+
+export function saveStreamSize({ width, height }, env = process.env) {
+  try {
+    const path = streamSizeFile(env);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ width, height, at: Date.now() }, null, 2), 'utf8');
+    return true;
+  } catch { return false; }
+}
+
 /** 落盘的那块区域；没有 / 坏了都返回 null（坏文件不能把 watch 一起拖死）。 */
 export function loadRegion(env = process.env) {
   try {
@@ -74,18 +105,21 @@ export async function pickRegion({ log = () => {}, timeoutMs = PICK_TIMEOUT_MS, 
   for (const python of pythonCandidates()) {
     if (!hasTkinter(python)) { tried.push(`${python}（无 tkinter）`); continue; }
 
-    const r = await runPicker(python, script, timeoutMs, env);
+    const r = await runPicker(python, script, timeoutMs, env, loadStreamSize(env));
     if (r.spawned === false) { tried.push(`${python}（${r.detail}）`); continue; }
     return r.result;
   }
   return { ok: false, reason: 'no-python', detail: tried.join(' / ') || '没有候选解释器' };
 }
 
-function runPicker(python, script, timeoutMs, env) {
+function runPicker(python, script, timeoutMs, env, stream = null) {
   return new Promise((resolve) => {
     let child;
+    // 有流尺寸就交给取框脚本换算坐标（没有就按 1:1，Windows 上一直是这样）
+    const extra = stream ? ['--stream-width', String(stream.width),
+      '--stream-height', String(stream.height)] : [];
     try {
-      child = spawn(python, [script], {
+      child = spawn(python, [script, ...extra], {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
         env: { ...env, DSH_VIDEO_CACHE_DIR: chatDir(env), DSH_HOME: dshHome(env) },

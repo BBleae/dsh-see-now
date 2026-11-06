@@ -157,6 +157,17 @@ export function startLoop({
 } = {}) {
   let disposed = false;
   let lastWakeAt = 0;
+  /**
+   * 最近一次「模型真的碰了这个工具」的时刻。
+   *
+   * 为什么需要它：叫醒是往会话里**投递一条消息**，宿主会把它排进队列等模型回应。
+   * 模型正忙着（一轮跑几十秒）时不回应，循环却按 `wakeMinGapSec` 继续投递 ——
+   * 实测积出过十几条「有新画面了」，用户一条条点掉。
+   *
+   * 所以规则很简单：**上一条叫醒还没被接住（没有新的工具调用），就不叫下一条。**
+   * 一次只允许一条在飞。
+   */
+  let lastAckAt = Date.now();
   let wakeFailures = 0;
   let consecutiveFails = 0;
   let wakeCount = 0;
@@ -451,6 +462,9 @@ export function startLoop({
         mode: pacingMode,
       });
       if (Date.now() < nextAt) return;   // 下一拍再来
+      // ⑤.1.6 上一条叫醒还没被接住就不要再叫 —— 宿主会把这些叫醒排队，
+      //        模型没来得及回应时，用户屏幕上会积一串「有新画面了」。
+      if (lastWakeAt > lastAckAt) return;
 
       // 叫醒了才算"这张已经叫过"。**失败不能记账**：记了的话下一拍看到 key 没变
       // 就不再重试，连续失败计数永远到不了上限 —— 于是"叫不醒"既不会重试也不会停。
@@ -500,6 +514,8 @@ export function startLoop({
 
   return {
     dispose,
+    /** 任何一次 `see_now` 调用都算"接住了上一条叫醒"。 */
+    noteActivity() { lastAckAt = Date.now(); },
     stopped: () => stopReason !== null,
     state: () => ({
       stopped: stopReason !== null,
@@ -510,6 +526,8 @@ export function startLoop({
       wakes: wakeCount,
       wakeFailures,
       lastWakeAt: lastWakeAt || null,
+      lastAckAt: lastAckAt || null,
+      awaitingAck: lastWakeAt > lastAckAt,
       lastWakeOk,
       lastSheet: lastKey,
       // 节奏诊断：下一次主动唤醒最早落在什么时候、为什么被推迟

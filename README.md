@@ -165,7 +165,7 @@ node scripts/install-dev.mjs      # 拷进本机 DSH 的 desktop profile
 |---|---|---|
 | Windows | `ddagrab`，不行退 `gdigrab`（自动探测） | 无 |
 | macOS | `avfoundation` | 系统设置 → 隐私与安全性 → **屏幕录制**，勾上跑 DSH 的 App |
-| Linux | — | 还没接（要补 `x11grab` / PipeWire） |
+| Linux | **`portal`**：xdg-desktop-portal ScreenCast → PipeWire → gst | `python-gobject` + `gstreamer` + `gst-plugin-pipewire`；首次弹一次选屏框（之后用 restore_token） |
 
 > **「看屏幕」和「悬浮窗」是两件事**，上表说的是采集引擎。悬浮窗（Tk）在 0.1.4 之前
 > 在 macOS/Linux 上**必崩**（`ctypes.windll`，issue #40），现在能起来了：Windows 专有的
@@ -175,6 +175,31 @@ node scripts/install-dev.mjs      # 拷进本机 DSH 的 desktop profile
 
 ffmpeg 不用进 PATH：插件会按 `DSH_FFMPEG_PATH` / `FFMPEG_PATH` / `DSH_FFMPEG_DIR` /
 `~/.dsh/tools/ffmpeg/bin` / `~/.dsh/bin` 的顺序自己找（DSH 桌面版把 ffmpeg 装在第四个位置）。
+
+##### Linux 怎么抓
+
+Wayland 下 ffmpeg 没有正路（`x11grab` 抓的是 XWayland 根窗口，里面没有原生 Wayland
+窗口；`kmsgrab` 要 root），所以 Linux 走的是 **xdg-desktop-portal 的 ScreenCast**：
+
+```
+portal 握手（一次授权，restore_token 存 ~/.dsh/see-now/portal-token.json）
+  → PipeWire 节点（GNOME 上还要 OpenPipeWireRemote 拿 fd，节点在 portal 私有实例里）
+  → gst：pipewiresrc → videorate → videoconvert → [videocrop] → videoscale → rgb24
+```
+
+- **依赖**：`pacman -S python-gobject gstreamer gst-plugin-pipewire`（Debian/Ubuntu：
+  `sudo apt install python3-gi gstreamer1.0-tools gstreamer1.0-pipewire`）。提示会按发行版给。
+- **静止画面**：Mutter/KWin 只在有 damage 时发帧，所以 gst 加了 `keepalive-time=250`
+  （每 250ms 重发最后一帧），否则桌面不动时一帧都不来。
+- **`region`**：坐标是**采集流的坐标系**（`status` 里的「采集流 W×H」，KDE 上是逻辑像素）；
+  `action:"region"` 的拖框窗会把 Tk 的屏幕坐标自动换算成流坐标。
+- **指示框**：采集期间屏幕四边一圈 26px 渐变光晕 + 顶部状态条（PySide6）。Ubuntu 没有
+  `python3-pyside6` 包，可以装进 venv 再用 `DSH_SEE_PYTHON=~/.venvs/pyside/bin/python` 指过来；
+  Qt 的 xcb 插件还需要 `libxcb-cursor0`。
+- **无桌面环境**（服务器 / 容器 / 纯 SSH）用不了：portal 不响应，插件会直接报清楚。
+- **已知问题**：反复 SIGKILL 采集进程可能让 KDE 的 `xdg-desktop-portal` 卡住（表现为
+  握手成功但 0 帧、不报错）；正常 stop 会调 `Session.Close`，不会留下这个状态。
+  真卡住了：`systemctl --user restart xdg-desktop-portal`。
 
 然后让模型调：
 
@@ -600,7 +625,8 @@ test/                     181 条测试
   整屏前景仍然要等它离开。
 - **唤醒有节流**：再密也不会超过 `pace` 里的间隔 —— 语音播报是串行的，更快只会排队。
 - **平台**：Windows（`ddagrab` / `gdigrab`）和 macOS（`avfoundation`）都实测过；
-  **Linux 还没接**（要补 `x11grab` 或 PipeWire，现在会直接报错，不假装能用）。
+  **Linux 走 portal**（无桌面环境、或没装 Screencast 后端时会直接报错，不假装能用；
+  首次要授权一次，KDE/GNOME 的行为略有差异，见上面「Linux 怎么抓」）。
 - **macOS 要多给一次权限**：系统设置 → 隐私与安全性 → **屏幕录制**，勾上跑 DSH 的那个 App。
   没给的时候不会报错，只会全黑 —— 插件会提示，但权限本身只能你去点。
 - **听声音（台词）只有 Windows**：靠 WASAPI 回环，mac 上要装 BlackHole 之类的虚拟声卡

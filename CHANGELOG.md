@@ -88,6 +88,58 @@ gain 2.32，有效行 V=92.7 → gain 1.03。修完两组素材的归一结果�
 关掉：`~/.dsh/see-now.json` 写 `{ "scoreNormalize": false }`（**布尔**，写 `"false"`
 字符串是真值，会失效并留一条 warn），或者单次 `watch({opts:{scoreNormalize:false}})`。
 
+### Added — Linux 屏幕采集（xdg-desktop-portal ScreenCast）
+
+原版在 Linux 上直接抛「屏幕采集还没接 linux」。现在走 Wayland 的正路：
+portal ScreenCast → PipeWire → gst → rgb24，帧契约与 ffmpeg 那条完全一致，
+判帧 / 拼图 / 工具契约一行没改。
+
+- `src/portal_stream.py`：portal 握手（restore_token 持久化）+ `gst-launch` 收流。
+  限帧放在 convert/scale 之前；`videoscale add-borders=true` 让 16:10 屏进 16:9 画布时留边。
+- `src/portal-capture.js`：`spawnPortalFrames()` 与 `spawnFrames()` **同契约**
+  （`{done, stop}` + `onFrame({i,t,buf})`），帧切分复用零拷贝路径；断流（退出码 3/4）
+  自动重连最多 3 次，缺依赖 / 用户拒绝（1/2）不重连。
+- `runner`：Linux 上 `source:"screen"` 自动落 `engine: 'portal'`，不再调
+  `pickScreenEngine()`；带 region 时也不再把 engine 钉成 `gdigrab`。
+- 错误分类按发行版给装包命令；没有 portal（服务器 / 容器）直接报清楚，不干等。
+
+### Added — 屏幕指示框
+
+采集期间四边 26 逻辑像素的渐变光晕 + 顶部状态条（强调色圆点 + 「…正在看屏幕」+ 见 now），
+PySide6 实现，点击穿透、不抢焦点；Wayland 下用 KWin 脚本置顶。
+`teardown` 后延迟 2 秒关（换清晰度不闪）。实测它**不会**进 ScreenCast 的采集流，
+所以默认不裁；`SEE_NOW_CROP_OVERLAY=1` 可强制按逻辑像素裁掉四边 26/顶 55。
+
+### Added — Linux 悬浮窗
+
+`examples/floating-chat/window-linux.py`：Windows 那份 `window.py` 用了 `ctypes.windll`，
+Linux 上一启动就 AttributeError（以前会被误报成「缺 mss」）。Tk 版保持同一套线格式：
+`chat.jsonl` 读写、`window-heartbeat`、`watch-window.json` 的 hidden、可选的协议行。
+`window.js` 按平台选脚本，Linux 上没自定义脚本时给出准确原因。
+
+### Added — Linux 上的 `region`
+
+坐标统一成采集流坐标（portal `Start` 会报 `size`，KDE 上是逻辑像素，如 2048×1280）；
+worker 在流上直接 `videocrop`，越界 exit 5 并报出范围，不静默裁偏。
+拖框窗把 Tk 的屏幕坐标按比例换算成流坐标（XWayland 下两者不是 1:1）。
+
+### Fixed — 静止画面上一帧都没有
+
+`pipewiresrc` 是「有 damage 才发帧」，桌面不动时上游一帧都不给。加 `keepalive-time=250`
+后帧率稳定；重复帧本来就会被判帧层跳过。
+
+### Fixed — 停采集会把 GNOME 的 portal 挂死
+
+以前 SIGTERM 直接退出，portal 会话留在表里，下一次 CreateSession 不返回。
+现在信号只置标志、主循环用 `select` 带 200ms 超时读，退出前调
+`org.freedesktop.portal.Session.Close`。
+
+### Fixed — 叫醒会在会话里排队
+
+叫醒是往会话里投递消息；模型正忙时没回应，循环却按 `wakeMinGapSec` 继续投递，
+宿主把它们排成队（实测积过十几条「有新画面了」）。现在**一次只允许一条在飞**：
+上一条叫醒之后没有新的 `see_now` 调用（`loop.noteActivity()`）就不再叫。
+
 ### Added — 发布闸门、schema 审计、token 对拍（从 storyboard 搬来的工程化）
 
 这三件事 storyboard 早就有、这个包一直没有，而它恰恰是实时那一侧、出事最难查：

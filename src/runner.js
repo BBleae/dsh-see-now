@@ -18,9 +18,12 @@
  */
 
 import { spawnFrames, pickScreenEngine, screenEngineWarning } from './capture.js';
+import { spawnPortalFrames, resolvePython } from './portal-capture.js';
+import { startIndicator, stopIndicator, indicatorState } from './indicator.js';
 import { createPipeline } from './pipeline.js';
 import { cellSize } from './layout.js';
 import { chatWatcherShared, enterChatWait } from './chat.js';
+import { saveStreamSize } from './region.js';
 import { noteInterjected } from './interject.js';
 import { openWindow, pidStamp, windowAlive, setWindowHidden } from './window.js';
 import { createListener } from './listen.js';
@@ -503,9 +506,24 @@ export function createRunner({
    * 关窗也停不下来（社区实报的那条）。
    */
   let endedSource = null;
+  /** 最近一次 portal 采集报上来的流尺寸（逻辑像素）—— region 坐标就在这个空间里。 */
+  let portalStream = null;
+
+  /** 指示框的延迟关闭：换清晰度时 teardown→start 是连着的，立刻关会闪一下 */
+  let indicatorStopTimer = null;
+  function stopIndicatorSoon() {
+    if (indicatorStopTimer) clearTimeout(indicatorStopTimer);
+    indicatorStopTimer = setTimeout(() => {
+      indicatorStopTimer = null;
+      stopIndicator();
+    }, 2000);
+    indicatorStopTimer.unref?.();
+  }
 
   function teardown(why) {
     if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
+    // 采集停了，屏幕上的"有人在看"也该跟着灭
+    stopIndicatorSoon();
     run?.stop();
     run = null;
     running = false;
@@ -556,7 +574,16 @@ export function createRunner({
     // （b）循环立刻又把"窗没了"判成用户关窗，落第二条挂断说明。
     if (!windowAlive()) { windowState = null; windowOpened = false; }
     let engine = src.engine ?? 'auto';
-    if (src.kind === 'screen' && engine === 'auto') engine = await pickScreenEngine({ ffmpegPath });
+    if (src.kind === 'screen' && engine === 'auto') {
+      /**
+       * Linux 的屏幕源走 xdg-desktop-portal 的 ScreenCast（`engine: 'portal'`）。
+       *
+       * 不调 `pickScreenEngine()`：那个探测只认 Windows 的 ddagrab 和 macOS 的
+       * avfoundation，Linux 上它只会抛「还没接」。Wayland 下 ffmpeg 也没有正路
+       * （x11grab 抓的是 XWayland 根窗口，里面没有原生 Wayland 窗口；kmsgrab 要 root）。
+       */
+      engine = process.platform === 'linux' ? 'portal' : await pickScreenEngine({ ffmpegPath });
+    }
     const size = SIZES[q] ?? SIZES[DEFAULT_QUALITY];
     /**
      * region 模式：`width/height` 是**单格**尺寸（长边 = 档位长边），不是画布。
@@ -623,30 +650,97 @@ export function createRunner({
     source = s;
     lastSource = s;
     startedAt = Date.now();
-    run = spawnFrames({
-      source: s,
-      width: p.constants.width,
-      height: p.constants.height,
-      fps: p.constants.fps,
-      ffmpegPath,
-      engine,
-      onFrame: (f) => {
-        frames += 1;
-        // 一帧解码就抛 = 整条管线停摆，这里必须兜住：宁可少一帧，不能让采集线程炸掉
-        try { p.push(f); } catch (e) { lastError = `push: ${e?.message ?? e}`; }
-      },
-      onStderr: (s2) => { if (process.env.DSH_SEE_NOW_DEBUG) log(s2.trim()); },
-    });
+    // portal 和 ffmpeg 共用同一套逐帧回调：上游（判帧/拼图）根本不区分帧从哪来。
+    const portal = engine === 'portal';
+    if (indicatorStopTimer) { clearTimeout(indicatorStopTimer); indicatorStopTimer = null; }
+
+    /**
+     * Linux：采集前先把屏幕上的指示框拉起来（幂等，第二次 0 成本）。
+     *
+     * 光晕和状态条会被自己采进画面里，所以按它报回来的 `dpr` 换算成**设备像素**，
+     * 交给 gst 在**原始分辨率**上 videocrop 掉 —— 用户看得见，模型看不见。
+     * 起不来只是少个提示（crop 退回 0），不影响采集。
+     */
+    let portalCrop = null;
+    portalStream = null;
+    if (portal && process.env.SEE_NOW_INDICATOR !== '0') {
+      // 用同一个 python 解析规则（DSH_PYTHON_PATH / DSH_SEE_PYTHON 优先）：
+      // 有的发行版把 PySide6 装在 venv 里，系统 python3 是看不到的。
+      const ind = await startIndicator({ log, pythonPath: resolvePython() });
+      /**
+       * **默认不裁。** 实测（KDE Plasma Wayland + ScreenCast）指示框根本进不了采集流：
+       * 同一时刻截图（portal Screenshot）里框清清楚楚，而 ScreenCast 流里只有 App
+       * 半透明的地方透出一点 —— 也就是说模型看不到它，裁掉反而是白丢画面
+       * （顶部 55 逻辑像素 = 标题栏 / 标签页）。
+       *
+       * 但这条依赖合成器实现，所以留一个显式开关：真发现流里带框了，
+       * 设 `SEE_NOW_CROP_OVERLAY=1` 就按逻辑像素裁掉四边 26px / 顶 55px。
+       */
+      if (ind.ok && process.env.SEE_NOW_CROP_OVERLAY === '1') {
+        if (ind.logicalWidth && ind.logicalHeight) {
+          portalCrop = {
+            logicalWidth: ind.logicalWidth,
+            logicalHeight: ind.logicalHeight,
+            edge: ind.edge,
+            top: ind.top,
+          };
+        } else {
+          log('指示框起来了但没报逻辑尺寸 —— 不裁');
+        }
+      } else if (!ind.ok) {
+        log(`指示框没起来（采集照旧，屏幕上不会有光晕）：${ind.reason}`);
+      }
+    }
+    const onFrame = (f) => {
+      frames += 1;
+      // 一帧解码就抛 = 整条管线停摆，这里必须兜住：宁可少一帧，不能让采集线程炸掉
+      try { p.push(f); } catch (e) { lastError = `push: ${e?.message ?? e}`; }
+    };
+    const onStderr = (s2) => { if (process.env.DSH_SEE_NOW_DEBUG) log(s2.trim()); };
+    run = portal
+      ? spawnPortalFrames({
+          width: p.constants.width,
+          height: p.constants.height,
+          fps: p.constants.fps,
+          crop: portalCrop,
+          // region 的坐标就是**采集流的坐标系**：worker 拿 portal 报的 size 直接 videocrop
+          region: s.region ?? null,
+          onReady: (info) => {
+            portalStream = {
+              width: info.stream_width || null,
+              height: info.stream_height || null,
+              region: info.region ?? null,
+            };
+            // 落盘给取框窗用：它要知道流坐标和 Tk 屏幕坐标的比例
+            if (portalStream.width && portalStream.height) {
+              saveStreamSize({ width: portalStream.width, height: portalStream.height });
+            }
+          },
+          onFrame,
+          onStderr,
+        })
+      : spawnFrames({
+          source: s,
+          width: p.constants.width,
+          height: p.constants.height,
+          fps: p.constants.fps,
+          ffmpegPath,
+          engine,
+          onFrame,
+          onStderr,
+        });
     run.done.then((r) => {
       if (pipeline === p) {
         // **文件正常放完（`ended`）不是错误** —— 别写进 lastError，status 里会显示成故障
-        if (!r?.ended) lastError ??= `ffmpeg 退出（${r.frames} 帧 / ${Math.round(r.ms / 1000)}s）`;
+        if (!r?.ended) {
+          lastError ??= `${portal ? 'portal' : 'ffmpeg'} 退出（${r.frames} 帧 / ${Math.round(r.ms / 1000)}s）`;
+        }
         // 文件源放完 = 这一次看完了。记下来，别让下一条 watch 又从头放一遍。
         if (s.kind === 'file') endedSource = s;
         teardown('ffmpeg-exit');
       }
     }).catch((e) => {
-      lastError = `ffmpeg: ${e?.message ?? e}`;
+      lastError = `${portal ? 'portal' : 'ffmpeg'}: ${e?.message ?? e}`;
       if (pipeline === p) teardown('ffmpeg-error');
     });
     log(`开始看 ${s.kind}${engine && engine !== 'auto' ? `/${engine}` : ''} @${w}×${h}${s.region ? ` region=${s.region.x},${s.region.y},${s.region.w},${s.region.h}` : ''}`);
@@ -775,8 +869,10 @@ export function createRunner({
           src = { ...(src ?? { kind: 'screen' }) };
           if (region) {
             src.region = region;
-            // ddagrab 没有 -offset_x：带 region 必须走 gdigrab（见 capture.js）
-            src.engine = 'gdigrab';
+            // ddagrab 没有 -offset_x：带 region 必须走 gdigrab（见 capture.js）。
+            // **Linux 例外**：那边走 portal，region 由 worker 在流上 videocrop，
+            // 钉成 gdigrab 会让 ffmpeg 去开一个不存在的输入格式（0 帧、没报错）。
+            if (process.platform !== 'linux') src.engine = 'gdigrab';
           } else {
             delete src.region;
             if (!reqSrc) delete src.engine;
@@ -1084,6 +1180,10 @@ export function createRunner({
         // 开窗结果与失败原因：**"它在看但我什么都看不到"时第一个要看的就是 reason**
         // （没有带 tkinter 的 python 是最常见的一种，那时窗根本不会出现）
         window: { ok: windowState?.ok ?? null, reason: windowState?.reason ?? null, script: windowState?.from ?? null },
+        // 屏幕上的指示框（贴边光晕 + 状态条）：在跑就报逻辑尺寸和边宽
+        indicator: indicatorState(),
+        // 采集流的真实尺寸（region 的坐标系）——模型量坐标时要看这个数
+        stream: portalStream,
         // 有没有待领的说明（挂断那条）—— status 里看得见，才不会"明明写了没人读"
         notePending: Boolean(pendingNote),
         // 听声音的状态。"它好像没听见台词"时第一个要看的就是它：
