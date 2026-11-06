@@ -167,6 +167,44 @@ export function guardReason({ hungUp = false, fileEnded = false, explicitSrc = f
   return null;
 }
 
+/**
+ * 把候选台词**按 `t0` 归张**：一句话只跟它开始时刻所在的那一张走。
+ *
+ * 为什么需要它：取台词的窗口两头都留了余量（`from-400` / `to+800`，迟到转写不能丢），
+ * 所以跨在边界上的那句话会**同时出现在相邻两张的候选里**。一张张交付时隔着两轮看不出来，
+ * 一次交三张（超省模式）就是同一句在同一个结果里出现两次，第二份还被标成 `#1`。
+ *
+ * 规则：
+ * - `t0` 落在哪张的窗口里（`from-400 .. to`）就归哪张 —— 跨界的那句归**更早**那张，
+ *   因为它大半是在那张的画面里说的；
+ * - 比第一张还早的迟到句（只靠 `-400` 捡回来的）归最先看到它的那张，不丢；
+ * - 同一 `t0` 只挂一次。
+ *
+ * @param {{from:number,to:number}[]} windows  epoch ms，**按时间正序**
+ * @param {Array<Array<{t0:number,t1:number,text:string}>>} candidates  每张的候选（窗口带余量）
+ * @returns {Array<Array<object>>} 每张该挂的台词，按 `t0` 升序
+ */
+export function bucketLines(windows, candidates) {
+  const out = (windows ?? []).map(() => []);
+  if (!out.length || !candidates?.length) return out;
+  const seen = new Set();
+  const ownerOf = (t0) => {
+    for (let i = 0; i < windows.length; i += 1) {
+      if (t0 <= windows[i].to && t0 >= windows[i].from - 400) return i;
+    }
+    return -1;
+  };
+  for (let i = 0; i < candidates.length; i += 1) {
+    for (const l of candidates[i]) {
+      if (seen.has(l.t0)) continue;
+      const owner = ownerOf(l.t0);
+      seen.add(l.t0);
+      out[owner >= 0 ? owner : i].push(l);
+    }
+  }
+  return out.map((lines) => lines.sort((a, b) => a.t0 - b.t0));
+}
+
 export function createRunner({
   ffmpegPath = 'ffmpeg', log = () => {}, graceSec = 60, ctx = null,
   /** 「听声音」的延迟参数（`~/.dsh/see-now.json` 的 `listen` 段，见 tuning.js） */
@@ -262,6 +300,8 @@ export function createRunner({
   /**
    * 把这段时间窗里的台词挂到 sheet 上。**没有台词就什么都不加** ——
    * 模型看到空的"台词："标题只会以为转写坏了。
+   *
+   * 单张交付走这里；一次交 N 张走 `attachSheets()`（多了一层"按 t0 归张"）。
    */
   function attachLines(sheet) {
     if (!sheet) return sheet;
@@ -283,6 +323,47 @@ export function createRunner({
     const ch = pipeline?.drainChanges?.() ?? [];
     if (ch.length) sheet.changes = ch;
     return sheet;
+  }
+
+  /**
+   * 一次交 N 张（超省模式）时的台词挂载。
+   *
+   * **为什么不能对每张各调一次 `attachLines()`**：那个窗口两头各留了 400/800ms 的余量
+   * （迟到转写不能丢），于是**跨在边界上的那句话同时落进相邻两张的窗口**。一张张交的
+   * 时候看不出来（隔着两轮），一次交三张就是同一句台词在结果里出现两次，而且第二份还会
+   * 被标成 `#1` —— 它其实属于上一张的最后一格。
+   *
+   * 所以：窗口按时间正序算（`lastSheetWallTo` 是单调推进的水位线），再把候选台词**按 `t0`
+   * 归张** —— 一句话只跟它开始时刻所在的那一张走，不重不漏。
+   */
+  function attachSheets(list) {
+    if (!list?.length) return [];
+    if (list.length === 1) return [attachLines(list[0])];
+    const windows = list.map((s) => {
+      const to = s.wallTo ?? Date.now();
+      const from = lastSheetWallTo || Math.min(s.wallFrom ?? to, to - 20_000);
+      if (to > lastSheetWallTo) lastSheetWallTo = to;
+      return { from, to };
+    });
+    const buckets = bucketLines(windows, windows.map((w) => listener.between(w.from - 400, w.to + 800)));
+    buckets.forEach((lines, i) => { if (lines.length) list[i].lines = lines; });
+
+    /**
+     * 变化日志一次取空，**不能整批都挂在第一张上**：那张的时间窗只覆盖前 1/3，
+     * 模型会把后面的变化读成"这张图上发生的"。按 `c.to` 分给盖住它的那张，
+     * 超出最后一张的归最后一张。
+     */
+    const ch = pipeline?.drainChanges?.() ?? [];
+    if (ch.length) {
+      const bucketsOfChange = list.map(() => []);
+      for (const c of ch) {
+        let i = list.findIndex((s) => c.to <= s.to + 1e-6);
+        if (i < 0) i = list.length - 1;
+        bucketsOfChange[i].push(c);
+      }
+      bucketsOfChange.forEach((b, i) => { if (b.length) list[i].changes = b; });
+    }
+    return list;
   }
 
   /** 丢掉预留（换管线 / 插话截断 / 已取走）。 */
@@ -865,7 +946,7 @@ export function createRunner({
               await listener.settle(300);
               return {
                 ok: true,
-                sheets: got.map((x) => attachLines(x)),
+                sheets: attachSheets(got),
                 waited: (Date.now() - t0) / 1000,
                 quality,
                 windowOpen: win.ok,
@@ -916,7 +997,7 @@ export function createRunner({
     peek() {
       // 超省模式下这里可能一次拿到多张 —— 和 `watch` 同一个口径，
       // 否则"攒了 3 张但 peek 只给 1 张"等于白攒。
-      const queued = takeSheets('peek').map((s) => attachLines(s));
+      const queued = attachSheets(takeSheets('peek'));
       if (running) armGrace();
       if (!windowState?.ok && !windowPending) void ensureWindow();
       return queued;
