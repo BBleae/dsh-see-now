@@ -17,8 +17,10 @@ jobs:
       # 测试自己也会设，但兜一层：不隔离的话 chat.js/window.js 会去摸真实家目录。
       # **不能写 `${{ runner.temp }}`** —— runner 上下文在 job 级 env 里不可用，
       # 整份 workflow 会解析失败（表现是"run 失败但 0 个 job"）。
+      #
+      # 也**不能加 `DSH_SEE_NO_WINDOW`**：`windowLine()` 会直接返回"被环境变量关掉了"，
+      # `visibility.test.mjs` 那 5 条断言全是围绕可见性文案的，会被整片打挂（踩过）。
       DSH_HOME: /tmp/dsh-home
-      DSH_SEE_NO_WINDOW: '1'
     steps:
       - uses: actions/checkout@v4
 
