@@ -128,6 +128,13 @@ window.__ModuleLoader__.load({
       'tier.from': '档',
       'field.wakes': '自主唤醒上限',
       'field.wakes.hint': '你一句话都没说，它自己最多醒几次就收工。',
+      'field.imageTrigger': '涨到多少张就动手省',
+      'field.imageTrigger.hint': '会话里的图涨到这个数，就把更早的一次性省略掉（省到下面那个留底数）。'
+        + '0 = 关闭这个功能。',
+      'field.imageKeep': '省完保留最近几张',
+      'field.imageKeep.hint': '被省掉的图会变成一段文字：不再发给模型，磁盘上那份也能删。'
+        + '100 张约 2.2 万 token。**必须小于上面那个触发线**。'
+        + '⚠ 每省略一次，前缀缓存要全量重算一遍 —— 所以触发线和留底的差越大，重算越少。',
       'field.live': '说长句时先出半截字幕',
       'field.live.hint': '关掉的话，一句话必须等说完才显示 —— 说满十几秒的时候屏幕上一个字都没有。',
       'field.liveMin': '多长开始给半截',
@@ -235,6 +242,8 @@ window.__ModuleLoader__.load({
       const listen = values?.listen ?? {};
       return {
         maxAutonomousWakes: values.maxAutonomousWakes,
+        imageTrigger: values.imageTrigger,
+        imageKeep: values.imageKeep,
         idleStopMin: values.idleStopMin,
         defaultPace: values.defaultPace,
         speechPacing: values.speechPacing,
@@ -281,7 +290,7 @@ window.__ModuleLoader__.load({
      */
     function patchOf(draft, values) {
       const patch = {};
-      for (const key of ['maxAutonomousWakes', 'idleStopMin', 'defaultPace', 'speechPacing']) {
+      for (const key of ['maxAutonomousWakes', 'imageTrigger', 'imageKeep', 'idleStopMin', 'defaultPace', 'speechPacing']) {
         if (draft[key] !== values[key]) patch[key] = key === 'defaultPace' || key === 'speechPacing'
           ? draft[key]
           : num(draft[key]);
@@ -668,6 +677,8 @@ window.__ModuleLoader__.load({
               ['custom', t('tier.custom')],
             ]),
             field('maxAutonomousWakes', 'field.wakes', 'field.wakes.hint', { min: 1, max: 200, step: 1 }),
+            field('imageTrigger', 'field.imageTrigger', 'field.imageTrigger.hint', { min: 0, max: 2000, step: 10 }),
+            field('imageKeep', 'field.imageKeep', 'field.imageKeep.hint', { min: 0, max: 2000, step: 10 }),
             field('liveMin', 'field.liveMin', 'field.liveMin.hint', { min: 0.8, max: 6, step: 0.1 }),
             field('liveStep', 'field.liveStep', 'field.liveStep.hint', { min: 0.4, max: 4, step: 0.1 }),
             field('pollMs', 'field.pollMs', 'field.pollMs.hint', { min: 50, max: 1000, step: 10 })),

@@ -34,6 +34,20 @@ export const TUNING_DEFAULTS = Object.freeze({
    */
   wakeBatch: 1,
   /**
+   * 会话里涨到多少张图就动手省（`imageTrigger`）。**0 = 关掉这个功能**。
+   *
+   * 为什么不直接"一到留底数就省"：留 100 张时，第 101 张进来省 1 张、第 102 张再省 1 张 ——
+   * **每出一张图就改一次历史，前缀缓存每轮全量失效**，比不省还贵得多（实测口径见 offload.js）。
+   * 拆成「触发线 300 / 留底 100」后，攒 200 张才重算一次。
+   */
+  imageTrigger: 300,
+  /**
+   * 省完保留最近几张（`imageKeep`）。必须**小于** `imageTrigger`，否则一触发就白省。
+   *
+   * 100 张 ≈ 2.2 万 token（一张 222 token，跟文件大小无关 —— 计费按像素不按字节）。
+   */
+  imageKeep: 100,
+  /**
    * 档位映射：这张图里每帧占多大格子。
    *
    * `standard` 把 1 档压成 1/2（默认）；`native` 原样不压；`full` 整体降一档（格子更大）；
@@ -220,6 +234,23 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     warnings.push('wakeBatch 必须是 1–4 的整数（攒够几张图才交），已用默认 1');
   }
 
+  // 触发线：0 = 关掉；留底：0 = 全省（只留触发线之后新来的）
+  let imageTrigger = clampInt(raw.imageTrigger, 0, 2000, TUNING_DEFAULTS.imageTrigger);
+  if (raw.imageTrigger !== undefined && Number(raw.imageTrigger) !== imageTrigger) {
+    warnings.push('imageTrigger 必须是 0–2000 的整数（0 = 关闭），已用默认 300');
+  }
+  let imageKeep = clampInt(raw.imageKeep, 0, 2000, TUNING_DEFAULTS.imageKeep);
+
+  /**
+   * `keep >= trigger` 是**没意义**的配置：一触发就想省，结果发现不用省。
+   * 不拒绝加载（配置不该把插件弄挂），把它夹到 `trigger - 1` 并说一声。
+   */
+  if (imageTrigger > 0 && imageKeep >= imageTrigger) {
+    const fixed = Math.max(0, imageTrigger - 1);
+    warnings.push(`imageKeep（${imageKeep}）必须小于 imageTrigger（${imageTrigger}），已改为 ${fixed}`);
+    imageKeep = fixed;
+  }
+
   let tierStyle = TUNING_DEFAULTS.tierStyle;
   if (raw.tierStyle !== undefined) {
     const want = String(raw.tierStyle ?? '').trim();
@@ -284,6 +315,8 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     maxAutonomousWakes,
     idleStopMin,
     wakeBatch,
+    imageTrigger,
+    imageKeep,
     idleStopMs: idleStopMin * 60 * 1000,
     tierStyle,
     tierMap,
@@ -301,7 +334,7 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
 
 /** 面板能改的顶层键。`idleStopMs` 是派生的，不在这里 —— 传进来会被拒。 */
 export const WRITABLE_KEYS = Object.freeze([
-  'maxAutonomousWakes', 'idleStopMin', 'wakeBatch', 'tierStyle', 'tierMap',
+  'maxAutonomousWakes', 'idleStopMin', 'wakeBatch', 'imageTrigger', 'imageKeep', 'tierStyle', 'tierMap',
   'defaultPace', 'speechPacing', 'scoreNormalize', 'listen',
 ]);
 

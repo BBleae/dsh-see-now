@@ -18,6 +18,8 @@ import { speechSubscribers, onSpeech } from './speech.js';
 import { markSpeaking } from './listen.js';
 import { startLoop, HANGUP_NOTE } from './loop.js';
 import { readTuning, TIER_STYLES } from './tuning.js';
+import { planOffload, planOffloadWithTrigger, applyOffload } from './offload.js';
+import { defineToolCompat } from './define-tool.js';
 import { createSettingsApi, ROUTE_PREFIX } from './settings-api.mjs';
 import { windowAlive, windowHidden, setWindowHidden, hiddenForShow, windowReport, windowLine } from './window.js';
 import { pickRegion, loadRegion, clearRegion, regionText } from './region.js';
@@ -86,6 +88,13 @@ const VERSION = (() => {
 // 不声明时 `ctx.attachments` 是 undefined，而且 `?.` 挡不住（get 陷阱直接 throw）。
 export const inject = ['tools', 'attachments', 'sessionController'];
 
+/**
+ * 「刚交出去图」的回调。`attachAndReturn` 是模块级函数，够不到 apply 作用域里的
+ * `tuning` / `lastSessionId`，所以走这条钩子：apply 时挂上，交付后触发自动省略。
+ * 用钩子而不是把 `attachAndReturn` 改成闭包 —— 它被测试和其他分支到处调用。
+ */
+let afterDelivery = null;
+
 /** 可选服务：优先 `ctx.get()`，老宿主退回属性访问且包 try。 */
 function serviceOf(ctx, key) {
   try {
@@ -118,13 +127,25 @@ async function loadDefineTool() {
     const mod = await import('@deepseek-ai/dsh-tools');
     if (mod?.defineTool) return mod.defineTool;
   } catch { /* 落到环境变量 —— 本地开发/测试时用 */ }
+  /**
+   * 第二跳：`DSH_TOOLS_PATH` 指向磁盘上的那份（本地开发时用）。
+   * **包一层 try**：路径写错不该让插件整个废掉。
+   */
   const override = process.env.DSH_TOOLS_PATH;
   if (override) {
-    const { pathToFileURL } = await import('node:url');
-    const mod = await import(pathToFileURL(override).href);
-    if (mod?.defineTool) return mod.defineTool;
+    try {
+      const { pathToFileURL } = await import('node:url');
+      const mod = await import(pathToFileURL(override).href);
+      if (mod?.defineTool) return mod.defineTool;
+    } catch { /* 路径不对，继续落到兜底 */ }
   }
-  throw new Error('cannot resolve @deepseek-ai/dsh-tools (set DSH_TOOLS_PATH for local dev)');
+  /**
+   * 最后一跳：内置兼容实现。**不能再抛** ——
+   * 宿主的包在 `app.asar` 里，插件侧经常解析不到（社区实报），
+   * 抛出去会被 apply 的 catch 吞掉，结果是**整个插件静默不注册任何工具**。
+   * 内置版只少了运行时参数校验，工具照常能用（详见 define-tool.js）。
+   */
+  return defineToolCompat;
 }
 
 /**
@@ -383,6 +404,8 @@ async function attachAndReturn(ctx, sheets, extra = {}) {
   }
   // `say` 是给清单用的，不进 meta —— 那是整段话，塞进 meta 只会让返回值翻倍
   const { say: said, ...meta } = extra;
+  // 图已经交给宿主了，顺手看要不要省略老的（异步、不阻塞、失败只记日志）
+  try { afterDelivery?.(); } catch { /* 省略绝不能影响这一张图的交付 */ }
   const first = list[0];
   const last = list[list.length - 1];
   return {
@@ -582,6 +605,113 @@ async function registerAll(ctx) {
    * 用**函数**而不是快照：会话 id 由钩子随时更新，闭包里存值会让第一次之后全用旧的。
    */
   let lastSessionId = null;
+
+  /**
+   * 省略历史里较早的图（写好 `image/offload` 事件）。手动 action 和自动触发共用。
+   *
+   * 为什么需要它：一张图进了历史就跟着每一轮请求走，宿主不回收；攒到 600 张
+   * 或者 128 MiB 才自动省略一次。想让「只看最近 N 张」提前生效，只能自己写。
+   *
+   * 写的是宿主的正规事件，**不是改文件** —— 改文件会被 `readImageFile` 的三重校验
+   * 判成 ATTACHMENT_CORRUPT（那比删掉更糟：删掉至少能看出是"文件没了"）。
+   * 事件一落地，投影就把那些图换成占位文本，之后既不发出去、也能从磁盘删。
+   *
+   * @param {number} keep - 保留最近几张不省略
+   * @param {{silent?: boolean}} [opts] - 自动触发时静默：出错只记日志，不打扰模型
+   * @returns {Promise<{ok:boolean, text:string, meta:object}>}
+   */
+  async function runOffload(limits, { silent = false } = {}) {
+    const trigger = Number.isFinite(limits?.trigger) && limits.trigger >= 0 ? Math.floor(limits.trigger) : tuning.imageTrigger;
+    const keep = Number.isFinite(limits?.keep) && limits.keep >= 0 ? Math.floor(limits.keep) : tuning.imageKeep;
+    if (trigger === 0) {
+      return { ok: true, text: '省略是关的（`imageTrigger` = 0）。', meta: { ok: true, offload: { trigger: 0, keep, skipped: 'disabled' } } };
+    }
+    if (keep >= trigger) {
+      return {
+        ok: false,
+        text: `配置不对：留底（${keep} 张）必须小于触发线（${trigger} 张），否则一触发就白省。`,
+        meta: { ok: false, offload: { trigger, keep, reason: 'keep>=trigger' } },
+      };
+    }
+
+    const sc = serviceOf(ctx, 'sessionController');
+    if (!sc?.resolveAgent) {
+      return { ok: false, text: '宿主没有 sessionController，没法写会话事件。', meta: { ok: false, offload: { reason: 'no-session-controller' } } };
+    }
+    const sid = lastSessionId;
+    if (!sid) {
+      return { ok: false, text: '还不知道是哪个会话（这个进程还没收到过 session/event）。先 `watch` 一次再来。', meta: { ok: false, offload: { reason: 'no-session' } } };
+    }
+
+    let resolved;
+    try {
+      resolved = await sc.resolveAgent(sid);
+    } catch (e) {
+      resolved = { error: e };
+    }
+    const session = resolved?.agent?.session;
+    if (!session) {
+      const why = resolved?.error?.message ?? resolved?.error ?? 'resolve-failed';
+      if (silent) log(`自动省略跳过：拿不到会话（${String(why).slice(0, 120)}）`);
+      return { ok: false, text: `拿不到这个会话：${String(why).slice(0, 160)}`, meta: { ok: false, offload: { reason: 'resolve-failed' } } };
+    }
+
+    /**
+     * `snapshotEvents()` 在宿主里标了 deprecated，但它是**唯一**能同步读到当前日志的
+     * 公开口子，surface 重放要的就是这份。真被删了会明确报出来，不会静默当成"没有图"。
+     */
+    const events = typeof session.snapshotEvents === 'function' ? session.snapshotEvents() : null;
+    if (!events || !Array.isArray(events)) {
+      return { ok: false, text: '这个宿主版本读不到会话日志（`snapshotEvents` 没了），省略做不了。', meta: { ok: false, offload: { reason: 'no-events' } } };
+    }
+
+    // 涨到触发线才动手，一次省到只剩 keep 张
+    const { triggered, plan } = planOffloadWithTrigger(events, { trigger, keep });
+    if (!triggered) {
+      return {
+        ok: true,
+        text: `不用省略：历史里 ${plan.total} 张，还没到 ${trigger} 张的触发线（到线会一次省到 ${keep} 张）。`,
+        meta: { ok: true, offload: { ...plan, trigger, target: keep, applied: false } },
+      };
+    }
+
+    const r = await applyOffload(session, plan.targets, serviceOf(ctx, 'sessions'));
+    if (!r.ok) {
+      if (silent) log(`自动省略失败：${r.reason}`);
+      return { ok: false, text: `省略失败：${r.reason}`, meta: { ok: false, offload: { ...plan, reason: r.reason } } };
+    }
+
+    log(`省略了 ${plan.offloading} 张图（保留 ${plan.kept} / 共 ${plan.total}）`);
+    return {
+      ok: true,
+      text: `已省略 ${plan.offloading} 张，保留最近 ${plan.kept} 张`
+        + `（${plan.total} 张触发线 ${trigger}）。\n`
+        + '- 这些图从现在起换成一段占位文本，**不再进请求、也不再读盘**，磁盘上那份可以删了（`tools/attachments-gc.mjs`）；\n'
+        + '- 会话照常继续，模型知道"这里有过图"，只是看不到画面；\n'
+        + '- ⚠ 这会**一次性让前缀缓存全量重算**（历史被改了一处），别频繁调。',
+      meta: { ok: true, offload: { ...plan, applied: true } },
+    };
+  }
+
+  /**
+   * 自动省略：出图后隔一会儿看一眼，超了就把早的省掉。
+   *
+   * **节流 30 秒** —— 重放整份会话日志是要花钱的（一次几十毫秒到几百毫秒），
+   * 不能每交一张图就跑。出图间隔本身是 15–40 秒，所以实际是"差不多每次出图检查一次"。
+   * 用 `setTimeout(0)` 甩出去，**绝不拖慢交付**：模型拿到图的时间不能受这个影响。
+   */
+  let lastOffloadCheck = 0;
+  function maybeAutoOffload() {
+    if (!tuning.imageTrigger) return;
+    const now = Date.now();
+    if (now - lastOffloadCheck < 30_000) return;
+    lastOffloadCheck = now;
+    setTimeout(() => {
+      void runOffload({ trigger: tuning.imageTrigger, keep: tuning.imageKeep }, { silent: true });
+    }, 0);
+  }
+  afterDelivery = maybeAutoOffload;
+
 
   /**
    * **逐帧 / 逐场景模式**（默认关）。
@@ -1161,10 +1291,30 @@ async function registerAll(ctx) {
         };
       }
 
+      if (action === 'offload') {
+        const askedTrigger = args.trigger === undefined ? tuning.imageTrigger : Number(args.trigger);
+        const askedKeep = args.keep === undefined ? tuning.imageKeep : Number(args.keep);
+        const trigger = Number.isFinite(askedTrigger) && askedTrigger >= 0 ? Math.floor(askedTrigger) : tuning.imageTrigger;
+        const keep = Number.isFinite(askedKeep) && askedKeep >= 0 ? Math.floor(askedKeep) : tuning.imageKeep;
+        const r = await runOffload({ trigger, keep });
+        return { text: r.text, meta: r.meta };
+      }
+
       if (action === 'status') {
         const s = runner.status();
         const voice = voiceState();
         const lp = loop?.state() ?? null;
+        /**
+         * 图库水位：**只报"本次采集"出了几张**，不假装知道整个会话。
+         *
+         * 说清楚为什么只能这样：一张图落在宿主附件库里，被会话历史的 attachmentId
+         * 引用着，谁引用谁留存；宿主不会回收，插件也读不到别人的会话日志。
+         * 所以这里给的是"这一趟看了多少"，换算按 798×450 的实测口径
+         * （222 token / 约 130 KB 一张），只当量级参考，别当账单。
+         */
+        const sheets = s.stats?.sheets ?? 0;
+        const estKTok = Math.round(sheets * 222 / 1000);
+        const estMB = Math.round(sheets * 130 / 1024);
         return {
           text: (s.running
             ? `在看 ${s.source?.kind} @${s.size?.[0]}×${s.size?.[1]}（${s.quality}，${s.since}s，收到 ${s.frames} 帧，留帧 ${s.stats?.kept ?? 0}，出图 ${s.stats?.sheets ?? 0}）`
@@ -1174,6 +1324,14 @@ async function registerAll(ctx) {
             + `\n循环：${loopLine(lp)}`
             // 队列：手上有没有攒着没取走的图 —— `pending` 一直是 1 时模型不会收到新图，只会一直被叫
             + `\n队列：${s.pending ? `有 ${s.pending} 张没取走（出图序号 ${s.sheets}）` : '空'}`
+            // 图库水位：**同一个会话里反复看，历史里的图只会累积**（宿主不回收、压缩也不释放磁盘）
+            + (sheets > 0
+              ? `\n图库：本次采集出 ${sheets} 张（≈${estKTok}k token、${estMB} MB）`
+                + (sheets >= 200
+                  ? `\n  ↳ 已经不少了：这些图都留在本会话历史里，每轮请求都会重发。`
+                    + '再往下看，重算会越来越贵 —— 建议新开一个会话继续。'
+                  : '')
+              : '')
             // 预留：**"叫醒了却没图"这两个数一起看** —— `pending 空 + 预留有` 是正常的
             // （图已经叫醒、等人来 peek）；两个都空而模型说没图，才是真的空手
             + `${s.reserved ? ` · 预留 1 张（${s.reserved.ageSec}s 前叫醒的，等 peek 取）` : ''}`
@@ -1215,7 +1373,7 @@ async function registerAll(ctx) {
         };
       }
 
-      return { text: `未知 action: ${action}（可用 watch / peek / start / stop / status / window / region / help）`, meta: { action } };
+      return { text: `未知 action: ${action}（可用 watch / peek / start / stop / status / window / region / offload / help）`, meta: { action } };
     },
   };
 

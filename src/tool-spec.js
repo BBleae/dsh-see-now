@@ -82,7 +82,18 @@ export function seeNowToolSpec() {
     parameters: {
       action: {
         type: 'string',
-        description: 'watch (default) | peek | start | stop | status | window | region | help',
+        description: 'watch (default) | peek | start | stop | status | window | region | offload | help',
+      },
+      trigger: {
+        type: 'number',
+        description: 'With action:"offload": 历史里涨到多少张图才动手省（默认取设置里的 imageTrigger，'
+          + '出厂 300；0 = 关闭）。**必须大于 `keep`**。涨到线才一次省到 `keep` —— 不这么拆的话'
+          + '每出一张图都要改历史，前缀缓存每轮全废。',
+      },
+      keep: {
+        type: 'number',
+        description: 'With action:"offload": 省完保留最近几张（默认取设置里的 imageKeep，出厂 100）。'
+          + '更早的标记成"图已省略"，换成占位文本 —— 之后不再进请求，文件也能从磁盘删。',
       },
       region: {
         type: 'string',
