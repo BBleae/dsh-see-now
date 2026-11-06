@@ -14,8 +14,10 @@ jobs:
       matrix:
         node: [20, 22]
     env:
-      # 测试自己也会设，但兜一层：不隔离的话 chat.js/window.js 会去摸真实家目录
-      DSH_HOME: ${{ runner.temp }}/dsh-home
+      # 测试自己也会设，但兜一层：不隔离的话 chat.js/window.js 会去摸真实家目录。
+      # **不能写 `${{ runner.temp }}`** —— runner 上下文在 job 级 env 里不可用，
+      # 整份 workflow 会解析失败（表现是"run 失败但 0 个 job"）。
+      DSH_HOME: /tmp/dsh-home
       DSH_SEE_NO_WINDOW: '1'
     steps:
       - uses: actions/checkout@v4
