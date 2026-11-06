@@ -81,6 +81,65 @@ export function windowConfigPath(env = process.env) {
 }
 
 /**
+ * 悬浮窗的外观预设，写进 `watch-window.json` 的 `glass`。
+ *
+ *   auto   不写这个键：窗口按环境自己选（远程/录屏 → solid，其余 → live）
+ *   live   实时玻璃：每帧抓屏 + 模糊，最好看也最吃 CPU
+ *   frost  静态磨砂：一张预生成的底板，不抓屏（低配机/高分屏选它）
+ *   solid  纯色：最省，任何捕获方式都看得见
+ *
+ * 为什么放在这个文件里而不是 `see-now.json`：窗口进程只看这一份的 mtime，
+ * 写别处要等下次开窗才生效。
+ */
+export const WINDOW_STYLES = Object.freeze(['auto', 'live', 'frost', 'solid']);
+
+function styleOf(cfg) {
+  const raw = typeof cfg?.glass === 'string' ? cfg.glass.trim().toLowerCase() : '';
+  return WINDOW_STYLES.includes(raw) ? raw : 'auto';
+}
+
+/** 现在的样式 + 文件位置（面板要能把"改的是哪个文件"说出来）。 */
+export function readWindowStyle(env = process.env) {
+  const path = windowConfigPath(env);
+  return { path, exists: existsSync(path), style: styleOf(readJson(path)) };
+}
+
+/**
+ * 改样式。**只动 `glass` 一个键**：同一个文件里还有 geometry / name / hidden，
+ * 整体覆盖会把用户摆好的位置和"藏起来"的状态一起抹掉。
+ *
+ * 写完窗口 250ms 内自己换过来（它盯这个文件的 mtime），不用重开 DSH。
+ *
+ * @returns {{ok: boolean, changed?: boolean, style?: string, rejected?: string[]}}
+ */
+export function setWindowStyle(style, { log = () => {}, env = process.env } = {}) {
+  const want = String(style ?? '').trim().toLowerCase();
+  if (!WINDOW_STYLES.includes(want)) {
+    return { ok: false, style: null, rejected: [`样式只能是 ${WINDOW_STYLES.join(' / ')}`] };
+  }
+  const path = windowConfigPath(env);
+  const cfg = readJson(path);
+  // 已经是目标值就不写盘：少刷一次 mtime，窗口就少醒一轮
+  if (styleOf(cfg) === want && (want === 'auto' ? cfg.glass === undefined : cfg.glass === want)) {
+    return { ok: true, changed: false, style: want };
+  }
+  // `auto` 不落盘 —— 窗口把"没有 glass 键"理解成自动，写个 auto 反而看不懂
+  if (want === 'auto') delete cfg.glass;
+  else cfg.glass = want;
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(cfg, null, 2), 'utf8');
+    renameSync(tmp, path);
+  } catch (e) {
+    const error = String(e?.message ?? e);
+    log(`写 ${path} 失败：${error}`);
+    return { ok: false, style: styleOf(cfg), rejected: [error] };
+  }
+  return { ok: true, changed: true, style: want };
+}
+
+/**
  * 本进程的会话标识。`hidden` 只有**本会话亲手藏的**才算数 ——
  * 上一版把 `hidden` 写成永久状态，DSH 重启后窗口进程还残留着，就变成
  * "进程活着、心跳在跳、屏幕上什么都没有"，且没有任何手段自愈（issue #32 第 1 点）。

@@ -144,6 +144,17 @@ window.__ModuleLoader__.load({
       'err.load': '读不到配置',
       'err.save': '保存失败',
       'note.file': '文件还不存在。现在保存会新建它，只写你改过的那几项。',
+      'win.title': '悬浮窗样式',
+      'win.sub': '一直挂在屏幕上的那个小窗长什么样。改完立刻生效，不用重开 DSH。',
+      'win.style': '外观预设',
+      'win.style.auto': '自动 —— 远程/录屏用纯色，其余实时玻璃',
+      'win.style.live': '实时玻璃 —— 跟着桌面模糊（好看，吃 CPU）',
+      'win.style.frost': '静态磨砂 —— 不吃性能（低配机选这个）',
+      'win.style.solid': '纯色 —— 最省，背后不透',
+      'win.style.hint': '实时玻璃每帧都要抓一次屏再模糊 —— 低配机、高分屏上「卡」就是这么来的。'
+        + '静态磨砂不抓屏，只画一张预生成的底板，CPU 占用接近 0；纯色连渐变都不要。',
+      'win.applied': '已应用，窗口下一拍就换过来。',
+      'win.path': '配置文件',
     };
 
     const t = key => TEXT[key] ?? key;
@@ -343,6 +354,9 @@ window.__ModuleLoader__.load({
       const [localDraft, setLocalDraft] = useState(null);
       const [localRejected, setLocalRejected] = useState([]);
       const [localAt, setLocalAt] = useState(0);
+      // 悬浮窗样式又是另一个文件（watch-window.json）：也是改完立刻生效，所以单独一套状态
+      const [windowStyle, setWindowStyleState] = useState('');
+      const [windowAt, setWindowAt] = useState(0);
 
       const load = useCallback(async () => {
         setBusy(true);
@@ -352,6 +366,7 @@ window.__ModuleLoader__.load({
           setData(next);
           setDraft(draftOf(next.values));
           setLocalDraft(localDraftOf(next.local));
+          setWindowStyleState(next.window?.style ?? 'auto');
         } catch (err) {
           setError(String(err?.message ?? err));
         } finally {
@@ -450,6 +465,34 @@ window.__ModuleLoader__.load({
           setError(String(err?.message ?? err));
         } finally {
           setBusy(false);
+        }
+      };
+
+      /**
+       * 换悬浮窗样式：单独一条路由，**不跟主表单一起提交**。
+       *
+       * 它写的是 watch-window.json（窗口自己也在写 geometry/name/hidden），
+       * 和 see-now.json 不是一份文件；而且窗口盯着这个文件的 mtime，改完就换 ——
+       * 没有必要让用户再点一次「保存」。
+       */
+      const applyWindow = async (style) => {
+        setWindowStyleState(style);
+        setWindowAt(0);
+        setError('');
+        try {
+          const result = await api('/window', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ patch: { style } }),
+          });
+          if (result.ok) {
+            setData(current => (current ? { ...current, window: result.window } : current));
+            setWindowAt(Date.now());
+          } else {
+            setError((result.rejected ?? []).join('；'));
+          }
+        } catch (err) {
+          setError(String(err?.message ?? err));
         }
       };
 
@@ -560,6 +603,26 @@ window.__ModuleLoader__.load({
           : null,
 
         h('div', { className: 'sn_box' }, t('hint.restart')),
+
+        // ── 悬浮窗样式 ──
+        // 放在「常用」上面：它是这一页唯一"改完立刻能看见"的东西，也最常被调
+        h('div', { className: 'sn_card' },
+          h('div', { className: 'sn_cardhd' }, h('span', { className: 'sn_cardname' }, t('win.title'))),
+          h('p', { className: 'sn_note', style: { margin: 0 } }, t('win.sub')),
+          h('div', { className: 'sn_grid' },
+            h('label', { className: 'sn_field' },
+              h('span', { className: 'sn_label' }, t('win.style')),
+              h('select', {
+                className: 'sn_select',
+                value: windowStyle || 'auto',
+                onChange: e => { void applyWindow(e.target.value); },
+              }, ['auto', 'live', 'frost', 'solid'].map(value =>
+                h('option', { key: value, value }, t('win.style.' + value)))),
+              h('span', { className: 'sn_hint' }, t('win.style.hint')))),
+          data.window && data.window.path
+            ? h('div', { className: 'sn_mono' }, `${t('win.path')}：${data.window.path}`)
+            : null,
+          windowAt > 0 ? h('span', { className: 'sn_ok', role: 'status' }, t('win.applied')) : null),
 
         // ── 常用 ──
         h('div', { className: 'sn_card' },

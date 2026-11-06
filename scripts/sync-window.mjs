@@ -150,6 +150,7 @@ if (same) {
 const ASSETS = [
   'mic-dsh.png', 'mic.py', 'window_protocol.py',
   'glass_geometry.py', 'glass_capture.py', 'glass_cpu.py', 'glass_gpu.py',
+  'glass_static.py',
   'glass_window.py', 'glass_window_gpu.py', 'window_widgets.py',
 ];
 const srcDir = dirname(upstream.p);

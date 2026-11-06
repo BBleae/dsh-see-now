@@ -2,7 +2,26 @@
 
 本文件从 `0.0.4` 起记录；更早的版本见 GitHub Releases。
 
-## [Unreleased]
+## [0.1.4] - 2026-11-06
+
+### Added — 设置页能换悬浮窗外观（新增「静态磨砂」不吃性能）
+
+同一个 `window.py`，新增一档 `frost`：**不抓屏**，只画一张预生成的磨砂底板
+（换尺寸/气泡才重画，约 11ms）。实测 760×560、背景在播视频：
+
+| 样式 | 3 秒内 CPU | 占单核 |
+|---|---|---|
+| `live` 实时玻璃 | 5.17 s | 172% |
+| `frost` 静态磨砂 | 0.03 s | **1%** |
+
+样式写在 `~/.dsh/watch-window.json` 的 `glass`（`auto` / `live` / `frost` / `solid`），
+和陪看共用一份。设置页「看你看的东西」里多了一张卡：改完**立刻生效**
+（窗口盯这个文件的 mtime，250ms 内自己换，不用重开 DSH）。
+接口是 `/api/see-now/window`（GET 读 / POST `{patch:{style}}` 写），只动 `glass`
+一个键 —— 同一个文件里还有 geometry / name / hidden。
+
+`examples/floating-chat/` 那份 `window.py` 是构建产物，同步自上游
+（`npm run sync:window` 已把 `glass_static.py` 加进 ASSETS）。
 
 ### Added — 打分加「亮度归一 + 黑边补偿」（默认开，可关）
 

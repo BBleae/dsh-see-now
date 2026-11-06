@@ -6,6 +6,7 @@
  * | GET  | `/status` | 当前生效的值、默认值、文件路径、校验警告 |
  * | POST | `/config` | 提交要改的键；校验通过才落盘（`see-now.json`） |
  * | POST | `/local`  | 改转写服务的地址与凭据（`asr.json`） |
+ * | GET/POST | `/window` | 看/改悬浮窗外观（`watch-window.json` 的 `glass`） |
  *
  * ## 为什么这么几条
  *
@@ -23,6 +24,7 @@
 
 import { rejectionFor } from './settings-trust.js';
 import { asrPath, readAsrConfig, writeAsrConfig } from './asr-store.mjs';
+import { readWindowStyle, setWindowStyle } from './window.js';
 import {
   readTuning,
   writeTuning,
@@ -157,6 +159,8 @@ export function createSettingsApi({ logger } = {}) {
           paces: PACES_KEYS,
           writable: { keys: WRITABLE_KEYS, listen: WRITABLE_LISTEN_KEYS },
           local: localPayload(),
+          // 悬浮窗样式在另一个文件（watch-window.json），和上面那套互不影响
+          window: readWindowStyle(),
           warnings: tuning.warnings,
         });
         return;
@@ -207,6 +211,28 @@ export function createSettingsApi({ logger } = {}) {
           path: result.path,
           local: localPayload(),
           rejected: result.rejected,
+        });
+        return;
+      }
+
+      if (route === '/window') {
+        if (method === 'GET' || method === 'HEAD') {
+          send(res, 200, { ok: true, window: readWindowStyle() });
+          return;
+        }
+        if (method !== 'POST') {
+          send(res, 405, { ok: false, rejected: ['只支持 GET / POST'] });
+          return;
+        }
+        const patch = await patchOf(req, res);
+        if (patch === undefined) return;
+
+        const result = setWindowStyle(patch.style, { log });
+        if (result.ok) log(`see-now: 悬浮窗样式 → ${result.style}`);
+        send(res, 200, {
+          ok: result.ok,
+          window: readWindowStyle(),
+          rejected: result.rejected ?? [],
         });
         return;
       }

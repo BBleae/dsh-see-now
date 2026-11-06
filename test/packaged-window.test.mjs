@@ -43,6 +43,7 @@ const REQUIRED = [
   'glass_capture.py',
   'glass_cpu.py',
   'glass_gpu.py',
+  'glass_static.py',
   'window_widgets.py',
   'window_protocol.py',
   'mic.py',
