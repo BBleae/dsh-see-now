@@ -167,6 +167,12 @@ node scripts/install-dev.mjs      # 拷进本机 DSH 的 desktop profile
 | macOS | `avfoundation` | 系统设置 → 隐私与安全性 → **屏幕录制**，勾上跑 DSH 的 App |
 | Linux | — | 还没接（要补 `x11grab` / PipeWire） |
 
+> **「看屏幕」和「悬浮窗」是两件事**，上表说的是采集引擎。悬浮窗（Tk）在 0.1.4 之前
+> 在 macOS/Linux 上**必崩**（`ctypes.windll`，issue #40），现在能起来了：Windows 专有的
+> DPI/WDA 调用都按平台收口，没有 WDA 的系统改走"抓到自己就填掉"那条路。
+> Retina 上窗口坐标是逻辑像素、和 mss 的物理像素会差一个缩放倍数，**背景可能对不齐** ——
+> 那类机器在设置里选 `frost`（静态磨砂）或 `solid`（纯色），这两档都不抓屏，不吃这个亏。
+
 ffmpeg 不用进 PATH：插件会按 `DSH_FFMPEG_PATH` / `FFMPEG_PATH` / `DSH_FFMPEG_DIR` /
 `~/.dsh/tools/ffmpeg/bin` / `~/.dsh/bin` 的顺序自己找（DSH 桌面版把 ffmpeg 装在第四个位置）。
 
