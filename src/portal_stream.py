@@ -27,8 +27,10 @@ import random
 import select
 import signal
 import string
+import struct
 import subprocess
 import sys
+import threading
 
 PORTAL = "org.freedesktop.portal.Desktop"
 PORTAL_PATH = "/org/freedesktop/portal/desktop"
@@ -311,109 +313,188 @@ def main():
             fail(5, f"region {x},{y},{w},{h} 不合法（宽高要正数、坐标不能为负）")
         region = (x, y, w, h)
 
-    frame_bytes = args.width * args.height * 3
-    # 顺序不能动：限帧必须在 convert/scale 之前，否则 gst 会对原始分辨率做转换，
-    # 12fps 全屏下 CPU 高一个数量级。add-borders 让 16:10 的屏幕进 16:9 画布时
-    # 上下留黑边，而不是把画面横向拉扁。
-    # 裁掉指示框：先把画面缩到**逻辑尺寸**（和光晕画在同一个坐标系里），
-    # 再按逻辑像素裁掉四边光晕和顶部状态条，最后缩到目标画布。
-    #
-    # 为什么不按设备像素一次裁掉：设备像素的缩放比只能从流里反推（Qt 的 dpr 不可靠），
-    # 而逻辑尺寸是光晕自己的坐标系 —— 多显示器/改缩放都不用重算。
-    # 代价是多一次缩放；12fps 下实测 CPU 增加约 3%。
-    crop = ""
-    if region and stream_w and stream_h:
-        x, y, w, h = region
-        # 流的坐标系里直接裁：left/right/top/bottom 都是相对整条流
-        crop = (f"videocrop left={x} right={stream_w - x - w} "
-                f"top={y} bottom={stream_h - y - h} ! ")
-    elif args.edge > 0 and args.logical_width > 0 and args.logical_height > 0:
-        crop = (f"videoscale add-borders=true ! "
-                f"video/x-raw,width={args.logical_width},height={args.logical_height} ! "
-                f"videocrop left={args.edge} right={args.edge} "
-                f"top={args.top_band} bottom={args.edge} ! ")
-    # `keepalive-time`：**静止画面也得有帧**。GNOME/Mutter 的 screencast 是"有 damage 才发帧"，
-    # 桌面不动时上游一帧都不给 —— 实测 9 秒 0 字节，`see_now` 会一直空等。
-    # 让它每 250ms 重发最后一帧，videorate 再按目标帧率复制；重复帧的判帧是几乎免费的
-    # （pipeline 自己会跳过 dup）。
-    src_opts = (f"path={node}"
-                + (f" fd={pw_fd}" if pw_fd is not None else "")
-                + f" keepalive-time={max(20, args.keepalive)}")
-    pipeline = (
-        f"pipewiresrc {src_opts} ! "
-        f"videorate ! video/x-raw,framerate={args.fps}/1 ! "
-        f"videoconvert ! "
-        f"{crop}"
-        f"videoscale add-borders=true ! "
-        f"video/x-raw,format=RGB,width={args.width},height={args.height} ! "
-        f"fdsink fd=1"
-    )
-    log(f"[gst] {pipeline}")
-    gst = subprocess.Popen(
-        ["gst-launch-1.0", "-q"] + pipeline.split(),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        # fd 必须在子进程里保持同一个编号，gst-launch 的 `fd=` 才能对上
-        **(dict(pass_fds=(pw_fd,)) if pw_fd is not None else {}),
-    )
+    # ── 可热更新的参数：update 命令改这些，**不重开 portal 会话** ──────────
+    # 会话（授权、PipeWire 节点、fd）是贵且脆的那部分；换 region/清晰度只是换个
+    # gst 管线，gst 起停 ~1 秒，比重新握手安全得多。
+    params = {
+        "width": args.width, "height": args.height, "fps": args.fps,
+        "region": region, "edge": args.edge, "top_band": args.top_band,
+        "logical_width": args.logical_width, "logical_height": args.logical_height,
+        "keepalive": max(20, args.keepalive),
+    }
+    UPDATE_KEYS = ("width", "height", "fps", "region", "edge", "top_band",
+                   "logical_width", "logical_height", "keepalive")
+    CTRL = {"lock": threading.Lock(), "restart": False}
+    CUR = {"gst": None}
+
+    def read_stdin():
+        """宿主发来的 update；stdin EOF = 父进程没了 → 收工。"""
+        try:
+            for line in sys.stdin:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if msg.get("cmd") != "update":
+                    continue
+                with CTRL["lock"]:
+                    for k in UPDATE_KEYS:
+                        if k in msg:
+                            params[k] = msg[k]
+                    if "region" in msg and not msg["region"]:
+                        params["region"] = None
+                    CTRL["restart"] = True
+                gst = CUR["gst"]
+                if gst is not None:
+                    try:
+                        gst.terminate()
+                    except Exception:
+                        pass
+        except (OSError, ValueError):
+            pass
+        os._exit(0)
+
+    threading.Thread(target=read_stdin, daemon=True).start()
+
+    def build_pipeline(p_now):
+        width, height = int(p_now["width"]), int(p_now["height"])
+        fps = int(p_now["fps"])
+        reg = p_now.get("region")
+        edge = int(p_now.get("edge") or 0)
+        top_band = int(p_now.get("top_band") or 0)
+        lw, lh = int(p_now.get("logical_width") or 0), int(p_now.get("logical_height") or 0)
+        keepalive = max(20, int(p_now.get("keepalive") or 250))
+
+        crop = ""
+        if reg and stream_w and stream_h:
+            x, y, w, h = [int(v) for v in reg]
+            crop = (f"videocrop left={x} right={stream_w - x - w} "
+                    f"top={y} bottom={stream_h - y - h} ! ")
+        elif edge > 0 and lw > 0 and lh > 0:
+            crop = (f"videoscale add-borders=true ! "
+                    f"video/x-raw,width={lw},height={lh} ! "
+                    f"videocrop left={edge} right={edge} "
+                    f"top={top_band} bottom={edge} ! ")
+        src_opts = (f"path={node}"
+                    + (f" fd={pw_fd}" if pw_fd is not None else "")
+                    + f" keepalive-time={keepalive}")
+        return (
+            f"pipewiresrc {src_opts} ! "
+            f"videorate ! video/x-raw,framerate={fps}/1 ! "
+            f"videoconvert ! "
+            f"{crop}"
+            f"videoscale add-borders=true ! "
+            f"video/x-raw,format=RGB,width={width},height={height} ! "
+            f"fdsink fd=1"
+        )
 
     STOP = {"flag": False}
 
     def on_signal(*_):
-        # **不能在这里直接干活**：主线程可能正阻塞在读 gst.stdout，信号处理器里做
-        # 阻塞的 D-Bus 调用会跟主线程抢同一个连接。只置标志，让主循环收尾。
+        # 信号处理器里只置标志（主线程可能正阻塞在读 gst.stdout / D-Bus）
         STOP["flag"] = True
-        try:
-            gst.terminate()
-        except Exception:
-            pass
-
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, on_signal)
-
-    print(json.dumps({
-        "ready": True, "node": node, "fps": args.fps,
-        "width": args.width, "height": args.height, "frame_bytes": frame_bytes,
-        "stream_width": stream_w, "stream_height": stream_h,
-        "region": list(region) if region else None,
-        "source": "portal",
-    }), file=sys.stderr, flush=True)
-
-    out = sys.stdout.buffer
-    while True:
-        if STOP["flag"]:
-            break
-        # 用 select 带超时读：只有这样才能在 200ms 内响应 SIGTERM 并**把 portal 会话关掉**。
-        # 以前是阻塞 read，杀进程后会话留在 portal 里 —— GNOME 上实测会把后续
-        # CreateSession 挂死（要重启 xdg-desktop-portal 才能恢复）。
-        try:
-            ready, _, _ = select.select([gst.stdout], [], [], 0.2)
-        except (OSError, ValueError):
-            break
-        if not ready:
-            continue
-        chunk = os.read(gst.stdout.fileno(), 1 << 16)
-        if not chunk:
-            break
-        try:
-            out.write(chunk)
-            out.flush()
-        except BrokenPipeError:
-            # 父进程不读了（被 kill 或 stop），安静收工
+        gst = CUR["gst"]
+        if gst is not None:
             try:
                 gst.terminate()
             except Exception:
                 pass
-            sys.exit(0)
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, on_signal)
+
+    out = sys.stdout.buffer
+    first = True
+    while True:
+        with CTRL["lock"]:
+            p_now = dict(params)
+            CTRL["restart"] = False
+        width, height = int(p_now["width"]), int(p_now["height"])
+        frame_bytes = width * height * 3
+        pipeline = build_pipeline(p_now)
+        log(f"[gst] {pipeline}")
+        gst = subprocess.Popen(
+            ["gst-launch-1.0", "-q"] + pipeline.split(),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            **(dict(pass_fds=(pw_fd,)) if pw_fd is not None else {}),
+        )
+        CUR["gst"] = gst
+        print(json.dumps({
+            "ready": first, "resized": not first,
+            "width": width, "height": height, "fps": int(p_now["fps"]),
+            "frame_bytes": frame_bytes,
+            "stream_width": stream_w, "stream_height": stream_h,
+            "region": list(p_now["region"]) if p_now.get("region") else None,
+            "source": "portal",
+        }), file=sys.stderr, flush=True)
+        first = False
+
+        pending = b""
+        restart_ip = False
+        while True:
+            if STOP["flag"]:
+                break
+            if CTRL["restart"]:
+                restart_ip = True
+                try:
+                    gst.terminate()
+                except Exception:
+                    pass
+                break
+            try:
+                ready, _, _ = select.select([gst.stdout], [], [], 0.2)
+            except (OSError, ValueError):
+                break
+            if not ready:
+                continue
+            chunk = os.read(gst.stdout.fileno(), 1 << 16)
+            if not chunk:
+                break
+            pending += chunk
+            # **整帧写出**，并且每帧带 4 字节长度头。
+            # 长度头是给"尺寸会变"用的：换清晰度/region 时帧长变了，宿主靠它切帧，
+            # 不需要再去追"我上次告诉它多大的"这种状态（异步管道里对齐不可靠）。
+            try:
+                while len(pending) >= frame_bytes:
+                    frame = pending[:frame_bytes]
+                    pending = pending[frame_bytes:]
+                    out.write(struct.pack(">I", frame_bytes))
+                    out.write(frame)
+                out.flush()
+            except BrokenPipeError:
+                # 父进程不读了（被 kill 或 stop），安静收工
+                try:
+                    gst.terminate()
+                except Exception:
+                    pass
+                sys.exit(0)
+
+        try:
+            gst.wait(timeout=5)
+        except Exception:
+            try:
+                gst.kill()
+            except Exception:
+                pass
+        # gst 被 stdin 线程 terminate 时，主循环多半是从 "stdout EOF" 出去的，
+        # 那时 restart_ip 还是 False —— 再看一眼 CTRL，别把热切换误判成"流断了"。
+        if not restart_ip and CTRL["restart"]:
+            restart_ip = True
+        if STOP["flag"]:
+            break
+        if restart_ip:
+            continue
+        # gst 自己退出（不是我们叫停的）—— 流断了
+        err = (gst.stderr.read() or b"").decode("utf-8", "replace").strip()
+        if err:
+            log(f"[gst] {err[-800:]}")
+        fail(3, f"gst 流中断（exit {gst.returncode}）")
 
     close_session(p, session)
-    if STOP["flag"]:
-        # 正常停止：gst 是我们自己 terminate 的，别当成"流中断"
-        sys.exit(0)
-    err = (gst.stderr.read() or b"").decode("utf-8", "replace").strip()
-    if err:
-        log(f"[gst] {err[-800:]}")
-    code = gst.wait()
-    fail(3, f"gst 流中断（exit {code}）")
+    sys.exit(0)
 
 
 if __name__ == "__main__":

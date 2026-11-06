@@ -508,6 +508,8 @@ export function createRunner({
   let endedSource = null;
   /** 最近一次 portal 采集报上来的流尺寸（逻辑像素）—— region 坐标就在这个空间里。 */
   let portalStream = null;
+  /** 当前该把帧推进哪根管线（热切换会换 pipeline，但 spawner 的回调是建进程时绑的） */
+  let sink = null;
 
   /** 指示框的延迟关闭：换清晰度时 teardown→start 是连着的，立刻关会闪一下 */
   let indicatorStopTimer = null;
@@ -557,8 +559,8 @@ export function createRunner({
     return true;
   }
 
-  async function start({ src = { kind: 'screen' }, opts = {}, quality: q = null } = {}) {
-    if (running) return { already: true, source };
+  async function start({ src = { kind: 'screen' }, opts = {}, quality: q = null, reuse = false } = {}) {
+    if (running && !reuse) return { already: true, source };
     // 走到这里就是"明确要开始看"（watch 的自动重启已经在前面被硬闸挡住了）。
     hungUp = false;
     endedSource = null;
@@ -584,7 +586,9 @@ export function createRunner({
        */
       engine = process.platform === 'linux' ? 'portal' : await pickScreenEngine({ ffmpegPath });
     }
-    const size = SIZES[q] ?? SIZES[DEFAULT_QUALITY];
+    // 没传 quality = 保持当前档（以前会悄悄退回默认档，尺寸一变就重开采集）
+    const wantQuality = q ?? quality;
+    const size = SIZES[wantQuality] ?? SIZES[DEFAULT_QUALITY];
     /**
      * region 模式：`width/height` 是**单格**尺寸（长边 = 档位长边），不是画布。
      *
@@ -592,7 +596,7 @@ export function createRunner({
      * 这样 2 帧不会浪费半张画布；而且 ffmpeg 的 `scale=w:h` 与 region 同比例，
      * 属于等比缩放，不变形。
      */
-    const longEdge = LONG_EDGE[q] ?? LONG_EDGE[DEFAULT_QUALITY];
+    const longEdge = LONG_EDGE[wantQuality] ?? LONG_EDGE[DEFAULT_QUALITY];
     const [w, h] = src.region ? cellSize(longEdge, src.region) : size;
     const regionOpts = src.region ? {
       region: src.region,
@@ -640,7 +644,7 @@ export function createRunner({
     runOpts = { ...opts };
     delete runOpts.oneShot;
     const s = { ...src, engine };
-    quality = q ?? DEFAULT_QUALITY;
+    quality = wantQuality;
     frames = 0;
     lastError = null;
     // 换了一根管道：上一根预留的图跟着作废（它属于旧管线的时间窗，交出去只会更旧）
@@ -691,12 +695,41 @@ export function createRunner({
         log(`指示框没起来（采集照旧，屏幕上不会有光晕）：${ind.reason}`);
       }
     }
+    /**
+     * 热切换：只让 worker 换 gst 管线，不重开 portal 会话。
+     * 会话握手是贵且脆的部分（授权 / 节点 / fd），换 crop/scale 没必要重来。
+     */
+    if (reuse && typeof run?.update === 'function') {
+      const ok = run.update({
+        width: p.constants.width,
+        height: p.constants.height,
+        fps: p.constants.fps,
+        region: s.region ?? null,
+        crop: portalCrop,
+      });
+      if (ok) {
+        sink = p;
+        pipeline = p;
+        quality = wantQuality;
+        source = s;
+        lastSource = s;
+        runOpts = { ...opts };
+        startedAt = Date.now();
+        frames = 0;
+        lastError = null;
+        dropReserved();
+        log(`热切换：${p.constants.width}×${p.constants.height}（不重开会话）`);
+        return { started: true, hotSwapped: true, source: s, engine, quality, params: p.constants };
+      }
+      log('热切换失败（worker 不收 update），退回重开采集');
+    }
     const onFrame = (f) => {
       frames += 1;
       // 一帧解码就抛 = 整条管线停摆，这里必须兜住：宁可少一帧，不能让采集线程炸掉
-      try { p.push(f); } catch (e) { lastError = `push: ${e?.message ?? e}`; }
+      try { sink?.push(f); } catch (e) { lastError = `push: ${e?.message ?? e}`; }
     };
     const onStderr = (s2) => { if (process.env.DSH_SEE_NOW_DEBUG) log(s2.trim()); };
+    sink = p;
     run = portal
       ? spawnPortalFrames({
           width: p.constants.width,
@@ -729,8 +762,9 @@ export function createRunner({
           onFrame,
           onStderr,
         });
+    const thisRun = run;
     run.done.then((r) => {
-      if (pipeline === p) {
+      if (run === thisRun) {
         // **文件正常放完（`ended`）不是错误** —— 别写进 lastError，status 里会显示成故障
         if (!r?.ended) {
           lastError ??= `${portal ? 'portal' : 'ffmpeg'} 退出（${r.frames} 帧 / ${Math.round(r.ms / 1000)}s）`;
@@ -741,7 +775,7 @@ export function createRunner({
       }
     }).catch((e) => {
       lastError = `${portal ? 'portal' : 'ffmpeg'}: ${e?.message ?? e}`;
-      if (pipeline === p) teardown('ffmpeg-error');
+      if (run === thisRun) teardown('ffmpeg-error');
     });
     log(`开始看 ${s.kind}${engine && engine !== 'auto' ? `/${engine}` : ''} @${w}×${h}${s.region ? ` region=${s.region.x},${s.region.y},${s.region.w},${s.region.h}` : ''}`);
     /**
@@ -940,7 +974,16 @@ export function createRunner({
         const stopped = Boolean(pipeline) && !running;
         // **冷启动**（手上没有管线，或采集已经停了）才 eager。换清晰度不算 —— 那条路已经用 oneShot 了。
         const cold = !pipeline || stopped;
-        if (!pipeline || stopped || switching || modeChanged || regionChanged) {
+        const hotSwap = Boolean(pipeline && !stopped && !modeChanged
+          && (switching || regionChanged) && run && typeof run.update === 'function');
+        if (hotSwap) {
+          await start({
+            src: src ?? prevSrc ?? { kind: 'screen' },
+            opts: { ...opts, oneShot: true },
+            quality: q,
+            reuse: true,
+          });
+        } else if (!pipeline || stopped || switching || modeChanged || regionChanged) {
           if (pipeline) {
             teardown(stopped ? '采集已停，重开'
               : switching ? `换清晰度 ${quality} → ${q}`

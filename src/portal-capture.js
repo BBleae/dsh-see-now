@@ -22,6 +22,16 @@ import readline from 'node:readline';
 
 const WORKER = fileURLToPath(new URL('./portal_stream.py', import.meta.url));
 
+/**
+ * 上一次停采集的时刻（模块级）。
+ *
+ * KDE 的 portal 在「刚关掉的会话还没彻底回收」时接受新的 Start，会握手成功但一帧
+ * 都不来 —— 实测 stop 后立刻换个 region/quality 再 watch，十次里能中三四次。
+ * 隔 4 秒再开会话就正常。所以新采集在旧采集停掉后至少等 `RESTART_SETTLE_MS`。
+ */
+let lastStopAt = 0;
+const RESTART_SETTLE_MS = 1500;
+
 /** 按发行版给出装包命令 —— 提示写死成 pacman 在 Ubuntu 上等于没写。 */
 export function installHint() {
   const has = (bin) => {
@@ -88,19 +98,20 @@ export function spawnPortalFrames({
   stderrLimit = 4000,
   maxAttempts = 3,
   retryDelayMs = 800,
+  // 多久还没出第一帧就当成"卡住了"重开一次（portal 偶尔会握手成功但不出帧）
+  firstFrameMs = 12000,
 } = {}) {
   if (!existsSync(workerPath)) throw new Error(`portal worker 不见了：${workerPath}`);
-  const need = width * height * 3;
   const t0 = Date.now();
 
   let child = null;
-  let acc = null;
-  let filled = 0;
   let n = 0;
   let err = '';
   let stopping = false;
   let attempt = 0;
   let retryTimer = null;
+  let firstTimer = null;
+  let restarting = false;
 
   const deliver = (buf) => {
     const i = n;
@@ -147,28 +158,46 @@ export function spawnPortalFrames({
           '--edge', String(crop.edge ?? 0),
           '--top-band', String(crop.top ?? 0)] : []),
         ...(region ? ['--region', `${region.x},${region.y},${region.w},${region.h}`] : []),
-      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      ], { stdio: ['pipe', 'pipe', 'pipe'] });
       child = c;
 
-      // 帧切分照抄 capture.js 的做法：整帧落在一个 chunk 里就零拷贝直接交，
-      // 跨 chunk 才拼一次 —— 12fps × 1.08MB，用 Buffer.concat 每帧要白拷好几次。
+      /**
+       * 帧协议：**每帧 4 字节大端长度 + 负载**（只在 portal 这条路上）。
+       *
+       * 为什么不用裸流：换清晰度/region 会改帧长，裸流要靠"我上次告诉它多大"这种
+       * 跨进程状态来对齐 —— stdout 和 stderr 是两条管道，顺序没有保证。
+       * 长度头让每帧自带边界，重开 gst 时也不可能切歪。
+       */
+      let buf = Buffer.alloc(0);
       c.stdout.on('data', (chunk) => {
+        buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
         let off = 0;
-        while (off < chunk.length) {
-          const room = need - filled;
-          const take = chunk.length - off < room ? chunk.length - off : room;
-          if (filled === 0 && take === need) {
-            deliver(chunk.subarray(off, off + need));
-            off += need;
-            continue;
-          }
-          if (filled === 0) acc = Buffer.allocUnsafe(need);
-          chunk.copy(acc, filled, off, off + take);
-          filled += take;
-          off += take;
-          if (filled === need) { deliver(acc); acc = null; filled = 0; }
+        while (buf.length - off >= 4) {
+          const len = buf.readUInt32BE(off);
+          if (len <= 0 || buf.length - off - 4 < len) break;
+          // 复制一份：subarray 会让整块 chunk 一直活着
+          deliver(Buffer.from(buf.subarray(off + 4, off + 4 + len)));
+          off += 4 + len;
         }
+        if (off) buf = Buffer.from(buf.subarray(off));
       });
+
+      /**
+       * **12 秒一帧都没有 → 重开一次。**
+       *
+       * 实测 KDE 的 portal 偶尔会"握手成功、gst 也起了，但一帧都不来"（多次重开
+       * 采集 / portal 重启之后尤其常见）。以前这种情况要等满整个 watch（可能 300 秒）
+       * 才回一句"没看成"，看起来就像插件坏了。现在 12 秒没帧就自己重开，
+       * 最多还是 maxAttempts 次。
+       */
+      clearTimeout(firstTimer);
+      firstTimer = setTimeout(() => {
+        if (stopping || n > 0) return;
+        restarting = true;
+        onStderr?.(`[portal] ${Math.round(firstFrameMs / 1000)} 秒还没出帧，重开采集`);
+        try { c.kill('SIGTERM'); } catch { /* 已退出 */ }
+      }, firstFrameMs);
+      firstTimer.unref?.();
 
       // 第一行 JSON 是握手结果（node / frame_bytes / fps），其余当日志往上传。
       const rl = readline.createInterface({ input: c.stderr });
@@ -196,6 +225,27 @@ export function spawnPortalFrames({
       c.on('close', (code) => {
         if (child !== c) return;          // 已经被覆盖（重连过一次）
         child = null;
+        clearTimeout(firstTimer);
+        if (restarting) {
+          restarting = false;
+          if (attempt < maxAttempts && !stopping) {
+            retryTimer = setTimeout(() => { retryTimer = null; launch(); }, retryDelayMs);
+            return;
+          }
+        }
+        // 重开几次还是 0 帧：给一句能照做的话，而不是让 watch 空等
+        if (n === 0 && attempt >= maxAttempts && !stopping) {
+          const error = new Error(
+            `portal 采集试了 ${maxAttempts} 次都没出帧 —— 多半是 xdg-desktop-portal 卡住了，`
+            + '跑 `systemctl --user restart xdg-desktop-portal` 再试',
+          );
+          error.errorInfo = {
+            category: 'capture-failed', stage: 'exit', code, signal: null,
+            stderrTail: err.trim().slice(-1000) || null,
+          };
+          settle(error, 'reject');
+          return;
+        }
         // code === null = 被我们自己 kill 的（stop / 换清晰度 / 收工），那是正常收尾
         if (code === null || stopping) { settle(null, 'resolve'); return; }
         if (code === 0) { settle(code, 'resolve'); return; }
@@ -212,14 +262,53 @@ export function spawnPortalFrames({
       });
     };
 
-    launch();
+    // 刚停过就先等一会儿：给 portal 时间回收上一个会话
+    const delayMs = Math.max(0, RESTART_SETTLE_MS - (Date.now() - lastStopAt));
+    if (delayMs > 0) {
+      onStderr?.(`[portal] 上一次采集刚停，等 ${delayMs}ms 再开新会话`);
+      retryTimer = setTimeout(() => { retryTimer = null; launch(); }, delayMs);
+    } else {
+      launch();
+    }
   });
 
   return {
     done,
+    /**
+     * 热更新：只让 worker 重开 gst，**不重开 portal 会话**。
+     *
+     * 这里把 Node 侧的形状翻成 worker 的线格式（`crop` 对象 → 扁平的
+     * logical_width/edge/top_band，`region` 对象 → [x,y,w,h]），免得两边各记一套。
+     */
+    update({ width, height, fps, region, crop } = {}) {
+      const c = child;
+      if (!c || !c.stdin || c.stdin.destroyed) return false;
+      const msg = { cmd: 'update' };
+      if (width) msg.width = width;
+      if (height) msg.height = height;
+      if (fps) msg.fps = fps;
+      msg.region = region ? [region.x, region.y, region.w, region.h] : null;
+      if (crop && crop.logicalWidth) {
+        msg.logical_width = crop.logicalWidth;
+        msg.logical_height = crop.logicalHeight;
+        msg.edge = crop.edge;
+        msg.top_band = crop.top;
+      } else {
+        msg.edge = 0;
+        msg.top_band = 0;
+      }
+      try {
+        c.stdin.write(`${JSON.stringify(msg)}\n`);
+        return true;
+      } catch {
+        return false;
+      }
+    },
     stop() {
       stopping = true;
+      lastStopAt = Date.now();
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      if (firstTimer) { clearTimeout(firstTimer); firstTimer = null; }
       // **不要把 child 置空**：close 回调靠 `child === c` 判断这一条是不是当前进程，
       // 置空会让它提前 return，`done` 永远不 settle（teardown 就吊死在这里）。
       const c = child;

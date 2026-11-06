@@ -88,6 +88,36 @@ gain 2.32，有效行 V=92.7 → gain 1.03。修完两组素材的归一结果�
 关掉：`~/.dsh/see-now.json` 写 `{ "scoreNormalize": false }`（**布尔**，写 `"false"`
 字符串是真值，会失效并留一条 warn），或者单次 `watch({opts:{scoreNormalize:false}})`。
 
+### Changed — portal 会话常驻，换 region / 清晰度只换 gst 管线（热切换）
+
+以前换 region / 清晰度 = teardown → 重开进程 → 重新握手。会话握手是贵且脆的那部分
+（授权、PipeWire 节点、fd），在 KDE 上重开太快还会撞上"旧会话没回收"（0 帧）。
+
+现在 worker **只握手一次**：宿主通过 stdin 发 `{"cmd":"update", width,height,fps,region,…}`，
+worker 只杀/重起 `gst-launch`，会话、节点、fd 全部复用。帧协议改成
+**每帧 4 字节大端长度头 + 负载**（仅 portal 链路），尺寸变了也自带边界。
+
+实测：KDE Wayland（2560×1600）与 Ubuntu GNOME/X11（1280×800）上，
+整屏 low → region + high 来回切，**同一个 PipeWire 节点**、不重握手，
+帧长 172800 → 691200 正确切换，帧率稳定（~10-12fps）。
+
+### Fixed — 没传 quality 会悄悄退回默认档
+
+`watch` 不带 `quality` 时传下来的是 `null`，而 `start()` 里写的是
+`quality = q ?? DEFAULT_QUALITY` —— 上次调到 high、下次没提就退回 low，
+尺寸一变就重开采集。现在改成 `q ?? 当前档`。
+
+### Fixed — 显式传的 region 不落盘，下一轮就丢
+
+只有 `action:"region"` 的拖框结果会落盘；模型直接传 `region:"x,y,w,h"`
+只在这一次生效，下一次 watch 就"回到整屏"。现在显式 region 也落盘。
+
+### Fixed — 0 帧干等 / 停完立刻重开会"假启动"
+
+- 12 秒没出第一帧就杀掉重开（最多 3 次）；仍为 0 帧就明确报
+  「可能是 xdg-desktop-portal 卡住了，`systemctl --user restart xdg-desktop-portal`」。
+- 新采集在旧采集停掉后至少等 1.5 秒再开新会话（KDE 上旧会话未回收时新会话会 0 帧）。
+
 ### Added — Linux 屏幕采集（xdg-desktop-portal ScreenCast）
 
 原版在 Linux 上直接抛「屏幕采集还没接 linux」。现在走 Wayland 的正路：

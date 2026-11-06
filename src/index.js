@@ -20,7 +20,7 @@ import { startLoop, HANGUP_NOTE } from './loop.js';
 import { readTuning, TIER_STYLES } from './tuning.js';
 import { createSettingsApi, ROUTE_PREFIX } from './settings-api.mjs';
 import { windowAlive, windowHidden, setWindowHidden, hiddenForShow, windowReport, windowLine } from './window.js';
-import { pickRegion, loadRegion, clearRegion, regionText } from './region.js';
+import { pickRegion, loadRegion, saveRegion, clearRegion, regionText } from './region.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -903,7 +903,15 @@ async function registerAll(ctx) {
         if (built.error) return { text: built.error, meta: { ok: false, reason: 'bad-region' } };
         const src = built.src;
         const stickyRegion = regionOff ? null : (rawRegion ? undefined : loadRegion());
-        if (regionOff) clearRegion();
+        if (regionOff) {
+          clearRegion();
+        } else if (rawRegion) {
+          // 显式传的 region 也要落盘，否则下一轮 watch 不带 region 就回到整屏
+          const parsed = parseRegion(rawRegion);
+          if (parsed) {
+            try { saveRegion(parsed); } catch { /* 写不了盘不影响这一次 */ }
+          }
+        }
         // 变了一次说一次：模型要知道自己现在只看这一块，也得知道已经回到整屏
         const regionKey = regionText(stickyRegion ?? src?.region ?? null);
         if (regionKey !== lastRegionKey) {
