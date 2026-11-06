@@ -55,6 +55,10 @@ gain 2.32，有效行 V=92.7 → gain 1.03。修完两组素材的归一结果�
 - `scripts/verify-image-tokens.mjs`（`npm run verify-tokens`）：拿宿主的 `deepSeekImageTokens`
   给我方的 `tokens.js` 打分，18 组尺寸全对。这个包对外报的每一个价钱都出自那一个函数。
 - 两条**常驻文案预算**断言（`description ≤ 3800`、合计 ≤ 6500），防止这次砍掉的 26% 长回去。
+- `.github/workflows/test.yml`：node 20 / 22 双矩阵 + ffmpeg（短超时三次重试）。
+  这个包以前**只在本地跑测试**，推上去什么都不知道。job 级 env 里不能写 `${{ runner.temp }}`
+  （整份 workflow 解析失败、run 起来 0 个 job），也不能加全局 `DSH_SEE_NO_WINDOW`
+  （会把 `visibility.test.mjs` 那 5 条可见性断言整片打挂）。
 
 ### Fixed — 超省模式下一次交 N 张时，台词会跨张重复
 
