@@ -88,21 +88,43 @@ export function scorePair(prev, cur) {
 // 出处：`dsh-video-storyboard/src/storyboard/scan.js`（REF_V / barFraction / normalizeScores）。
 // **阈值刻度没变**，所以借过来只需重新标定，不需要改 `decide()`。
 
-/** 参考亮度：常见影视/网课素材的 V（max 通道）均值落在 140–180，正常片子增益 ≈ 1。 */
-export const REF_V = 160;
-/** 放大上限：再暗也不超过 3 倍，否则纯黑画面里的编码噪声会被一起放大成刀。 */
-export const GAIN_MAX = 3;
-/** 参考亮度下限：V 均值低于它不再继续放大。 */
+/**
+ * 参考亮度：**不再用 160**。
+ *
+ * 160 是 storyboard 拿影视素材定的，那边门槛是**分位数**，参考点漂一点无所谓（整体放大不改排序）。
+ * 这边 `cutAbs: 12` 是常数，REF_V 就等于"门槛的零点"—— 定高了，所有普通内容都会被白白放大一档。
+ * 实测（2026-11-06，真 PV 关键帧拼的 12fps 滑块，`3-Life/.tmp/cal/measure-gain.mjs`）：
+ * 这批素材的有效行 V 均值 = **96**，而按老口径 160 算出来的 gain 是 1.67 —— 也就是门槛被
+ * 整体下调了 40%，`cutAbs: 12` 的标定全部作废。取 REF_V = 96 = "视频/影视内容的常规亮度"。
+ * 亮色 UI（V 150–200）仍恒为 1，所以对日常屏幕是 no-op。
+ */
+export const REF_V = 96;
+/**
+ * 放大上限 **1.85**：实测需要的最多就是 1.86 倍，`3` 是把暗场顶成 2 倍过冲的根因。
+ *
+ * 同一批素材逐档压暗，量"需要多少 gain 才能把分数拉回原值"：
+ *
+ * | V(有效行) | 96 | 72.6 | 53.4 | 46.8 | 37.3 | 32 | 24 |
+ * | 需要 gain | 1.00 | 1.34 | 1.66 | 1.79 | 1.86 | 1.86 | 1.80 |
+ *
+ * 曲线是**饱和**的（V 再低也不会更暗），所以 `REF_V/V` 这个形状本身没问题，只是上限要收到 1.85；
+ * 平方根那类更陡的曲线拟合更差（RMS 0.337 vs 0.315）。
+ */
+export const GAIN_MAX = 1.85;
+/** 参考亮度下限：V 均值低于它不再继续放大（1.85 的上限先到，留着是防除零）。 */
 export const V_FLOOR = 40;
 /**
  * 噪声地板（**本仓独有，storyboard 没有**）。
  *
  * 它那边的绝对门槛是**分位数**（按原始刻度算），噪声再放大也只影响排序；
- * 这边 `cutAbs: 12` 是常数，暗场 2~3 分的编码噪声 ×3 就能顶到 6~9 分的"孤立弱切点"
- * 区间（`cutIsolatedAbs: 6`）—— 会在完全静止的暗画面上切个不停。
- * 所以低于地板的分数**原样返回**，不参与放大。
+ * 这边 `cutAbs: 12` 是常数，所以放大前得先把"噪声"和"真变化"分开。
+ *
+ * 取 **2**（原先是 6，自相矛盾：交接文档第 1 节举的例子就是"暗场真切点约 5 分"，
+ * 5 < 6 永远救不回来）。实测静止暗场的编码噪声 raw 只有 **0.00–0.13**（crf 26/30，12fps），
+ * 留 15 倍余量；而放大链最长 `1.85 × 1.54 = 2.85`，raw 2 顶到 5.7、raw 4 顶到 11.4，
+ * 都还在 `cutAbs: 12` 以下 —— 也就是说地板降到 2 不会让噪声变成刀。
  */
-export const NOISE_FLOOR = 6;
+export const NOISE_FLOOR = 2;
 /** 黑边判定：窗口内每行的 V 均值 < BAR_MEAN，且该行一次都没亮过（< BAR_MAX）。 */
 export const BAR_MEAN = 16;
 export const BAR_MAX = 24;
@@ -146,6 +168,24 @@ export function normalizeScore(raw, {
 }
 
 /**
+ * 黑边行数：窗口里"一直是黑"的顶部/底部连续行。
+ *
+ * 和 `barFraction` 同源 —— 那个只要占比，这个要**行号**：算"有效行亮度"时得跳过它们。
+ * 拆出来的原因见 `readBarWindow`：全帧 V 均值会把黑边一起算成"变暗"，
+ * 于是增益再放大一次，和 `/(1-bar)` 重复补偿。
+ */
+export function barRows({ rowV, rowVMax, frames } = {}) {
+  if (!rowV || !rowVMax || !(frames > 0)) return { top: 0, bottom: 0 };
+  const h = rowV.length;
+  const dark = (y) => rowV[y] / frames < BAR_MEAN && rowVMax[y] < BAR_MAX;
+  let top = 0;
+  while (top < h && dark(top)) top += 1;
+  let bottom = 0;
+  while (bottom < h - top && dark(h - 1 - bottom)) bottom += 1;
+  return { top, bottom };
+}
+
+/**
  * 黑边占比：窗口内"一直是黑的"顶部/底部行占多少。
  *
  * 与 `contentHeightRatio` 的区别：那个判**这一帧**（给前景守卫用，要求实时），
@@ -157,13 +197,8 @@ export function normalizeScore(raw, {
  */
 export function barFraction({ rowV, rowVMax, frames, cap = BAR_CAP } = {}) {
   if (!rowV || !rowVMax || !(frames > 0)) return 0;
-  const h = rowV.length;
-  const dark = (y) => rowV[y] / frames < BAR_MEAN && rowVMax[y] < BAR_MAX;
-  let top = 0;
-  while (top < h && dark(top)) top += 1;
-  let bottom = 0;
-  while (bottom < h - top && dark(h - 1 - bottom)) bottom += 1;
-  const frac = (top + bottom) / h;
+  const { top, bottom } = barRows({ rowV, rowVMax, frames });
+  const frac = (top + bottom) / rowV.length;
   return frac >= cap || frac >= 0.999 ? 0 : +frac.toFixed(3);
 }
 
@@ -431,7 +466,6 @@ export function createScorer({
   function readBarWindow(hsv) {
     const sums = rowV[barSlot];
     const maxes = rowVMax[barSlot];
-    let vSum = 0;
     for (let y = 0; y < SCAN_H; y += 1) {
       const base = y * SCAN_W * 3;
       let sum = 0;
@@ -443,7 +477,6 @@ export function createScorer({
       }
       sums[y] = sum;
       maxes[y] = mx;
-      vSum += sum;
     }
     barSlot = (barSlot + 1) % BAR_WINDOW;
     if (barFrames < BAR_WINDOW) barFrames += 1;
@@ -458,8 +491,21 @@ export function createScorer({
       barV[y] = sum;
       barVMax[y] = mx;
     }
+    const { top, bottom } = barRows({ rowV: barV, rowVMax: barVMax, frames: barFrames });
+    /**
+     * **亮度只算有效行**（跳过上下黑边）。
+     *
+     * 黑边像素的差恒为 0，把它们的 V 一起平均进来，等于把画面判成"更暗" → gain 再放大一次。
+     * 而下面 `barFrac` 还会 `/(1-bar)` 除回来 —— 同一件事补了两遍。
+     * 实测（`base-box.mp4`，`pad` 加 1.25 倍高）：全帧 V=68.9 → gain 2.32，有效行 V=92.7 → gain 1.03，
+     * 差的这 2.2 倍就是"归一后是原片 2.20 倍"的来源。
+     */
+    let vSumActive = 0;
+    for (let y = top; y < SCAN_H - bottom; y += 1) vSumActive += sums[y];
+    const activeRows = Math.max(1, SCAN_H - top - bottom);
     return {
-      meanV: vSum / n,
+      // `sums[y]` 是**行内像素和**（不是行均值），所以还要除一次 SCAN_W
+      meanV: vSumActive / (activeRows * SCAN_W),
       barFrac: barFraction({ rowV: barV, rowVMax: barVMax, frames: barFrames }),
     };
   }

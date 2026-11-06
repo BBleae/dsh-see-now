@@ -3,7 +3,7 @@
  *
  * 两条最容易退化的性质，各用断言钉住：
  *  1. **亮场逐位不变**（gain = 1、无黑边 → 原样返回）。破这条 = 悄悄改了所有人的日常体验。
- *  2. **噪声地板**：低于 6 分的分数不许被放大。破这条 = 暗场静止画面自己切个不停。
+ *  2. **噪声地板**：低于地板的分数不许被放大。破这条 = 暗场静止画面自己切个不停。
  *
  * 第三条是黑边判据必须看"整窗"，只看当前帧会把片头黑场当成黑边。
  */
@@ -11,7 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  BAR_CAP, SCAN_H, SCAN_W, barFraction, brightnessGain, createScorer, normalizeScore,
+  BAR_CAP, REF_V, SCAN_H, SCAN_W, barFraction, brightnessGain, createScorer, normalizeScore,
 } from '../src/cuts.js';
 import { DEFAULTS } from '../src/pipeline.js';
 import { readTuning } from '../src/tuning.js';
@@ -40,35 +40,41 @@ test('normalizeScore：亮场（V ≥ REF_V）无黑边 → 原样返回，逐�
   for (const raw of [0, 1, 5.999, 6, 12, 12.7, 47.25, 255]) {
     assert.equal(normalizeScore(raw, { meanV: 160, barFrac: 0 }), raw, `raw=${raw}`);
     assert.equal(normalizeScore(raw, { meanV: 240, barFrac: 0 }), raw, `raw=${raw}`);
+    assert.equal(normalizeScore(raw, { meanV: REF_V, barFrac: 0 }), raw, `raw=${raw}`);
   }
   // 没有亮度信息（第一帧）也必须是恒等，不许默认放大
   assert.equal(normalizeScore(12, {}), 12);
 });
 
-test('normalizeScore：暗场按 REF_V/meanV 放大，上限 3 倍', () => {
-  assert.equal(brightnessGain(80), 2);
+test('normalizeScore：暗场按 REF_V/meanV 放大，上限 1.85 倍', () => {
+  // 96 是**这批标定素材自己的亮度**（真 PV 关键帧，12fps 网格）——取它当参考点，
+  // 正常视频内容就是 gain 1，不会像 REF_V=160 那样把所有内容整体放大 1.67 倍。
+  assert.equal(brightnessGain(80), 1.2);
+  assert.equal(brightnessGain(REF_V), 1);
   assert.equal(brightnessGain(160), 1);
   assert.equal(brightnessGain(255), 1);
-  assert.equal(brightnessGain(40), 3);
-  // 低于 V_FLOOR 不再继续放大（否则纯黑里的编码噪声会变成刀）
-  assert.equal(brightnessGain(10), 3);
+  // 上限 1.85：实测"把暗场拉回原亮度"最多需要 1.86 倍，3 倍会过冲成 2 倍敏感
+  assert.equal(brightnessGain(40), 1.85);
+  assert.equal(brightnessGain(10), 1.85);
   assert.equal(brightnessGain(0), 1, '全黑的 V=0 视为没有信息，不放大');
-  assert.equal(normalizeScore(10, { meanV: 80 }), 20);
-  assert.equal(normalizeScore(10, { meanV: 20 }), 30);
+  assert.equal(normalizeScore(10, { meanV: 80 }), 12);
+  assert.equal(normalizeScore(10, { meanV: 20 }), 18.5);
 });
 
 test('normalizeScore：黑边按占比除回来', () => {
   assert.equal(normalizeScore(10, { meanV: 200, barFrac: 0.25 }), 10 / 0.75);
   assert.equal(normalizeScore(8, { meanV: 200, barFrac: 0 }), 8);
-  // 两个补偿相乘：暗场 ×2、黑边 25% → 10 * 2 / 0.75
-  assert.ok(Math.abs(normalizeScore(10, { meanV: 80, barFrac: 0.25 }) - (20 / 0.75)) < 1e-9);
+  // 两个补偿相乘：暗场 ×1.2、黑边 25% → 10 * 1.2 / 0.75
+  assert.ok(Math.abs(normalizeScore(10, { meanV: 80, barFrac: 0.25 }) - (12 / 0.75)) < 1e-9);
 });
 
 test('normalizeScore：噪声地板以下的分数不放大（最容易踩的坑）', () => {
-  for (const raw of [0.4, 2, 3, 5, 5.99]) {
+  // 地板 2：实测静止暗场的编码噪声 raw 只有 0.00–0.13，留 15 倍余量。
+  // 原先取 6 是为了挡"×3 的乘链"，但那样连它自己举的"暗场真切点约 5 分"都救不回。
+  for (const raw of [0.4, 1, 1.99]) {
     assert.equal(normalizeScore(raw, { meanV: 40, barFrac: 0 }), raw, `raw=${raw} 不该被放大`);
   }
-  assert.equal(normalizeScore(6, { meanV: 40 }), 18, '刚好到地板就参与放大');
+  assert.equal(normalizeScore(2, { meanV: 40 }), 3.7, '刚好到地板就参与放大');
 });
 
 test('normalizeScore：第一帧 / 0 / NaN 原样透传，不造出 -0 和 NaN', () => {
@@ -179,4 +185,15 @@ test('开关默认开，且能从 tuning 关掉', () => {
   const bad = readTuning({ env, readFile: () => JSON.stringify({ scoreNormalize: 'false' }) });
   assert.equal(bad.scoreNormalize, true);
   assert.ok(bad.warnings.some((w) => w.includes('scoreNormalize')));
+});
+
+test('createScorer：黑边不吃进 meanV —— 否则 gain 和 /(1-bar) 重复补偿', () => {
+  // 同一张亮画面，一帧无黑边、一帧上下各 8 行黑边。有效行的亮度一样，
+  // 所以 meanV 必须基本相同（差 < 10）；修之前全帧平均会把 200 拉成 111，
+  // gain 跟着从 1 涨到 1.85，再乘上 /(1-bar) —— 实测 letterbox 素材因此放大到 2.2 倍。
+  const plain = createScorer({ width: W, height: H, scoreNormalize: true })(frame({ v: 80 }));
+  const boxed = createScorer({ width: W, height: H, scoreNormalize: true })(frame({ v: 80, bar: 4 }));
+  assert.ok(boxed.barFrac > 0, `黑边没认出来（barFrac=${boxed.barFrac}）`);
+  assert.ok(Math.abs(boxed.meanV - plain.meanV) < 10,
+    `带黑边的 meanV=${boxed.meanV.toFixed(1)}，无黑边 ${plain.meanV.toFixed(1)} —— 黑边被算进亮度了`);
 });
