@@ -150,6 +150,8 @@ export const HANGUP_NOTE = '[看屏幕·挂断] 悬浮窗被关掉了 —— 用
 export function startLoop({
   ctx, sessionId = null, getSessionId = () => null, runner,
   log = () => {}, onStop = () => {}, wakeMinGapSec = WAKE_MIN_GAP_MS / 1000,
+  /** 一条叫醒多久没人接（没有任何工具调用）就收工；测试里可以调小 */
+  unackedStopMs = 45_000,
   // 逐帧模式：唤醒文案要说"换画面了，说一句这是什么"，而不是"有新画面了"。
   scene = false,
   // `~/.dsh/see-now.json` 的节奏参数（readTuning()）；不传就用写死的默认值。
@@ -464,7 +466,13 @@ export function startLoop({
       if (Date.now() < nextAt) return;   // 下一拍再来
       // ⑤.1.6 上一条叫醒还没被接住就不要再叫 —— 宿主会把这些叫醒排队，
       //        模型没来得及回应时，用户屏幕上会积一串「有新画面了」。
-      if (lastWakeAt > lastAckAt) return;
+      if (lastWakeOk && lastWakeAt > lastAckAt) {
+        // 只拦**成功**的那一条：叫醒失败还要按原来的重试/连续失败逻辑走。
+        // 超过 unackedStopMs 还没接住 → 模型那一轮压根没用这个工具（只回了文本），
+        // 再叫只会继续刷屏。整个收工。
+        if (Date.now() - lastWakeAt > unackedStopMs) { stop('wake-unacked'); return; }
+        return;
+      }
 
       // 叫醒了才算"这张已经叫过"。**失败不能记账**：记了的话下一拍看到 key 没变
       // 就不再重试，连续失败计数永远到不了上限 —— 于是"叫不醒"既不会重试也不会停。

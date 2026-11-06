@@ -226,6 +226,10 @@ test('出了新的一张才再叫（按出图序号，不看 pending）', async 
   await sleep(300);
   assert.equal(wakes.length, 1);
 
+  // 真实链路里，模型被叫醒之后会调 `see_now`（peek/say/watch），
+  // 那一下会走 index.js 的 loop.noteActivity()。这里显式模拟它 ——
+  // 不模拟的话"一次只允许一条在飞"会把第二张按住（那是设计，不是 bug）。
+  loop.noteActivity();
   runner.st.sheets = 8;        // 又攒出一张
   await sleep(2300);
   loop.dispose();
