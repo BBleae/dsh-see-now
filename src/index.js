@@ -775,6 +775,9 @@ async function registerAll(ctx) {
   const toolObj = {
     ...seeNowToolSpec(),
     async execute(args = {}, run = {}) {
+      // 任何一次调用都算"接住了上一条叫醒"：循环据此避免在模型没回应时继续投递唤醒
+      // （以前的毛病：一轮跑几十秒，叫醒照发不误，用户屏幕上积一串「有新画面了」）。
+      loop?.noteActivity?.();
       // 第二个参数是宿主的 `ToolRunContext`：`signal` 是"这一轮被取消了"的唯一通知。
       // 它只交给**阻塞等待**（watch）；常驻循环不挂它，理由见 ensureLoop。
       const out = await toolObj.route(args, run);
