@@ -22,7 +22,8 @@ import { planOffload, planOffloadWithTrigger, applyOffload } from './offload.js'
 import { defineToolCompat } from './define-tool.js';
 import { createSettingsApi, ROUTE_PREFIX } from './settings-api.mjs';
 import { windowAlive, windowHidden, setWindowHidden, hiddenForShow, windowReport, windowLine,
-  setWindowDanmaku, readWindowDanmaku } from './window.js';
+  setWindowDanmaku, readWindowDanmaku, openWindow, closeWindow } from './window.js';
+import { registerSeenowCommand, COMMAND_NAME } from './command.js';
 import { pickRegion, loadRegion, saveRegion, clearRegion, regionText } from './region.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -821,6 +822,8 @@ async function registerAll(ctx) {
 
   /** 正在跑的常驻循环（同一时刻只有一个） */
   let loop = null;
+  /** `/seenow` 是否真的注册上了（给 `status` 报出来 —— 用户问"打了 / 怎么没有它"时第一眼看这个） */
+  let commandRegistered = false;
   const stopLoop = (reason = '手动') => {
     if (!loop) return;
     const wasStopped = loop.stopped();
@@ -829,6 +832,30 @@ async function registerAll(ctx) {
     if (!wasStopped) log(`循环停了（${reason}）`);
   };
   disposers.push(() => stopLoop('插件卸载'));
+
+  /**
+   * 一行状态（给 `/seenow status` 用）。
+   *
+   * 工具的 `status` 是**诊断用**的十几行；命令只是"看一眼"，倒那么多反而看不清。
+   * 三行：采集、窗口、循环（含绑在哪个会话 —— 这正是"话投错人"时第一眼要看的）。
+   */
+  const statusSummary = () => {
+    const st = runner.status();
+    const lp = loop?.state() ?? null;
+    const cap = st.running
+      ? `在跑（收到 ${st.frames ?? 0} 帧，出图 ${st.stats?.sheets ?? 0}）`
+      : (st.pending ? `停了，队列里还有 ${st.pending} 张` : '没在跑');
+    return [
+      `看屏幕：${cap}`,
+      windowLine(),
+      `循环：${lp
+        ? (lp.stopped
+          ? `已停（${lp.reason ?? '未知'}）`
+          : `在跑 · 叫醒 ${lp.wakes} 次 · 绑定 ${lp.session ?? '未知会话'}`)
+        : '没起'}`,
+      `命令：/${COMMAND_NAME}${commandRegistered ? ' 已注册' : ' 未注册'}`,
+    ].join('\n');
+  };
 
   /**
    * 起循环（幂等，按会话）。
@@ -1421,6 +1448,8 @@ async function registerAll(ctx) {
             + `\n收工线：连续 ${tuning.maxAutonomousWakes} 次叫醒没人理`
             + ` · ${tuning.idleStopMin > 0 ? `没开窗时 ${tuning.idleStopMin} 分钟没说话` : '空闲线已关闭'}`
             + `${tuning.path && tuning.maxAutonomousWakes === 8 && tuning.idleStopMin === 3 ? '（默认）' : `（${tuning.path}）`}`
+            // 命令：`/` 菜单里有没有这一项 —— 用户"打了 / 找不到它"时第一眼要看的
+            + `\n命令：/${COMMAND_NAME}${commandRegistered ? ' 已注册（`/` 菜单里能看到）' : ' 未注册（宿主没有 commands 服务）'}`
             // 区域：只看一小块时，模型得知道自己看到的不是整屏
             + `\n区域：${regionText(s.lastSource?.region ?? loadRegion()) ?? '整屏'}`
             // 采集流的坐标系：Linux 上 region 的 x,y,w,h 就是按这个尺寸量的
@@ -1464,6 +1493,44 @@ async function registerAll(ctx) {
     log(`工具 ${TOOL_NAME} 已经注册过了（${msg}）—— 这一份直接退出，避免两套循环同时叫醒模型`);
     for (const d of disposers.reverse()) { try { d?.(); } catch { /* 收不干净也不能再炸 */ } }
     return () => {};
+  }
+
+  /**
+   * 注册 `/seenow`：用 `/` 直接把悬浮窗叫出来。
+   *
+   * 三条约束，每一条都有原因：
+   *   - **拿不到 `commands` 服务就安静跳过**：headless / 老宿主 / 当普通 Node 库用时
+   *     这个插件必须照常加载，为了一个可选入口让整棵树挂掉是最糟的取舍
+   *     （所以走 `ctx.get('commands')`，**不加进 `inject`**）；
+   *   - 命令里**不提交用户消息**：它只负责开窗/起采集/绑循环，然后投一句话给模型；
+   *   - 绑循环用**发起命令的这个会话**（`invocation.agent`），不是"最后说过话的会话"。
+   */
+  try {
+    const disposeCmd = registerSeenowCommand(ctx, {
+      log,
+      openWindow: (o) => openWindow({ ...o, log }),
+      closeWindow: () => closeWindow(),
+      setWindowHidden: (hidden) => setWindowHidden(hidden, { log }),
+      startCapture: async () => {
+        const built = srcOf({});
+        if (built.error) return { error: built.error };
+        return runner.start({ src: built.src ?? { kind: 'screen' } });
+      },
+      stopCapture: () => { try { runner.stop(); } catch { /* 没在跑 */ } },
+      ensureLoop: (owner) => ensureLoop(owner ?? null),
+      getLoop: () => loop,
+      stopLoop: (reason) => stopLoop(reason),
+      statusText: () => statusSummary(),
+    });
+    if (disposeCmd) {
+      disposers.push(disposeCmd);
+      commandRegistered = true;
+      log(`已注册命令 /${COMMAND_NAME}`);
+    } else {
+      log(`/${COMMAND_NAME} 没注册：宿主没有 commands 服务（不影响 see_now 工具）`);
+    }
+  } catch (e) {
+    log(`/${COMMAND_NAME} 注册失败：${e?.message ?? e}`);
   }
 
   return () => { for (const d of disposers.reverse()) d?.(); };
