@@ -539,7 +539,16 @@ export function markSpeaking(text, { env = process.env, extraMs = 1200, duration
 
 // ------------------------------------------------------------------ Python
 
-const PY_PROBE = 'import pyaudiowpatch, numpy';
+/**
+ * 探测解释器能不能干这活。
+ *
+ * Windows：必须有 `pyaudiowpatch`（WASAPI loopback，PortAudio 不暴露回环设备）。
+ * Linux：不需要 Python 音频库，但要有 **numpy** 和 **ffmpeg**（从 PulseAudio/PipeWire 的
+ * monitor 源读 PCM；`pactl` 只用来找默认输出的 monitor，缺了会退化成列源再挑）。
+ */
+const PY_PROBE = process.platform === 'linux'
+  ? 'import numpy, shutil, sys; sys.exit(0 if shutil.which("ffmpeg") else 3)'
+  : 'import pyaudiowpatch, numpy';
 
 /** 这个解释器有没有抓回环要的两个包（真跑一次 import，名字像没用）。 */
 export function canListen(python) {
@@ -989,8 +998,11 @@ export function createListener({
     }
     python ??= findListenPython({ env });
     if (!python) {
-      reason = '没有能用的 Python（要 `pip install pyaudiowpatch numpy`，'
-        + '或把解释器路径写进 ~/.dsh/see-window.json 的 listenPython）';
+      reason = process.platform === 'linux'
+        ? '没有能用的 Python（Linux 要 numpy + ffmpeg，不需要 pyaudiowpatch；'
+          + '或把解释器路径写进 ~/.dsh/see-window.json 的 listenPython）'
+        : '没有能用的 Python（要 `pip install pyaudiowpatch numpy`，'
+          + '或把解释器路径写进 ~/.dsh/see-window.json 的 listenPython）';
       enabled = false;
       return { ok: false, reason };
     }

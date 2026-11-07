@@ -220,6 +220,11 @@ PySide6 装进 venv 之后，用 `DSH_SEE_PYTHON=~/.venvs/pyside/bin/python` 指
 - **`region`**：坐标是**采集流的坐标系**（`status` 里的「采集流 W×H」）。取框窗拿到的是
   Tk 的**物理像素**，两者比例不保证整数（实测 100% → ×1.0、125% → ×1.25、150% → ×1.5），
   所以按 x/y 各自换算、再夹回流范围内。
+- **听声音（Linux）**：Windows 那条 WASAPI 回环用不了，改抓 **PulseAudio/PipeWire 的 monitor 源**
+  （`ffmpeg -f pulse -i <默认输出>.monitor`，`pactl` 用来找默认输出）。所以 Linux 上只需要
+  `numpy` + `ffmpeg`（`pactl` 来自 `pulseaudio-utils`；没有它时找默认输出的那段会报错），
+  **不需要 pyaudiowpatch**；
+  转写仍然走宿主的 `speechToText` 或 `~/.dsh/asr.json`，和 Windows 同一条链。
 - **无桌面环境**（服务器 / 容器 / 纯 SSH）用不了：portal 不响应，插件会直接报清楚。
 - **已知问题**：反复 SIGKILL 采集进程可能让 KDE 的 `xdg-desktop-portal` 卡住（表现为
   握手成功但 0 帧、不报错）；正常 stop 会调 `Session.Close`，不会留下这个状态。

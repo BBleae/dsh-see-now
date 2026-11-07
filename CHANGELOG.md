@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Added — Linux 也能「听声音」了
+
+`examples/floating-chat/listen.py` 原来只有 WASAPI 回环（`pyaudiowpatch`，Windows 专有）。
+现在按平台分叉：**Linux 抓 PulseAudio/PipeWire 的 monitor 源**（`ffmpeg -f pulse`，`pactl`
+找默认输出），断句、音量条、静音窗口、落盘全部复用同一套（抽成 `Recorder`，两边只差「怎么取音频」）。
+
+- 依赖：Linux 只要 `numpy` + `ffmpeg`（`pactl` 来自 `pipewire-pulse` / `pulseaudio-utils`），
+  **不需要 pyaudiowpatch**；`canListen()` 的探测也按平台分开了。
+- 转写不变：宿主 `speechToText` 或 `~/.dsh/asr.json`，和 Windows 同一条链。
+- 实测：KDE Wayland 上播 8 秒音频，收到 2 段 `seg-*.wav`（各 3.05 秒，按 `maxSeg` 切），
+  Node 侧正常转写进台词缓冲。
+
+
 ## [0.1.5] - 2026-11-06
 
 ### Fixed — 有些机器上装完一个工具都不出现（社区实报）
