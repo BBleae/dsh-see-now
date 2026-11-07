@@ -152,6 +152,8 @@ const ASSETS = [
   'glass_geometry.py', 'glass_capture.py', 'glass_cpu.py', 'glass_gpu.py',
   'glass_static.py',
   'glass_window.py', 'glass_window_gpu.py', 'window_widgets.py',
+  // 最小化到托盘 + 弹幕：窗口 `import` 这两个，漏一个就是"能装、装完起不来"
+  'tray.py', 'danmaku.py',
 ];
 const srcDir = dirname(upstream.p);
 const destDir = dirname(DEST);

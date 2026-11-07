@@ -24,7 +24,7 @@
 
 import { rejectionFor } from './settings-trust.js';
 import { asrPath, readAsrConfig, writeAsrConfig } from './asr-store.mjs';
-import { readWindowStyle, setWindowStyle } from './window.js';
+import { readWindowStyle, setWindowStyle, setWindowHidden, setWindowDanmaku } from './window.js';
 import {
   readTuning,
   writeTuning,
@@ -227,12 +227,32 @@ export function createSettingsApi({ logger } = {}) {
         const patch = await patchOf(req, res);
         if (patch === undefined) return;
 
-        const result = setWindowStyle(patch.style, { log });
-        if (result.ok) log(`see-now: 悬浮窗样式 → ${result.style}`);
+        // 只校验传来过的键：`setWindowStyle(undefined)` 会返回"样式不合法"，
+        // 那样只改弹幕也会被一个不相干的错误拦住。
+        let result = { ok: true, rejected: [] };
+        if (patch.style !== undefined) {
+          result = setWindowStyle(patch.style, { log });
+          if (result.ok) log(`see-now: 悬浮窗样式 → ${result.style}`);
+        }
+        // 最小化 / 弹幕：和样式一样是"改完 250ms 生效"的键，走同一个接口，
+        // 少一套路由就少一处不同步（两个键各有自己的合法值，分别校验）。
+        let rejected = result.rejected ?? [];
+        let modeResult = null;
+        if (patch.mode !== undefined) {
+          const want = String(patch.mode ?? '').trim().toLowerCase();
+          if (want !== 'full' && want !== 'hidden') rejected = [...rejected, 'mode 必须是 full / hidden'];
+          else modeResult = setWindowHidden(want === 'hidden', { log });
+        }
+        let danmakuResult = null;
+        if (patch.danmaku !== undefined) danmakuResult = setWindowDanmaku(Boolean(patch.danmaku), { log });
+        const ok = rejected.length === 0
+          && result.ok !== false
+          && (modeResult?.error === undefined)
+          && (danmakuResult?.error === undefined);
         send(res, 200, {
-          ok: result.ok,
+          ok,
           window: readWindowStyle(),
-          rejected: result.rejected ?? [],
+          rejected,
         });
         return;
       }

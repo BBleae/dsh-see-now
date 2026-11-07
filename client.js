@@ -82,12 +82,13 @@ window.__ModuleLoader__.load({
       'local.sample.body': '{\n  "api": "openai-audio",\n  "baseUrl": "http://127.0.0.1:8000/v1",\n  "model": "paraformer-zh-2024-03-09",\n  "language": "auto"\n}',
       'local.manage': '文件里还有 manage（怎么把服务拉起来）一类的键，面板不动它们，原样保留。',
       'local.env': '环境变量正在覆盖这些字段',
-      'field.pace': '默认节奏',
-      'field.pace.hint': '决定多长时间醒一次、一次说多少。理解为"话多话少"。',
-      'pace.calm': '平缓 —— 很久才出声',
-      'pace.normal': '正常 —— 默认',
-      'pace.dense': '密集 —— 反应快，话也多',
-      'pace.game-economic': '游戏省流 —— 只在动作明显时才看',
+      'field.pace': '场景变换侦测灵敏度',
+      'field.pace.hint': '决定"多大的画面变化才算换了一个场景"。分数越低越敏感：切点更密、醒得更勤、话也多；'
+        + '分数越高越只挑大变化。',
+      'pace.calm': '低 —— 20 分以上的变化才算（很久才出声）',
+      'pace.normal': '中 —— 12 分（默认）',
+      'pace.dense': '高 —— 7 分就算（反应快，话也多）',
+      'pace.game-economic': '只挑大动作 —— 80 分（游戏省流）',
       'field.batch': '超省模式（攒几张再交）',
       'field.batch.hint': '攒够几张图才叫醒你一次。1 张 = 攒满就交（默认，最及时）。'
         + '调到 3 张：模型一次看三张，少两轮请求 —— 省的是"每轮都要把整个上下文重过一遍"那笔，'
@@ -112,7 +113,7 @@ window.__ModuleLoader__.load({
       'field.tierStyle.hint': '档位 1 = 一格占满，8 = 只占 1/8 边。'
         + '默认「标准」：按变化密度算出档位后，1 档压成 1/2 —— 不然那几帧几乎没变的画面'
         + '会各占满一整张图，张数白涨。想要 1 档也占满就选「原生」。'
-        + '换「节奏」时格子会跟着变（帧越密格子越小），那是设计，不是错。',
+        + '换「灵敏度」时格子会跟着变（帧越密格子越小），那是设计，不是错。',
       'tier.standard': '标准 —— 1 档压成 1/2（默认）',
       'tier.native': '原生 —— 算出几档就是几档，1 档也占满',
       'tier.full': '更大 —— 在密度基础上整体降一档',
@@ -121,7 +122,7 @@ window.__ModuleLoader__.load({
       'field.fillTierMap': '一键填满',
       'field.fillTierMap.pick': '全设成…',
       'field.fillTierMap.hint': '选一个档位，八项一起改成它。八项全一样 = 密度不再影响尺寸，'
-        + '节奏怎么改格子都是这么大。代价：帧很稀的时候一格只放一两帧，剩下画布是空的。',
+        + '灵敏度怎么改格子都是这么大。代价：帧很稀的时候一格只放一两帧，剩下画布是空的。',
       'field.tierMap': '逐档映射',
       'field.tierMap.hint': '左边是算出来的档位，右边选它实际落到哪一档。'
         + '想把"1 档"也缩小就把它改成 2；想让 8 档别那么碎就改成 6。',
@@ -162,6 +163,17 @@ window.__ModuleLoader__.load({
         + '静态磨砂不抓屏，只画一张预生成的底板，CPU 占用接近 0；纯色连渐变都不要。',
       'win.applied': '已应用，窗口下一拍就换过来。',
       'win.path': '配置文件',
+      'win.game': '打游戏的时候',
+      'win.mode': '窗口',
+      'win.mode.full': '正常显示',
+      'win.mode.hidden': '最小化到托盘（完全不占屏幕）',
+      'win.mode.hint': '最小化是真的从屏幕上消失，不是缩成一条。右下角托盘图标、或 Ctrl+Alt+W 叫回来；'
+        + '采集照常，台词照念。',
+      'win.danmaku': '弹幕',
+      'win.danmaku.off': '关',
+      'win.danmaku.on': '开 —— 台词从屏幕顶部飘过',
+      'win.danmaku.hint': '只飘它说的话；你自己发的不飘。窗口最小化之后，这是唯一还看得见消息的通道。',
+      'win.game.hint': '边打游戏边听：窗口选「最小化到托盘」+ 弹幕「开」+ 外观选「静态磨砂」—— 0 占屏、0 抓屏。',
     };
 
     const t = key => TEXT[key] ?? key;
@@ -500,15 +512,15 @@ window.__ModuleLoader__.load({
        * 和 see-now.json 不是一份文件；而且窗口盯着这个文件的 mtime，改完就换 ——
        * 没有必要让用户再点一次「保存」。
        */
-      const applyWindow = async (style) => {
-        setWindowStyleState(style);
+      const applyWindow = async (patch) => {
+        if (patch.style !== undefined) setWindowStyleState(patch.style);
         setWindowAt(0);
         setError('');
         try {
           const result = await api('/window', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ patch: { style } }),
+            body: JSON.stringify({ patch }),
           });
           if (result.ok) {
             setData(current => (current ? { ...current, window: result.window } : current));
@@ -641,10 +653,30 @@ window.__ModuleLoader__.load({
               h('select', {
                 className: 'sn_select',
                 value: windowStyle || 'auto',
-                onChange: e => { void applyWindow(e.target.value); },
+                onChange: e => { void applyWindow({ style: e.target.value }); },
               }, ['auto', 'live', 'frost', 'solid'].map(value =>
                 h('option', { key: value, value }, t('win.style.' + value)))),
               h('span', { className: 'sn_hint' }, t('win.style.hint')))),
+          h('div', { className: 'sn_grid' },
+            h('label', { className: 'sn_field' },
+              h('span', { className: 'sn_label' }, t('win.mode')),
+              h('select', {
+                className: 'sn_select',
+                value: data.window?.mode || 'full',
+                onChange: e => { void applyWindow({ mode: e.target.value }); },
+              }, ['full', 'hidden'].map(value =>
+                h('option', { key: value, value }, t('win.mode.' + value)))),
+              h('span', { className: 'sn_hint' }, t('win.mode.hint'))),
+            h('label', { className: 'sn_field' },
+              h('span', { className: 'sn_label' }, t('win.danmaku')),
+              h('select', {
+                className: 'sn_select',
+                value: data.window?.danmaku ? 'on' : 'off',
+                onChange: e => { void applyWindow({ danmaku: e.target.value === 'on' }); },
+              }, ['off', 'on'].map(value =>
+                h('option', { key: value, value }, t('win.danmaku.' + value)))),
+              h('span', { className: 'sn_hint' }, t('win.danmaku.hint')))),
+          h('p', { className: 'sn_note', style: { margin: 0 } }, t('win.game.hint')),
           data.window && data.window.path
             ? h('div', { className: 'sn_mono' }, `${t('win.path')}：${data.window.path}`)
             : null,

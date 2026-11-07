@@ -100,7 +100,15 @@ function styleOf(cfg) {
 /** 现在的样式 + 文件位置（面板要能把"改的是哪个文件"说出来）。 */
 export function readWindowStyle(env = process.env) {
   const path = windowConfigPath(env);
-  return { path, exists: existsSync(path), style: styleOf(readJson(path)) };
+  const cfg = readJson(path);
+  return {
+    path,
+    exists: existsSync(path),
+    style: styleOf(cfg),
+    // `hidden` 是老键，`mode` 是新键：两个都认（和窗口的 `window_mode` 同一套判断）
+    mode: cfg.hidden === true || cfg.mode === 'hidden' ? 'hidden' : 'full',
+    danmaku: cfg.danmaku === true,
+  };
 }
 
 /**
@@ -186,6 +194,9 @@ export function setWindowHidden(hidden, { log = () => {}, env = process.env } = 
   // 已经是目标状态就**不写**：多写一次会让 Python 侧多醒一轮，还会把 mtime 刷成"刚刚改过"
   if (Boolean(cfg.hidden) === want) return { changed: false, hidden: want };
   cfg.hidden = want;
+  // `mode` 是窗口自己写的最小化标记，优先级高于 `hidden`（见 `window_mode`）：
+  // 放出来的时候不清掉它，窗口会"被 show 了还是缩在托盘里"。
+  if (!want) delete cfg.mode;
   // 记下是谁藏的：重启后这个字段对不上，`windowHidden()` 就当它没藏过
   if (want) cfg.hiddenBy = SESSION_ID;
   else delete cfg.hiddenBy;
@@ -200,6 +211,39 @@ export function setWindowHidden(hidden, { log = () => {}, env = process.env } = 
     return { changed: false, hidden: !want, error };
   }
   return { changed: true, hidden: want };
+}
+
+/**
+ * 台词是否以弹幕飘过屏幕顶部（`watch-window.json` 的 `danmaku`）。
+ *
+ * 和可见性**正交**：`hidden + danmaku` 才是"打游戏"那一档 —— 窗口 0 占屏，
+ * 但台词还看得见。默认关，别替用户决定。
+ */
+export function readWindowDanmaku(env = process.env) {
+  return readJson(windowConfigPath(env)).danmaku === true;
+}
+
+/**
+ * 改弹幕开关。和 `setWindowStyle` 同一套写法：读-改-写整份文件、tmp 再 rename。
+ * 窗口每 250ms 看一次 mtime，改完当场生效，不用重开窗。
+ */
+export function setWindowDanmaku(on, { log = () => {}, env = process.env } = {}) {
+  const path = windowConfigPath(env);
+  const cfg = readJson(path);
+  const want = Boolean(on);
+  if ((cfg.danmaku === true) === want) return { ok: true, changed: false, danmaku: want };
+  cfg.danmaku = want;
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(cfg, null, 2), 'utf8');
+    renameSync(tmp, path);
+  } catch (e) {
+    const error = String(e?.message ?? e);
+    log(`写 ${path} 失败：${error}`);
+    return { ok: false, changed: false, danmaku: !want, error };
+  }
+  return { ok: true, changed: true, danmaku: want };
 }
 
 /**

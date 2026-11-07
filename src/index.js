@@ -21,7 +21,8 @@ import { readTuning, TIER_STYLES } from './tuning.js';
 import { planOffload, planOffloadWithTrigger, applyOffload } from './offload.js';
 import { defineToolCompat } from './define-tool.js';
 import { createSettingsApi, ROUTE_PREFIX } from './settings-api.mjs';
-import { windowAlive, windowHidden, setWindowHidden, hiddenForShow, windowReport, windowLine } from './window.js';
+import { windowAlive, windowHidden, setWindowHidden, hiddenForShow, windowReport, windowLine,
+  setWindowDanmaku, readWindowDanmaku } from './window.js';
 import { pickRegion, loadRegion, saveRegion, clearRegion, regionText } from './region.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -1247,11 +1248,17 @@ async function registerAll(ctx) {
        */
       if (action === 'window') {
         const wants = typeof args.show === 'boolean' ? args.show : null;
+        const wantsDanmaku = typeof args.danmaku === 'boolean' ? args.danmaku : null;
         let changed = null;
+        let dm = null;
         if (wants !== null) {
           // `show` 和 `hidden` 方向相反，换算只在 hiddenForShow 一处
           changed = setWindowHidden(hiddenForShow(wants), { log });
-          log(`悬浮窗${wants ? '显示' : '隐藏'}${changed.changed ? '' : '（本来就是）'}`);
+          log(`悬浮窗${wants ? '显示' : '最小化'}${changed.changed ? '' : '（本来就是）'}`);
+        }
+        if (wantsDanmaku !== null) {
+          dm = setWindowDanmaku(wantsDanmaku, { log });
+          log(`弹幕${wantsDanmaku ? '开' : '关'}${dm.changed ? '' : '（本来就是）'}`);
         }
         const r = windowReport();
         /**
@@ -1268,13 +1275,19 @@ async function registerAll(ctx) {
             : (changed?.error ? `没改成隐藏（${changed.error}），现状：` : '已把悬浮窗藏起来（采集照常，只是看不见）。');
         return {
           text: `${head}\n${windowLine(r)}`
+            + (dm ? `\n弹幕已${dm.danmaku ? '打开（台词会从屏幕顶部飘过）' : '关掉'}。` : '')
             + (lagging ? '\n（这一行还是上一秒的状态，最多 1 秒后刷新。）' : '')
             + (r.alive ? '' : '\n窗没开着 —— 下一次 `watch` 会重新开一个。')
             + (r.alive && r.hidden && wants !== false && !lagging
               ? '\n**用户现在看不到任何东西**：要么 `see_now({action:"window", show:true})`，'
-                + '要么就别再用 `say` 说话，等他主动问。'
+                + (dm?.danmaku ? '要么就靠弹幕说话（弹幕开着）。' : '要么就别再用 `say` 说话，等他主动问。')
               : ''),
-          meta: { ok: changed ? !changed.error : true, window: r, changed: changed?.changed ?? false },
+          meta: {
+            ok: changed ? !changed.error : (dm ? !dm.error : true),
+            window: r,
+            changed: changed?.changed ?? false,
+            danmaku: dm?.danmaku ?? readWindowDanmaku(),
+          },
         };
       }
 

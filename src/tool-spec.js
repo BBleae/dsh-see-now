@@ -115,8 +115,12 @@ export function seeNowToolSpec() {
       },
       show: {
         type: 'boolean',
-        description: 'With action:"window": true = 让悬浮窗显示出来（用户看不见窗时用），false = 藏起来'
-          + '（采集照常，只是一句 `say` 也看不见）。不传就只报状态，什么都不改。',
+        description: 'With action:"window": true = 显示；false = 最小化到托盘（真的离开屏幕，'
+          + '采集照常，Ctrl+Alt+W 叫回来）。不传 = 只报状态。',
+      },
+      danmaku: {
+        type: 'boolean',
+        description: 'With action:"window": 台词是否飘成弹幕（默认关）。配合 `show:false` 用。',
       },
       source: {
         type: 'string',

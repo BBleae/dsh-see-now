@@ -90,6 +90,9 @@ export const SEE_NOW_HELP = [
   '## 常见坑',
   '- 同一句话说了三遍：`say` 一次就是一个气泡、一次朗读。',
   '- 用户说"看不见"：先 `status` 看窗口那一行，再 `window` + `show:true`。',
+  '- 打游戏嫌挡视野：`window` + `show:false`（真的离开屏幕、挂到托盘），'
+  + '想边玩边看就再加 `danmaku:true` —— 台词从屏幕顶部飘过，只有 assistant 的台词会飘。'
+  + '叫回来：托盘图标 / `Ctrl+Alt+W` / `show:true`。',
   '- 用户关了窗：插件会告诉你，别再调 `watch`。',
   '- 用 `source:"file"` 回放本地视频调试时，`realtime:true` 才是 1 倍速。',
 ].join('\n');
