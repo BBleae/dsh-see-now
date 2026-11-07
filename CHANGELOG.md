@@ -28,6 +28,22 @@
 
 ## [Unreleased]
 
+### Fixed — 设置页改什么都不给存：补丁里混进两个幽灵字段（#43）
+
+`draftOf()` 给表单种子时漏了 `tierStyle` / `tierMap` / `wakeBatch` 三项，而 `patchOf()`
+是按「draft 与 values 逐项比较、不等即视为用户改过」拼补丁的 —— 种子缺了谁，draft 那边
+就是 `undefined`，与真实值永远不等，于是**每次保存**都捎上 `tierStyle: ""` 与 `tierMap: []`。
+
+`tuning.js` 的规矩是「本次提交让警告变多 → 整笔拒绝、文件不动」，两条红警就是这么来的：
+改「叫醒上限」也存不下去，与改了什么无关。
+
+- `draftOf()` 补齐三项（`tierMap` 给引用即可，`patchOf` 用 `JSON.stringify` 比内容）；
+- `wakeBatch` 是下拉框，`onChange` 拿到的是字符串，补 `num()` 才提交成宿主认的整数；
+- `patchOf()` 对 `values.listen` 做空兜底 —— 老宿主只回本次提交过的键，没提交过 listen 段时
+  它会直接 `TypeError`（`draftOf` 早就有这层兜底，两边现在一致）；
+- `select()` 的 `value: String(draft[key])` 在缺种时会渲染出一个叫 `undefined` 的选项，改 `?? ''`；
+- 测试 +2：真实 values 全项种进草稿后必须是空补丁、改档位能提交成对应类型。
+
 ### Fixed — 采集重启后第一张图挂着上一轮的台词（#39）
 
 `runner` 里的台词水位线 `lastSheetWallTo` 是跨会话留着的：新一轮第一张的时间窗

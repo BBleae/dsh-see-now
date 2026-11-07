@@ -153,8 +153,47 @@ test('patchOf 只带改过的键', () => {
   });
 });
 
-test('空输入框交给宿主去拒，不在前端偷偷兜底成默认值', () => {
+// #43：设置页存盘必失败。`draftOf()` 漏种哪一项，`patchOf()` 就会认为
+// 「用户把它改成了空值」，每次保存都捎上幽灵字段（`tierStyle: ""` / `tierMap: []`），
+// 而 `tuning.js` 的规矩是「本次提交让警告变多 → 整笔拒绝、文件不动」。
+test('草稿覆盖界面上渲染过的每一项：没动过就是空补丁', () => {
   const { __test } = mod;
+  const values = {
+    maxAutonomousWakes: 8,
+    wakeBatch: 2,
+    tierStyle: 'native',
+    tierMap: [1, 2, 3, 4, 5, 6, 7, 8],
+    imageTrigger: 300,
+    imageKeep: 120,
+    idleStopMin: 3,
+    defaultPace: 'normal',
+    speechPacing: true,
+    listen: { prefer: 'auto', live: true, liveMin: 1.8, liveStep: 1.2, silence: 0.35, maxSeg: 3, pollMs: 100 },
+  };
+  const draft = __test.draftOf(values);
+  for (const key of Object.keys(values)) {
+    if (key === 'listen') continue;
+    assert.notEqual(draft[key], undefined, `draftOf 漏了 ${key}：patchOf 会把它当成"用户改成了空值"`);
+  }
+  assert.deepEqual(__test.patchOf(draft, values), {});
+});
+
+test('改过的高级档位能提交成宿主认的类型', () => {
+  const { __test } = mod;
+  const values = { tierStyle: 'native', tierMap: [1, 2, 3, 4, 5, 6, 7, 8], wakeBatch: 1 };
+  const draft = __test.draftOf(values);
+
+  // wakeBatch 是 <select>，onChange 拿到的是字符串；宿主那边要的是整数
+  assert.deepEqual(__test.patchOf({ ...draft, wakeBatch: '3' }, values), { wakeBatch: 3 });
+  assert.deepEqual(__test.patchOf({ ...draft, tierStyle: 'custom' }, values), { tierStyle: 'custom' });
+  // tierMap 比内容是比数组；复制一份但值不变，不该冒补丁
+  assert.deepEqual(__test.patchOf({ ...draft, tierMap: [...values.tierMap] }, values), {});
+  const grown = [...values.tierMap];
+  grown[7] = 6;
+  assert.deepEqual(__test.patchOf({ ...draft, tierMap: grown }, values), { tierMap: [1, 2, 3, 4, 5, 6, 7, 6] });
+});
+
+test('空输入框交给宿主去拒，不在前端偷偷兜底成默认值', () => {  const { __test } = mod;
   assert.ok(Number.isNaN(__test.num('')));
   assert.ok(Number.isNaN(__test.num('   ')));
   assert.equal(__test.num('1.5'), 1.5);

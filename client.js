@@ -237,7 +237,15 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** 表单草稿：扁平结构，读起来比嵌套少一层心智负担。 */
+    /**
+     * 表单草稿：扁平结构，读起来比嵌套少一层心智负担。
+     *
+     * **必须把「界面上渲染过的每一项」都种进来**，一项不落。`patchOf` 是按
+     * 「draft 与 values 逐项比较、不等即视为用户改过」算补丁的：种子缺了谁，
+     * draft 那边就是 `undefined`，与真实值永远不等，于是每次保存都会捎上一个
+     * 空值幽灵字段（`tierStyle: ""` / `tierMap: []`）。而 `tuning.js` 的规矩是
+     * 「本次提交让警告变多 → 整笔拒绝、文件不动」，所以只要缺一项，用户改什么都存不下去。
+     */
     function draftOf(values) {
       const listen = values?.listen ?? {};
       return {
@@ -245,8 +253,12 @@ window.__ModuleLoader__.load({
         imageTrigger: values.imageTrigger,
         imageKeep: values.imageKeep,
         idleStopMin: values.idleStopMin,
+        wakeBatch: values.wakeBatch,
         defaultPace: values.defaultPace,
         speechPacing: values.speechPacing,
+        // tierMap 是数组：给引用即可，patchOf 用 JSON.stringify 比内容，没有原地改的风险
+        tierStyle: values.tierStyle,
+        tierMap: values.tierMap,
         prefer: listen.prefer,
         live: listen.live,
         liveMin: listen.liveMin,
@@ -289,20 +301,24 @@ window.__ModuleLoader__.load({
      * 而 `tuning.js` 的初衷是"用户只写自己想改的那几项"。
      */
     function patchOf(draft, values) {
+      // `draftOf` 对空 values 有兜底（`values?.listen ?? {}`），这里也不能假设一定齐全：
+      // 老宿主回的包只带本次提交过的键，没提交过 listen 段时它就是 undefined。
+      const base = values ?? {};
       const patch = {};
-      for (const key of ['maxAutonomousWakes', 'imageTrigger', 'imageKeep', 'idleStopMin', 'defaultPace', 'speechPacing']) {
-        if (draft[key] !== values[key]) patch[key] = key === 'defaultPace' || key === 'speechPacing'
+      for (const key of ['maxAutonomousWakes', 'imageTrigger', 'imageKeep', 'idleStopMin', 'wakeBatch', 'defaultPace', 'speechPacing']) {
+        if (draft[key] !== base[key]) patch[key] = key === 'defaultPace' || key === 'speechPacing'
           ? draft[key]
           : num(draft[key]);
       }
-      if (draft.tierStyle !== values.tierStyle) patch.tierStyle = String(draft.tierStyle ?? '');
+      if (draft.tierStyle !== base.tierStyle) patch.tierStyle = String(draft.tierStyle ?? '');
       // 数组比引用永远不等，只能比内容；顺序有意义（第 i 个 = 档位 i+1）
-      if (JSON.stringify(draft.tierMap ?? null) !== JSON.stringify(values.tierMap ?? null)) {
+      if (JSON.stringify(draft.tierMap ?? null) !== JSON.stringify(base.tierMap ?? null)) {
         patch.tierMap = (Array.isArray(draft.tierMap) ? draft.tierMap : []).map((n) => num(n));
       }
+      const cur = base.listen ?? {};
       const listen = {};
       for (const key of ['prefer', 'live', 'liveMin', 'liveStep', 'silence', 'maxSeg', 'pollMs']) {
-        if (draft[key] === values.listen[key]) continue;
+        if (draft[key] === cur[key]) continue;
         // prefer 是枚举字符串，不能交给 num()（那会把 'host' 换成 NaN）
         listen[key] = key === 'live' ? draft[key] === true
           : key === 'prefer' ? String(draft[key] ?? '')
@@ -529,7 +545,8 @@ window.__ModuleLoader__.load({
         h('span', { className: 'sn_label' }, t(labelKey)),
         h('select', {
           className: 'sn_select',
-          value: String(draft[key]),
+          // 缺种时给空串：`String(undefined)` 会让下拉框渲染出一个名为 "undefined" 的选项
+          value: String(draft[key] ?? ''),
           onChange: e => set(key, e.target.value === 'true' ? true : e.target.value === 'false' ? false : e.target.value),
         }, options.map(([value, text]) => h('option', { key: String(value), value: String(value) }, text))),
         h('span', { className: 'sn_hint' }, t(hintKey)));
