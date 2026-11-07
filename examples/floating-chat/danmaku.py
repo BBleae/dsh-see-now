@@ -112,8 +112,13 @@ class DanmakuLayer:
         self.weight = "bold" if str(weight).lower() == "bold" else "normal"
         self.fg = _color(fg, FG)
         self.shadow = _color(shadow, SHADOW)
-        # 轨道高度跟着字号长，不然大字号会压到下一轨（13px 时 = 原 LANE_H 26）
-        self.lane_h = max(LANE_H, self.font_size + 13)
+        # 轨道高度**必须按字体实际行高**算，不能拿字号估：Tk 的 size 是磅值，
+        # 30 磅在 96DPI 下约 40px 字、行高 58px，旧公式 max(26, 字号+13) 只给 43px，
+        # 第二轨的文字会被窗口底边裁成"上半截"（2026-11 用户实报）。
+        # 行高问字体自己（metrics），换字体/换 DPI 都不会再错。
+        self._font = tkfont.Font(root=root, family=self.font_family,
+                                 size=self.font_size, weight=self.weight)
+        self.lane_h = max(LANE_H, self._font.metrics("linespace") + 1)
 
         self._pending = []
         self._items = []          # [{main, shadow, x, w, lane}]
@@ -139,8 +144,6 @@ class DanmakuLayer:
         self.canvas.pack(fill="both", expand=True)
         # 自己量宽度而不是问 `canvas.bbox()`：刚 create_text 出来的 item 还没排过版，
         # bbox 可能给 None / 旧值，那样 GAP 会算小、同轨两条直接叠上。
-        self._font = tkfont.Font(root=root, family=self.font_family,
-                                 size=self.font_size, weight=self.weight)
         self._resize()
         self._apply_ex_style()
 
@@ -199,7 +202,8 @@ class DanmakuLayer:
         if (family, size, want_weight) != (self.font_family, self.font_size, self.weight):
             self.font_family, self.font_size, self.weight = family, size, want_weight
             self._font.configure(family=self.font_family, size=self.font_size, weight=self.weight)
-            self.lane_h = max(LANE_H, self.font_size + 13)
+            # 行高跟着字体走（见 __init__ 的注释）：换字号/字体/字重都要重算
+            self.lane_h = max(LANE_H, self._font.metrics("linespace") + 1)
             for it in list(self._items):
                 self.canvas.delete(it["main"])
                 self.canvas.delete(it["shadow"])
