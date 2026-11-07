@@ -258,6 +258,89 @@ export function solve(tiers, {
 }
 
 /**
+ * 天幕（skyline）排布：**不按行切，按"最低可放位置"塞**。
+ *
+ * 为什么要有它：行式排布有个绕不过去的浪费 —— 一行里格子宽度加起来凑不满 1 时，
+ * 右边整块空着（`[1/7, 1/5, 1/6]` 只占 0.51，下一格是 1/2 又塞不进剩下的 0.49，
+ * 于是那 49% 白扔）。尺寸越不均匀，这种洞越多 —— 而"按重要性给大小"恰恰会制造
+ * 不均匀，所以行式排布和那套分配方式是天生打架的。
+ *
+ * 天幕的做法：维护一条**地平线**（每个 x 位置当前堆到多高），每格找"放上去之后
+ * 天际线最低"的位置（同高取最左）。小的可以叠在大的旁边，洞就没了。
+ *
+ * 代价：布局不再是整齐的行，读起来要靠格子上的编号（`burn: 'index'` 一直在画）。
+ * 所以默认仍是行式，这条要显式打开（`packMode: 'skyline'`）。
+ *
+ * @returns 与 `solve()` 同形状：`{bins, fill, area, cells}`
+ */
+export function solveSkyline(tiers, { grow = DEFAULT_GROW } = {}) {
+  const list = (Array.isArray(tiers) ? tiers : []).map(Number);
+  if (!list.length) return { bins: 0, fill: 0, cells: [], area: 0 };
+
+  const cells = [];
+  let bin = 0;
+  // 地平线按 UNIT 精度存（840 段，k ≤ 8 时所有 1/k 都是整数倍，不会有小数格）
+  let sky = new Float64Array(UNIT);
+  let area = 0;
+
+  const place = (side, t, seq) => {
+    let bestX = -1;
+    let bestY = Infinity;
+    for (let x = 0; x + side <= UNIT; x += 1) {
+      let y = 0;
+      for (let i = x; i < x + side; i += 1) {
+        if (sky[i] > y) y = sky[i];
+        if (y >= bestY) break;          // 已经不比当前最优好，别白扫
+      }
+      if (y < bestY) { bestY = y; bestX = x; if (y === 0) break; }
+    }
+    if (bestX < 0 || bestY + side > UNIT + 1e-9) return false;
+    for (let i = bestX; i < bestX + side; i += 1) sky[i] = bestY + side;
+    cells.push({
+      x: bestX / UNIT,
+      y: bestY / UNIT,
+      w: side / UNIT,
+      h: side / UNIT,
+      s: side / UNIT,
+      stretch: 1,
+      t,
+      f: side / UNIT,
+      bin,
+      seq,
+    });
+    area += (side / UNIT) ** 2;
+    return true;
+  };
+
+  list.forEach((t, seq) => {
+    // 档位边长；FREE（补位帧）按 1/4 起，放不下再逐级缩小
+    const base = t === FREE ? UNIT / 4 : UNIT / Math.max(1, Math.min(8, Math.round(t)));
+    let side = base;
+    let placed = false;
+    while (side >= UNIT / 24) {
+      if (place(side, t, seq)) { placed = true; break; }
+      side = Math.floor(side * 0.94);
+    }
+    if (placed) return;
+    // 这一张塞不下了：开下一张（按原尺寸重放，绝不丢帧）
+    bin += 1;
+    sky = new Float64Array(UNIT);
+    place(base, t, seq);
+  });
+
+  const bins = cells.length ? Math.max(...cells.map((c) => c.bin)) + 1 : 0;
+  return { bins, fill: bins ? area / bins : 0, cells, area };
+}
+
+/**
+ * 按 `packMode` 分派。**所有需要"装得下吗"的地方都必须走它** ——
+ * `splitOneBin` 若用了行式、出图用了天幕，切段判据和真实几何就对不上。
+ */
+export function packTiers(tiers, opts = {}) {
+  return opts.packMode === 'skyline' ? solveSkyline(tiers, opts) : solve(tiers, opts);
+}
+
+/**
  * 把一串档位切成**每段都能装进一张图**的若干段（保序、不丢帧、尽量往前塞）。
  *
  * ## 为什么要有它
@@ -290,7 +373,7 @@ export function splitOneBin(tiers, opts = {}) {
   for (const t of list) {
     const next = [...cur, t];
     // 单帧一定装得下（一个格子），所以这里不会出现空段
-    if (cur.length > 0 && solve(next, opts).bins > 1) {
+    if (cur.length > 0 && packTiers(next, opts).bins > 1) {
       segs.push(cur);
       cur = [t];
     } else {

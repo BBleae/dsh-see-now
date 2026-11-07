@@ -163,6 +163,9 @@ test('草稿覆盖界面上渲染过的每一项：没动过就是空补丁', ()
     wakeBatch: 2,
     tierStyle: 'native',
     tierMap: [1, 2, 3, 4, 5, 6, 7, 8],
+    tierMode: 'dwell',
+    tierCurve: 'custom',
+    tierThresholds: [0.26, 0.6, 0.9, 1.2, 1.8, 2.4, 3],
     imageTrigger: 300,
     imageKeep: 120,
     idleStopMin: 3,
@@ -176,6 +179,31 @@ test('草稿覆盖界面上渲染过的每一项：没动过就是空补丁', ()
     assert.notEqual(draft[key], undefined, `draftOf 漏了 ${key}：patchOf 会把它当成"用户改成了空值"`);
   }
   assert.deepEqual(__test.patchOf(draft, values), {});
+});
+
+test('档位判据 / 阈值表 / 七道阈值都能提交成宿主认的类型', () => {
+  const { __test } = mod;
+  const values = {
+    tierMode: 'density',
+    tierCurve: 'docx',
+    tierThresholds: [0.26, 0.6, 0.9, 1.2, 1.8, 2.4, 3],
+  };
+  const draft = __test.draftOf(values);
+  assert.deepEqual(__test.patchOf(draft, values), {});
+
+  // <select> 给的是字符串，宿主那边要的就是字符串（枚举），原样过
+  assert.deepEqual(__test.patchOf({ ...draft, tierMode: 'weight' }, values), { tierMode: 'weight' });
+  assert.deepEqual(__test.patchOf({ ...draft, tierCurve: 'perceptual' }, values), { tierCurve: 'perceptual' });
+
+  // 阈值是 <input type="number">，onChange 拿到字符串：必须换成数字，
+  // 否则 `"1.2"` 和 `1.2` 在 tuning 那边都能过，但数组比较会永远不等 → 每次都提交
+  const typed = { ...draft, tierThresholds: ['0.3', '0.5', '0.8', '1.1', '1.7', '2.3', '3.2'] };
+  assert.deepEqual(__test.patchOf(typed, values), {
+    tierThresholds: [0.3, 0.5, 0.8, 1.1, 1.7, 2.3, 3.2],
+  });
+
+  // 只是复制一份、值不变 → 不该冒补丁
+  assert.deepEqual(__test.patchOf({ ...draft, tierThresholds: [...values.tierThresholds] }, values), {});
 });
 
 test('改过的高级档位能提交成宿主认的类型', () => {

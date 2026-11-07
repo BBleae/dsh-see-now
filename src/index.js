@@ -570,6 +570,10 @@ async function registerAll(ctx) {
     // 档位映射：这张图里每帧占多大格子（设置页「高级」里那项）
     tierStyle: tuning.tierStyle,
     tierMap: tuning.tierMap,
+    // 档位怎么算 / 七道阈值取哪一套（设置页「高级」里的三项）
+    tierMode: tuning.tierMode,
+    tierCurve: tuning.tierCurve,
+    tierThresholds: tuning.tierThresholds,
     // 亮度归一 + 黑边补偿（默认开；关掉 = 回到 0.1.3 的绝对分）
     scoreNormalize: tuning.scoreNormalize,
   });

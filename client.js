@@ -126,6 +126,23 @@ window.__ModuleLoader__.load({
       'field.tierMap': '逐档映射',
       'field.tierMap.hint': '左边是算出来的档位，右边选它实际落到哪一档。'
         + '想把"1 档"也缩小就把它改成 2；想让 8 档别那么碎就改成 6。',
+      'field.tierMode': '格子大小按什么算',
+      'field.tierMode.hint': '模型看的是一张静态拼图，格子大小是唯一能告诉它"这一刻值不值得端详"的通道。'
+        + '「密度」看这一带节奏快不快；「停留」看这一刻在屏幕上留了多久（≥3 秒给大格）；'
+        + '「变化」按这一帧变了多少分地方 —— 最后这个才会让同一张图里出现大小对比。',
+      'mode.density': '密度 —— 每秒几帧（默认）',
+      'mode.dwell': '停留 —— 这一刻留了多久',
+      'mode.weight': '变化 —— 变化越大格越大',
+      'field.tierCurve': '七道阈值的取法',
+      'field.tierCurve.hint': '阈值决定"多密的画面该用几档"。'
+        + '「docx」是原始那套；「感知」按人眼瞬时记忆定标（一格最多 3 秒、最少 0.3 秒）；'
+        + '「自定义」自己填七个数。',
+      'curve.docx': '原始（docx）',
+      'curve.perceptual': '感知定标（3 s ~ 0.3 s）',
+      'curve.custom': '自定义七个阈值',
+      'field.tierThresholds': '七道阈值（帧/秒）',
+      'field.tierThresholds.hint': '从左到右必须严格递增。第 i 个数 = "多密算第 i+1 档"，'
+        + '所以数字越大越晚才切到小格子。默认 0.26 / 0.6 / 0.9 / 1.2 / 1.8 / 2.4 / 3.0。',
       'tier.from': '档',
       'field.wakes': '自主唤醒上限',
       'field.wakes.hint': '你一句话都没说，它自己最多醒几次就收工。',
@@ -271,6 +288,10 @@ window.__ModuleLoader__.load({
         // tierMap 是数组：给引用即可，patchOf 用 JSON.stringify 比内容，没有原地改的风险
         tierStyle: values.tierStyle,
         tierMap: values.tierMap,
+        // 数组同理给引用（patchOf 用 JSON.stringify 比内容）
+        tierMode: values.tierMode,
+        tierCurve: values.tierCurve,
+        tierThresholds: values.tierThresholds,
         prefer: listen.prefer,
         live: listen.live,
         liveMin: listen.liveMin,
@@ -323,9 +344,14 @@ window.__ModuleLoader__.load({
           : num(draft[key]);
       }
       if (draft.tierStyle !== base.tierStyle) patch.tierStyle = String(draft.tierStyle ?? '');
+      if (draft.tierMode !== base.tierMode) patch.tierMode = String(draft.tierMode ?? '');
+      if (draft.tierCurve !== base.tierCurve) patch.tierCurve = String(draft.tierCurve ?? '');
       // 数组比引用永远不等，只能比内容；顺序有意义（第 i 个 = 档位 i+1）
       if (JSON.stringify(draft.tierMap ?? null) !== JSON.stringify(base.tierMap ?? null)) {
         patch.tierMap = (Array.isArray(draft.tierMap) ? draft.tierMap : []).map((n) => num(n));
+      }
+      if (JSON.stringify(draft.tierThresholds ?? null) !== JSON.stringify(base.tierThresholds ?? null)) {
+        patch.tierThresholds = (Array.isArray(draft.tierThresholds) ? draft.tierThresholds : []).map((n) => num(n));
       }
       const cur = base.listen ?? {};
       const listen = {};
@@ -432,6 +458,19 @@ window.__ModuleLoader__.load({
         const next = base.map((x) => Number(x));
         next[i] = Number(v);
         set('tierMap', next);
+      };
+
+      /**
+       * 改七道阈值里的一道。同样整份换新（理由同 `setTierMap`）。
+       * 输入框存**字符串**：空串和非数字都留给宿主去拒，前端不替它猜。
+       */
+      const setThreshold = (i, v) => {
+        const base = Array.isArray(draft?.tierThresholds)
+          ? draft.tierThresholds
+          : (data?.defaults?.tierThresholds ?? []);
+        const next = base.slice();
+        next[i] = v;
+        set('tierThresholds', next);
       };
 
       const save = async () => {
@@ -725,6 +764,16 @@ window.__ModuleLoader__.load({
               ['compact', t('tier.compact')],
               ['custom', t('tier.custom')],
             ]),
+            select('tierMode', 'field.tierMode', 'field.tierMode.hint', [
+              ['density', t('mode.density')],
+              ['dwell', t('mode.dwell')],
+              ['weight', t('mode.weight')],
+            ]),
+            select('tierCurve', 'field.tierCurve', 'field.tierCurve.hint', [
+              ['docx', t('curve.docx')],
+              ['perceptual', t('curve.perceptual')],
+              ['custom', t('curve.custom')],
+            ]),
             field('maxAutonomousWakes', 'field.wakes', 'field.wakes.hint', { min: 1, max: 200, step: 1 }),
             field('imageTrigger', 'field.imageTrigger', 'field.imageTrigger.hint', { min: 0, max: 2000, step: 10 }),
             field('imageKeep', 'field.imageKeep', 'field.imageKeep.hint', { min: 0, max: 2000, step: 10 }),
@@ -772,6 +821,28 @@ window.__ModuleLoader__.load({
             : null,
           draft.tierStyle === 'custom'
             ? h('span', { className: 'sn_hint' }, t('field.tierMap.hint'))
+            : null,
+          /**
+           * 七道阈值自己填。**只在选「自定义」时出现** —— 选 docx / 感知时那套数字是
+           * 代码定的，露出来只会让人以为改得动。
+           *
+           * 顺序有意义：第 i 个是"多密算第 i+1 档"，必须严格递增。前端不拦，
+           * 交给 `tuning.js` 统一判（那边拒了会把原话显示在下面）。
+           */
+          draft.tierCurve === 'custom'
+            ? h('div', { className: 'sn_grid', style: { marginTop: '12px' } },
+              h('span', { className: 'sn_label', style: { gridColumn: '1 / -1' } }, t('field.tierThresholds')),
+              [0, 1, 2, 3, 4, 5, 6].map((i) => h('label', { className: 'sn_field', key: `th${i}` },
+                h('span', { className: 'sn_label' }, `第 ${i + 1} 道`),
+                h('input', {
+                  className: 'sn_input',
+                  type: 'number',
+                  step: '0.01',
+                  min: '0.01',
+                  value: String(draft.tierThresholds?.[i] ?? ''),
+                  onChange: (e) => setThreshold(i, e.target.value),
+                }))),
+              h('span', { className: 'sn_hint', style: { gridColumn: '1 / -1' } }, t('field.tierThresholds.hint')))
             : null,
           h('label', { className: 'sn_check', style: { marginTop: '12px' } },
             h('input', {

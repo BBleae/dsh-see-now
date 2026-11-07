@@ -16,6 +16,9 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+// `tiers.js` 是叶子模块（不 import 任何东西），拿它的默认表当默认值不会成环。
+// **不许在这里手抄一份数字** —— 抄了就会和 tiers.js 漂移。
+import { LEVEL_THRESHOLDS } from './tiers.js';
 
 /** 与 loop.js 的常量保持一致；这里放默认值是为了不形成反向依赖。 */
 export const TUNING_DEFAULTS = Object.freeze({
@@ -58,6 +61,25 @@ export const TUNING_DEFAULTS = Object.freeze({
   tierStyle: 'standard',
   /** `custom` 时的查表：第 i 个数 = "档位 i+1 映射到哪一档"。默认恒等。 */
   tierMap: [1, 2, 3, 4, 5, 6, 7, 8],
+  /**
+   * 档位**怎么算出来**（三选一，见 `pipeline.js` 的 `tierMode`）：
+   *
+   * - `density`（默认）：过去 1 秒平均每秒几帧 —— 这一带节奏快不快；
+   * - `dwell`：这一段在屏幕上停了多久 —— 停留时长直接当重要性（≥3 s 大格 / ≤0.3 s 小格）；
+   * - `weight`：出图时按变化分切面积 —— 变化越大越值得占地方。
+   *
+   * 后两种是"让格子大小表达重要性"的两种实现，都还在标定阶段（见根目录
+   * `看视频插件-档位阈值-感知定标-20261107.md`），默认仍走密度。
+   */
+  tierMode: 'density',
+  /**
+   * 七道阈值取哪一套：`docx`（照抄 docx）/ `perceptual`（按人眼瞬时记忆定标）/ `custom`。
+   *
+   * `custom` 读 `tierThresholds`，**和曲线互斥**：选了 custom 就只看数组，不看曲线名。
+   */
+  tierCurve: 'docx',
+  /** `custom` 时的七道阈值（帧/秒，必须严格递增）。默认就是 docx 那一套。 */
+  tierThresholds: [...LEVEL_THRESHOLDS],
   // 「上一句说多久，就等多久再叫下一轮」（见 pacing.js）。false = 退回固定 8 秒。
   speechPacing: true,
   /**
@@ -131,6 +153,12 @@ export const PREFER_KEYS = Object.freeze(['auto', 'host', 'local']);
  * 注意 `single`（逐帧模式固定整幅）**不在这里**：它是逐帧模式的内部约定，不该被用户改。
  */
 export const TIER_STYLES = Object.freeze(['standard', 'native', 'full', 'compact', 'custom']);
+
+/** 档位怎么算出来。与 `pipeline.js` 的 `tierMode` 同名。 */
+export const TIER_MODE_KEYS = Object.freeze(['density', 'dwell', 'weight']);
+
+/** 七道阈值取哪一套。`custom` 走 `tierThresholds`。 */
+export const TIER_CURVE_KEYS = Object.freeze(['docx', 'perceptual', 'custom']);
 
 function dshHome(env) {
   return env.DSH_HOME || join(env.USERPROFILE || env.HOME || homedir(), '.dsh');
@@ -279,6 +307,53 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     }
   }
 
+  /**
+   * 档位怎么算 + 七道阈值取哪一套。
+   *
+   * 阈值那一组**必须严格递增**：`createTiers` 的滞回是「升档越 `up[i]`、降档跌穿
+   * `down[i]`」，一旦不递增，两道阈值的滞回带会互相盖住，档位会卡在某一档不动 ——
+   * 表现是"改了阈值完全没反应"，最难查。所以宁可整份退回默认并说明。
+   */
+  let tierMode = TUNING_DEFAULTS.tierMode;
+  if (raw.tierMode !== undefined) {
+    const want = String(raw.tierMode ?? '').trim();
+    if (TIER_MODE_KEYS.includes(want)) tierMode = want;
+    else warnings.push(`tierMode 只能是 ${TIER_MODE_KEYS.join(' / ')}，已用默认 density`);
+  }
+
+  let tierCurve = TUNING_DEFAULTS.tierCurve;
+  if (raw.tierCurve !== undefined) {
+    const want = String(raw.tierCurve ?? '').trim();
+    if (TIER_CURVE_KEYS.includes(want)) tierCurve = want;
+    else warnings.push(`tierCurve 只能是 ${TIER_CURVE_KEYS.join(' / ')}，已用默认 docx`);
+  }
+
+  let tierThresholds = [...TUNING_DEFAULTS.tierThresholds];
+  if (raw.tierThresholds !== undefined) {
+    if (!Array.isArray(raw.tierThresholds)) {
+      warnings.push('tierThresholds 必须是 7 个数字的数组，已用默认那一套');
+    } else {
+      const src = raw.tierThresholds;
+      if (src.length !== 7) {
+        warnings.push(`tierThresholds 必须是 7 个数（现在是 ${src.length} 个），缺的按默认补齐`);
+      }
+      const parsed = [];
+      for (let i = 0; i < 7; i += 1) {
+        const n = Number(src[i]);
+        const ok = Number.isFinite(n) && n > 0;
+        if (!ok && src[i] !== undefined) {
+          warnings.push(`tierThresholds[${i + 1}] 必须是正数（帧/秒），已用默认 ${TUNING_DEFAULTS.tierThresholds[i]}`);
+        }
+        parsed.push(ok ? n : TUNING_DEFAULTS.tierThresholds[i]);
+      }
+      // 单项坏值已经各自退回默认，这里只判"合并后整条还增不递增"
+      let increasing = true;
+      for (let i = 1; i < 7; i += 1) if (!(parsed[i] > parsed[i - 1])) increasing = false;
+      if (increasing) tierThresholds = parsed;
+      else warnings.push('tierThresholds 必须从左到右严格递增（帧/秒，阈值越大格子越小），已用默认那一套');
+    }
+  }
+
   let defaultPace = TUNING_DEFAULTS.defaultPace;
   if (typeof raw.defaultPace === 'string' && raw.defaultPace.trim()) {
     const want = raw.defaultPace.trim();
@@ -320,6 +395,9 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
     idleStopMs: idleStopMin * 60 * 1000,
     tierStyle,
     tierMap,
+    tierMode,
+    tierCurve,
+    tierThresholds,
     defaultPace,
     speechPacing,
     changeLog,
@@ -335,6 +413,7 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
 /** 面板能改的顶层键。`idleStopMs` 是派生的，不在这里 —— 传进来会被拒。 */
 export const WRITABLE_KEYS = Object.freeze([
   'maxAutonomousWakes', 'idleStopMin', 'wakeBatch', 'imageTrigger', 'imageKeep', 'tierStyle', 'tierMap',
+  'tierMode', 'tierCurve', 'tierThresholds',
   'defaultPace', 'speechPacing', 'scoreNormalize', 'listen',
 ]);
 

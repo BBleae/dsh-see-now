@@ -55,3 +55,39 @@ test('部分拉伸：矮格被拉高，但不超过行高、也不超过 (1+τ) 
     assert.ok(Math.abs(c.h * c.stretch - c.w) < 1e-9, 'h 与 stretch 字段必须自洽');
   }
 });
+
+// ── 天幕排布（skyline）────────────────────────────────────────────────────────
+// 只在混排时才该被考虑；这一组守"不丢帧、不乱序、能装下"这三条底线，
+// 不守"更好看" —— 好看与否是主观的，实测数据在 CHANGELOG 里。
+
+test('skyline：不丢帧、序号不变、每张都装得下', async () => {
+  const { solveSkyline } = await import('../src/pack.js');
+  // 故意混得很难看：大、小、大、极小交替
+  const seq = [2, 8, 7, 3, 8, 8, 1, 5, 5, 8, 6, 2];
+  const r = solveSkyline(seq);
+  assert.equal(r.cells.length, seq.length, '一格都不能丢');
+  assert.deepEqual(r.cells.map((c) => c.seq), seq.map((_, i) => i), '时序必须是原序');
+  assert.deepEqual(r.cells.map((c) => c.t), seq, '档位必须原样带上（出图要写进 cells）');
+  for (const c of r.cells) {
+    assert.ok(c.x >= -1e-9 && c.y >= -1e-9, '不能越出左上');
+    assert.ok(c.x + c.w <= 1 + 1e-9, `右边越界：${c.x}+${c.w}`);
+    assert.ok(c.y + c.h <= 1 + 1e-9, `下边越界：${c.y}+${c.h}`);
+  }
+  assert.equal(r.bins, 1, '这 12 格应该装得进一张');
+});
+
+test('skyline：等大的四格铺满一整张（fill ≈ 1）', async () => {
+  const { solveSkyline } = await import('../src/pack.js');
+  const r = solveSkyline([2, 2, 2, 2]);
+  assert.equal(r.bins, 1);
+  assert.ok(Math.abs(r.fill - 1) < 1e-6, `四个 1/2 应该铺满，实际 ${r.fill}`);
+});
+
+test('packTiers：packMode 决定走哪套，默认仍是行式', async () => {
+  const { packTiers, solve } = await import('../src/pack.js');
+  const seq = [2, 8, 7, 3, 8, 8, 1, 5, 5, 8, 6, 2];
+  // 不传 packMode → 和 solve 完全一致（默认路径不能因为加了开关而改变）
+  assert.deepEqual(packTiers(seq), solve(seq));
+  assert.equal(packTiers(seq, { packMode: 'rows' }).bins, solve(seq).bins);
+  assert.equal(packTiers(seq, { packMode: 'skyline' }).bins, 1);
+});

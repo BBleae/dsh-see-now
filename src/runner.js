@@ -239,6 +239,14 @@ export function createRunner({
   tierStyle = 'standard',
   tierMap = null,
   /**
+   * 档位怎么算 + 七道阈值取哪一套（`~/.dsh/see-now.json` 的 `tierMode` / `tierCurve` /
+   * `tierThresholds`）。和 `tierStyle` 一样是**会话级默认**，`opts` 里显式传了就听调用方的
+   * —— 离线标定（`scripts/sim.mjs`）要能一次改一样，不必去动配置文件。
+   */
+  tierMode = 'density',
+  tierCurve = 'docx',
+  tierThresholds = null,
+  /**
    * 亮度归一 + 黑边补偿（`~/.dsh/see-now.json` 的 `scoreNormalize`，默认开）。
    *
    * **必须进 `createPipeline` 的 opts，不能只在这里拦** —— `scripts/sim.mjs` 走的是
@@ -650,6 +658,10 @@ export function createRunner({
        */
       strategy: opts.strategy ?? tierStyle,
       tierMap: opts.tierMap ?? tierMap,
+      // 档位判据与阈值表：调用方优先（离线标定要能单次覆盖）
+      tierMode: opts.tierMode ?? tierMode,
+      tierCurve: opts.tierCurve ?? tierCurve,
+      tierThresholds: opts.tierThresholds ?? tierThresholds,
       // 打分口径的补偿（默认开）。和 changeLog 一样是会话级偏好，但**允许单次覆盖** ——
       // 离线标定要能一次开关，不然只能改配置文件再跑。
       scoreNormalize: opts.scoreNormalize ?? scoreNormalize,

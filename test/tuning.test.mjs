@@ -98,3 +98,54 @@ test('listen：合法但非默认的值不报警告，越界的值必须报警�
   assert.equal(bad.warnings.length, 1);
   assert.match(bad.warnings[0], /liveStep/);
 });
+
+// ── 档位判据 / 阈值表 / 七道阈值 ──────────────────────────────────────────────
+// 这一组守"设置页改了能生效，改坏了不会把插件弄挂"。
+
+test('tierMode / tierCurve：只认枚举，写错退回默认并报一句', () => {
+  const ok = readTuning({ env: ENV, readFile: readJson({ tierMode: 'dwell', tierCurve: 'perceptual' }) });
+  assert.equal(ok.tierMode, 'dwell');
+  assert.equal(ok.tierCurve, 'perceptual');
+  assert.deepEqual(ok.warnings, []);
+
+  const bad = readTuning({ env: ENV, readFile: readJson({ tierMode: 'density2', tierCurve: 'paper' }) });
+  assert.equal(bad.tierMode, TUNING_DEFAULTS.tierMode);
+  assert.equal(bad.tierCurve, TUNING_DEFAULTS.tierCurve);
+  assert.equal(bad.warnings.length, 2);
+});
+
+test('tierThresholds：合法的七个数原样生效', () => {
+  const custom = [0.3, 0.5, 0.8, 1.1, 1.7, 2.3, 3.2];
+  const t = readTuning({ env: ENV, readFile: readJson({ tierCurve: 'custom', tierThresholds: custom }) });
+  assert.deepEqual(t.tierThresholds, custom);
+  assert.deepEqual(t.warnings, []);
+});
+
+test('tierThresholds：不递增必须整份退回默认（否则滞回带互相盖住，档位卡死）', () => {
+  const t = readTuning({
+    env: ENV,
+    readFile: readJson({ tierThresholds: [0.26, 0.6, 0.5, 1.2, 1.8, 2.4, 3] }),
+  });
+  assert.deepEqual(t.tierThresholds, TUNING_DEFAULTS.tierThresholds);
+  assert.ok(t.warnings.some((w) => w.includes('严格递增')), t.warnings.join('；'));
+});
+
+test('tierThresholds：单个坏值退回默认，其余照改', () => {
+  const t = readTuning({
+    env: ENV,
+    readFile: readJson({ tierThresholds: [0.3, 'abc', 0.9, 1.2, 1.8, 2.4, 3] }),
+  });
+  assert.equal(t.tierThresholds[0], 0.3);
+  assert.equal(t.tierThresholds[1], TUNING_DEFAULTS.tierThresholds[1]);
+  assert.equal(t.tierThresholds[6], 3);
+  assert.ok(t.warnings.some((w) => w.includes('tierThresholds[2]')), t.warnings.join('；'));
+});
+
+test('tierThresholds：不是数组 / 长度不对都只报一句，不抛', () => {
+  const a = readTuning({ env: ENV, readFile: readJson({ tierThresholds: '0.3,0.6' }) });
+  assert.deepEqual(a.tierThresholds, TUNING_DEFAULTS.tierThresholds);
+  assert.ok(a.warnings.some((w) => w.includes('必须是 7 个数字的数组')));
+
+  const b = readTuning({ env: ENV, readFile: readJson({ tierThresholds: [0.3, 0.6] }) });
+  assert.ok(b.warnings.some((w) => w.includes('现在是 2 个')), b.warnings.join('；'));
+});
