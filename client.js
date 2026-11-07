@@ -128,10 +128,9 @@ window.__ModuleLoader__.load({
         + '想把"1 档"也缩小就把它改成 2；想让 8 档别那么碎就改成 6。',
       'field.tierMode': '格子大小按什么算',
       'field.tierMode.hint': '模型看的是一张静态拼图，格子大小是唯一能告诉它"这一刻值不值得端详"的通道。'
-        + '「密度」看这一带节奏快不快；「停留」看这一刻在屏幕上留了多久（≥3 秒给大格）；'
-        + '「变化」按这一帧变了多少分地方 —— 最后这个才会让同一张图里出现大小对比。',
+        + '「密度」看这一带节奏快不快；「变化」按这一帧变了多少分地方 —— 只有它能做出'
+        + '同一张图里的大小对比（代价：省 token，但一张图覆盖的时长变长、出图变慢）。',
       'mode.density': '密度 —— 每秒几帧（默认）',
-      'mode.dwell': '停留 —— 这一刻留了多久',
       'mode.weight': '变化 —— 变化越大格越大',
       'field.tierCurve': '七道阈值的取法',
       'field.tierCurve.hint': '阈值决定"多密的画面该用几档"。'
@@ -766,7 +765,6 @@ window.__ModuleLoader__.load({
             ]),
             select('tierMode', 'field.tierMode', 'field.tierMode.hint', [
               ['density', t('mode.density')],
-              ['dwell', t('mode.dwell')],
               ['weight', t('mode.weight')],
             ]),
             select('tierCurve', 'field.tierCurve', 'field.tierCurve.hint', [

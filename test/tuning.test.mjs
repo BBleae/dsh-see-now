@@ -103,8 +103,8 @@ test('listen：合法但非默认的值不报警告，越界的值必须报警�
 // 这一组守"设置页改了能生效，改坏了不会把插件弄挂"。
 
 test('tierMode / tierCurve：只认枚举，写错退回默认并报一句', () => {
-  const ok = readTuning({ env: ENV, readFile: readJson({ tierMode: 'dwell', tierCurve: 'perceptual' }) });
-  assert.equal(ok.tierMode, 'dwell');
+  const ok = readTuning({ env: ENV, readFile: readJson({ tierMode: 'weight', tierCurve: 'perceptual' }) });
+  assert.equal(ok.tierMode, 'weight');
   assert.equal(ok.tierCurve, 'perceptual');
   assert.deepEqual(ok.warnings, []);
 
@@ -112,6 +112,13 @@ test('tierMode / tierCurve：只认枚举，写错退回默认并报一句', () 
   assert.equal(bad.tierMode, TUNING_DEFAULTS.tierMode);
   assert.equal(bad.tierCurve, TUNING_DEFAULTS.tierCurve);
   assert.equal(bad.warnings.length, 2);
+
+  // `dwell` 已经删了。昨天写进配置的用户今天必须收到一句"这个值不认了"，
+  // 而不是被静默当成 density —— 静默会让"我明明设过"变成查不出来的问题。
+  const gone = readTuning({ env: ENV, readFile: readJson({ tierMode: 'dwell' }) });
+  assert.equal(gone.tierMode, 'density');
+  assert.equal(gone.warnings.length, 1);
+  assert.ok(gone.warnings[0].includes('dwell'), gone.warnings[0]);
 });
 
 test('tierThresholds：合法的七个数原样生效', () => {

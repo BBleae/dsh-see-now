@@ -16,7 +16,6 @@ import assert from 'node:assert/strict';
 
 const {
   LEVEL_THRESHOLDS, PERCEPTUAL_THRESHOLDS, TIER_CURVES, createTiers,
-  PERCEPTUAL_DWELL, dwellLevel, TIER_MAX,
 } = await import('../src/tiers.js');
 
 test('两套表都是 7 道、严格递增、落在 1..8 档的边界上', () => {
@@ -71,39 +70,6 @@ test('不传 curve 时退回 docx，行为不变', () => {
     a.mark(i * 0.4);
     b.mark(i * 0.4);
     assert.equal(a.tick(i * 0.4 + 0.01), b.tick(i * 0.4 + 0.01));
-  }
-});
-
-test('dwell：停留多久 → 几档（1 最大，8 最小）', () => {
-  // 两个端点：3 s 仍是最大格，2.99 s 掉一档；0.30 s 还是 7 档，0.29 s 才是 8 档
-  assert.equal(dwellLevel(Infinity), 1, '第一段没有可比对象，按最大格');
-  assert.equal(dwellLevel(30), 1, '长镜头一直给最大格');
-  assert.equal(dwellLevel(3.0), 1);
-  assert.equal(dwellLevel(2.99), 2);
-  assert.equal(dwellLevel(2.044), 2);
-  assert.equal(dwellLevel(0.301), 7);
-  assert.equal(dwellLevel(0.299), 8);
-  assert.equal(dwellLevel(0), 8, '非法时长按最小格，不给大格');
-  assert.equal(dwellLevel(NaN), 8);
-});
-
-test('dwell：时长越长档位只会更小，不会反着走', () => {
-  let prev = TIER_MAX + 1;
-  for (let s = 0.05; s <= 6; s += 0.01) {
-    const k = dwellLevel(s);
-    assert.ok(k >= 1 && k <= 8, `${s}s 给出越界档位 ${k}`);
-    assert.ok(k <= prev, `${s.toFixed(2)}s 的档位 ${k} 比更短的 ${prev} 还大`);
-    prev = k;
-  }
-  assert.equal(prev, 1, '扫到 6 秒必须已经落到 1 档');
-});
-
-test('dwell 端点与密度表互为倒数（同一套感知锚点，别改一个漏一个）', () => {
-  assert.equal(PERCEPTUAL_DWELL.length, PERCEPTUAL_THRESHOLDS.length);
-  for (let i = 0; i < PERCEPTUAL_DWELL.length; i += 1) {
-    const inv = 1 / PERCEPTUAL_THRESHOLDS[i];
-    assert.ok(Math.abs(PERCEPTUAL_DWELL[i] - inv) < 0.01,
-      `第 ${i + 1} 道：停留 ${PERCEPTUAL_DWELL[i]}s 应对应密度 ${inv.toFixed(3)}`);
   }
 });
 

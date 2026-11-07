@@ -18,7 +18,7 @@
  */
 
 import { SCAN_H, SCAN_W, bgBorderChanged, bgKeep, createScorer, scorePair } from './cuts.js';
-import { createTiers, applyStrategy, dwellLevel } from './tiers.js';
+import { createTiers, applyStrategy } from './tiers.js';
 import { packTiers, toRects, splitOneBin } from './pack.js';
 import { composePacked, drawAudioStrip, stripHeight } from './sheet.js';
 import { encodePng } from './png.js';
@@ -263,13 +263,12 @@ export const DEFAULTS = Object.freeze({
    */
   tierThresholds: null,
   /**
-   * 档位怎么分：
-   * - `density`（默认）：看过去 1 秒**平均每秒几帧**（邻域密度，走 EMA）。
-   * - `dwell`：看**这一段在屏幕上停了多久**（逐帧，不经邻域平均）。
+   * 档位怎么算：
+   * - `density`（默认）：看过去 1 秒**平均每秒几帧**（邻域密度，走 EMA）；
+   * - `weight`：出图时按这一帧的变化分切面积（见 `seqOf`）—— 才有"同一张图里大小对比"。
    *
-   * 后者是"尺寸 = 重要性"的直接表达：模型没有瞬时视觉，格子大小是唯一能说
-   * "这一刻值得端详 / 只是扫过去"的通道，而停留时长是人眼这边最干净的代理
-   * （≥3 s 是一个"现在"，≤0.3 s 短于图标记忆窗口）。见 `tiers.js` 的 `PERCEPTUAL_DWELL`。
+   * 两者都是"尺寸 = 重要性"的近似：模型没有瞬时视觉，格子大小是唯一能说
+   * "这一刻值得端详 / 只是扫过去"的通道。
    */
   tierMode: 'density',
   /**
@@ -408,7 +407,6 @@ export function createPipeline(opts = {}) {
   let sheetStart = 0;          // 本张第一帧的时刻（maxWaitSec 从这儿算）
 
   let lastKeptHsv = null;      // 上一张留下来的帧（去重基准）
-  let lastMarkT = null;        // 上一个边界的时刻（`tierMode` 用它算停留时长）
   let frames = [];             // 本张待发
   let sheets = [];
   /**
@@ -504,15 +502,12 @@ export function createPipeline(opts = {}) {
     }
     tiers.mark(entry.t);
     /**
-     * 两种分配方式。
+     * `tierMode: 'density'` —— 档位只由**邻域密度**决定，`keep` 这一层不再看别的信号。
      *
-     * `dwell` 用的是**刚结束那一段**的停留时长（`entry.t - lastMarkT`）—— 新开这一段
-     * 自己多长要等下一刀才知道，因果链上只能拿上一段当估计。跨越节奏突变时，
-     * 转折的第一帧会被按旧节奏定尺寸，之后立刻跟上；比起让整段被邻域平均拖平，这个误差小得多。
+     * （这里删掉过 `dwell`：按"这一段在屏幕上停了多久"给尺寸。五段素材零次胜出，
+     * 因为采样间隔是我们自己定的、不携带内容信息。详见 `tiers.js` 里那段注释。）
      */
-    const lapse = lastMarkT === null ? Infinity : entry.t - lastMarkT;
-    lastMarkT = entry.t;
-    const lv = o.tierMode === 'dwell' ? dwellLevel(lapse) : tiers.levelAt();
+    const lv = tiers.levelAt();
     // 这里**只按密度给档位**，不加假切点加成 —— 加成要等出图时按最终帧数决定
     // （见 DEFAULTS.markBoost 的实测表）。keep 阶段用它判断"装不装得下"，
     // 用不带加成（更大）的档位是保守的：判装不下而实际装得下，顶多多开一张，不会丢帧。

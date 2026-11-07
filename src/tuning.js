@@ -62,14 +62,12 @@ export const TUNING_DEFAULTS = Object.freeze({
   /** `custom` 时的查表：第 i 个数 = "档位 i+1 映射到哪一档"。默认恒等。 */
   tierMap: [1, 2, 3, 4, 5, 6, 7, 8],
   /**
-   * 档位**怎么算出来**（三选一，见 `pipeline.js` 的 `tierMode`）：
+   * 档位**怎么算出来**（见 `pipeline.js` 的 `tierMode`）：
    *
    * - `density`（默认）：过去 1 秒平均每秒几帧 —— 这一带节奏快不快；
-   * - `dwell`：这一段在屏幕上停了多久 —— 停留时长直接当重要性（≥3 s 大格 / ≤0.3 s 小格）；
    * - `weight`：出图时按变化分切面积 —— 变化越大越值得占地方。
    *
-   * 后两种是"让格子大小表达重要性"的两种实现，都还在标定阶段（见根目录
-   * `看视频插件-档位阈值-感知定标-20261107.md`），默认仍走密度。
+   * 曾经还有 `dwell`（按停留时长），五段素材零次胜出，已删（见 `tiers.js` 里的注释）。
    */
   tierMode: 'density',
   /**
@@ -154,8 +152,8 @@ export const PREFER_KEYS = Object.freeze(['auto', 'host', 'local']);
  */
 export const TIER_STYLES = Object.freeze(['standard', 'native', 'full', 'compact', 'custom']);
 
-/** 档位怎么算出来。与 `pipeline.js` 的 `tierMode` 同名。 */
-export const TIER_MODE_KEYS = Object.freeze(['density', 'dwell', 'weight']);
+/** 档位怎么算出来。与 `pipeline.js` 的 `tierMode` 同名。`dwell` 已删（零次胜出）。 */
+export const TIER_MODE_KEYS = Object.freeze(['density', 'weight']);
 
 /** 七道阈值取哪一套。`custom` 走 `tierThresholds`。 */
 export const TIER_CURVE_KEYS = Object.freeze(['docx', 'perceptual', 'custom']);
@@ -318,7 +316,13 @@ export function readTuning({ env = process.env, readFile = readFileSync } = {}) 
   if (raw.tierMode !== undefined) {
     const want = String(raw.tierMode ?? '').trim();
     if (TIER_MODE_KEYS.includes(want)) tierMode = want;
-    else warnings.push(`tierMode 只能是 ${TIER_MODE_KEYS.join(' / ')}，已用默认 density`);
+    else if (want === 'dwell') {
+      // 这个值是**真存在过**的，不能只报"只能是 density / weight" —— 用户会以为自己拼错了，
+      // 翻半天配置。明确说它被删了、为什么删。
+      warnings.push('tierMode 的 "dwell"（按停留时长）已移除：真实素材上零次胜出，已用默认 density');
+    } else {
+      warnings.push(`tierMode 只能是 ${TIER_MODE_KEYS.join(' / ')}，已用默认 density`);
+    }
   }
 
   let tierCurve = TUNING_DEFAULTS.tierCurve;
