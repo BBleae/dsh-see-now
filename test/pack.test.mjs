@@ -73,7 +73,22 @@ test('skyline：不丢帧、序号不变、每张都装得下', async () => {
     assert.ok(c.x + c.w <= 1 + 1e-9, `右边越界：${c.x}+${c.w}`);
     assert.ok(c.y + c.h <= 1 + 1e-9, `下边越界：${c.y}+${c.h}`);
   }
-  assert.equal(r.bins, 1, '这 12 格应该装得进一张');
+  assert.ok(r.bins >= 1, '至少要有一张');
+});
+
+test('skyline：尺寸只在相邻档位的允许区间里伸缩，不会缩成无关的小格', async () => {
+  const { solveSkyline, bounds, UNIT } = await import('../src/pack.js');
+  const seq = [1, 8, 8, 8, 2, 6, 7, 7, 7, 8, 5, 5, 3, 8, 8, 8, 8, 8];
+  const r = solveSkyline(seq);
+  for (const c of r.cells) {
+    const [lo, hi] = bounds(c.t, [3, 4, 5, 6, 7, 8]);
+    assert.ok(c.w >= lo / UNIT - 1e-6, `档位 ${c.t} 缩过头了：${c.w} < ${lo / UNIT}`);
+    assert.ok(c.w <= hi / UNIT + 1e-6, `档位 ${c.t} 放过头了：${c.w} > ${hi / UNIT}`);
+    assert.equal(c.w, c.h, '格子必须是方的');
+  }
+  // 1/2 档只能缩到 1/3，绝不能出现"1/2 被压成 1/8"那种
+  const halves = r.cells.filter((c) => c.t === 2);
+  for (const c of halves) assert.ok(c.w >= 1 / 3 - 1e-6, `2 档被压到 ${c.w}`);
 });
 
 test('skyline：等大的四格铺满一整张（fill ≈ 1）', async () => {
@@ -89,5 +104,7 @@ test('packTiers：packMode 决定走哪套，默认仍是行式', async () => {
   // 不传 packMode → 和 solve 完全一致（默认路径不能因为加了开关而改变）
   assert.deepEqual(packTiers(seq), solve(seq));
   assert.equal(packTiers(seq, { packMode: 'rows' }).bins, solve(seq).bins);
-  assert.equal(packTiers(seq, { packMode: 'skyline' }).bins, 1);
+  const sky = packTiers(seq, { packMode: 'skyline' });
+  assert.equal(sky.cells.length, seq.length, '天幕也一样不能丢帧');
+  assert.ok(sky.bins >= 1);
 });

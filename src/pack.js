@@ -273,7 +273,7 @@ export function solve(tiers, {
  *
  * @returns 与 `solve()` 同形状：`{bins, fill, area, cells}`
  */
-export function solveSkyline(tiers, { grow = DEFAULT_GROW } = {}) {
+export function solveSkyline(tiers, { grow = DEFAULT_GROW, allowShrink = false } = {}) {
   const list = (Array.isArray(tiers) ? tiers : []).map(Number);
   if (!list.length) return { bins: 0, fill: 0, cells: [], area: 0 };
 
@@ -282,8 +282,11 @@ export function solveSkyline(tiers, { grow = DEFAULT_GROW } = {}) {
   // 地平线按 UNIT 精度存（840 段，k ≤ 8 时所有 1/k 都是整数倍，不会有小数格）
   let sky = new Float64Array(UNIT);
   let area = 0;
+  /** 本张当前的天际线最高点。**选尺寸要按"会不会把这张图压高"算**，不是按格子自己的顶边。 */
+  let binTop = 0;
 
-  const place = (side, t, seq) => {
+  /** 只探位置，不改地平线 —— 尺寸还没定下来，得先比较几个候选。 */
+  const probe = (side) => {
     let bestX = -1;
     let bestY = Infinity;
     for (let x = 0; x + side <= UNIT; x += 1) {
@@ -294,11 +297,14 @@ export function solveSkyline(tiers, { grow = DEFAULT_GROW } = {}) {
       }
       if (y < bestY) { bestY = y; bestX = x; if (y === 0) break; }
     }
-    if (bestX < 0 || bestY + side > UNIT + 1e-9) return false;
-    for (let i = bestX; i < bestX + side; i += 1) sky[i] = bestY + side;
+    return (bestX >= 0 && bestY + side <= UNIT + 1e-9) ? { x: bestX, y: bestY } : null;
+  };
+
+  const commit = (side, at, t, seq) => {
+    for (let i = at.x; i < at.x + side; i += 1) sky[i] = at.y + side;
     cells.push({
-      x: bestX / UNIT,
-      y: bestY / UNIT,
+      x: at.x / UNIT,
+      y: at.y / UNIT,
       w: side / UNIT,
       h: side / UNIT,
       s: side / UNIT,
@@ -309,23 +315,68 @@ export function solveSkyline(tiers, { grow = DEFAULT_GROW } = {}) {
       seq,
     });
     area += (side / UNIT) ** 2;
-    return true;
+    if (at.y + side > binTop) binTop = at.y + side;
+  };
+
+  /**
+   * 在一格里找尺寸。**范围和行式完全一样**（`bounds()`）：k=1 只能缩到 1/2、
+   * k=2 只能缩到 1/3、k≥3 上下各一档都能靠 —— 不再自己另立一套 1/24。
+   *
+   * 为什么要缩：天幕的洞集中在"大格旁边剩一条"，把邻居靠到相邻档位就能填上。
+   * 为什么只能靠一档：靠过去之后它还是那一档的"邻居"，不是变成一个无关的小格子 ——
+   * 尺寸表达的是重要性，跨两档就等于改语义了。
+   *
+   * 选法：先试原尺寸；不行就在允许区间里按"离原尺寸由近到远"试几个，
+   * 取**顶边最低**的那个（同高取大的，宁可大一点也别留缝）。
+   */
+  const placeBest = (t, seq) => {
+    const k = t === FREE ? FREE : Math.max(1, Math.min(8, Math.round(t)));
+    const base = k === FREE ? UNIT / 4 : UNIT / k;
+    const [lo, hi] = bounds(k, grow);
+    const cands = [base];
+    for (let i = 1; i <= 4; i += 1) {
+      cands.push(base + ((hi - base) * i) / 4);
+      if (base - ((base - lo) * i) / 4 >= lo) cands.push(base - ((base - lo) * i) / 4);
+    }
+    /**
+     * **先试原尺寸，放得下就用它** —— 缩放只是"放不下时的退路"，不是优化手段。
+     *
+     * 这条顺序很要紧：如果让缩放参与"择优"，打包器会一路挑小的（小格子看起来更"矮"），
+     * 结果四个 1/2 被排成 1/2+1/2+1/3+1/3，fill 掉到 72% —— 明明放得下，
+     * 却因为"能缩就缩"把画布浪费了。
+     */
+    let best = null;
+    const exact = probe(base);
+    if (exact) best = { side: base, at: exact, top: Math.max(binTop, exact.y + base) };
+    if (!best || best.top > UNIT) {
+      for (const sideRaw of cands) {
+        const side = Math.max(1, Math.round(sideRaw));
+        if (side === base) continue;
+        const at = probe(side);
+        if (!at) continue;
+        const top = Math.max(binTop, at.y + side);
+        if (!best || top < best.top - 1e-9 || (Math.abs(top - best.top) <= 1e-9 && side > best.side)) {
+          best = { side, at, top };
+        }
+      }
+    }
+    if (best) { commit(best.side, best.at, t, seq); return true; }
+    // 允许"再缩一档"的实验开关（默认关）：只在档位区间也不够用时才走到这里
+    if (!allowShrink) return false;
+    for (let side = Math.floor(lo * 0.94); side >= UNIT / 24; side = Math.floor(side * 0.94)) {
+      const at = probe(side);
+      if (at) { commit(side, at, t, seq); return true; }
+    }
+    return false;
   };
 
   list.forEach((t, seq) => {
-    // 档位边长；FREE（补位帧）按 1/4 起，放不下再逐级缩小
-    const base = t === FREE ? UNIT / 4 : UNIT / Math.max(1, Math.min(8, Math.round(t)));
-    let side = base;
-    let placed = false;
-    while (side >= UNIT / 24) {
-      if (place(side, t, seq)) { placed = true; break; }
-      side = Math.floor(side * 0.94);
-    }
-    if (placed) return;
+    if (placeBest(t, seq)) return;
     // 这一张塞不下了：开下一张（按原尺寸重放，绝不丢帧）
     bin += 1;
     sky = new Float64Array(UNIT);
-    place(base, t, seq);
+    binTop = 0;
+    placeBest(t, seq);
   });
 
   const bins = cells.length ? Math.max(...cells.map((c) => c.bin)) + 1 : 0;
