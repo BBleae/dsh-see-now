@@ -291,20 +291,36 @@ export function startLoop({
     dispose();
   };
 
+  /** 叫醒次数按**投递通道**分开记：steer（人插话，即时）vs followup（机器叫，排队） */
+  let steerCount = 0;
+  let followupCount = 0;
+  let lastVia = null;
   /** 上一句说过什么（给唤醒文案用）：别让它在同一个屏幕上把同一句感慨说两遍 */
   function lastSaidHint() {
     return lastSaidNote({ maxAgeSec: 300, clipLen: 70 });
   }
 
-  async function wake(text, { cooldownMs = WAKE_MIN_GAP_MS } = {}) {
+  /**
+   * 叫醒一次。
+   *
+   * `mode` 决定投进宿主的哪一个收件箱（语义见 `timer.js` 的 `wakeSession`）：
+   *   - `steer`：用户打在悬浮窗里的话 —— **下一个 step 就到**，会话正在跑也立刻看得见
+   *   - `followup`（默认）：机器自己叫的「有新画面了」—— 排到下一轮，不打断正在跑的任务
+   */
+  async function wake(text, { cooldownMs = WAKE_MIN_GAP_MS, mode = 'followup' } = {}) {
     lastWakeAt = Date.now();
     const r = await wakeWithRetry({
-      ctx, sessionId: owner, text, log,
+      ctx, sessionId: owner, text, mode, log,
       appendMeta: (m) => appendSpoken('meta', m, { speak: false }),
     });
     lastWakeOk = Boolean(r?.ok);
+    lastVia = r?.via ?? null;
     if (r?.ok) {
       wakeCount += 1;
+      // 投递通道分开记：`steer` 说明这条是"立即进当前轮"，`followup` 是"排到下一轮"。
+      // `status` 把它报出来 —— "窗口里打字没反应"时第一个要看的就是这个数。
+      if (r.via === 'steer') steerCount += 1;
+      else followupCount += 1;
       consecutiveFails = 0;
       return true;
     }
@@ -418,7 +434,11 @@ export function startLoop({
         const text = `[看屏幕·用户插话] 「${said}」\n`
           + '**先说话，再干活** —— 用 `say` 回他（普通回复他一个字都看不到，也不会被念）。'
           + '要同时看一眼就调 `see_now({action:"peek"})`，图马上给你。';
-        await wake(text);
+        // **人在窗口里说的话走 steer**：马上进当前这一轮。走 followup 的话，
+        // 会话正忙时这条会一直躺在 next-turn 队列里，用户看到的就是"打进去没反应"
+        // （实测：22:22 窗里说「现在正常吗」，会话那边记的是 `agent/inbox/spliced
+        //  target=next-turn`，直到这一轮跑完才被读）。
+        await wake(text, { mode: 'steer' });
         return;
       }
 
@@ -537,6 +557,10 @@ export function startLoop({
       session: owner,
       wakes: wakeCount,
       wakeFailures,
+      // 投递通道计数（`steer` = 即时进当前轮，`followup` = 排到下一轮）
+      steers: steerCount,
+      followups: followupCount,
+      lastVia,
       lastWakeAt: lastWakeAt || null,
       lastAckAt: lastAckAt || null,
       awaitingAck: lastWakeAt > lastAckAt,

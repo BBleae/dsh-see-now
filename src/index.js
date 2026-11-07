@@ -286,7 +286,11 @@ function loopLine(lp) {
   const speech = lp.lastSpeechMs ? `，上一句约 ${(lp.lastSpeechMs / 1000).toFixed(1)}s` : '';
   const wait = lp.nextWakeAt && lp.nextWakeAt > Date.now()
     ? `，下一轮最早 ${Math.ceil((lp.nextWakeAt - Date.now()) / 1000)}s 后` : '';
-  return `在跑（叫醒 ${lp.wakes} 次${fail}${last}${speech}${wait}，会话 ${lp.session ?? '未知'}）`;
+  // 投递通道：插话（人打的）走 steer 应该即时；这个数为 0 而用户在窗口里说过话 = 退回排队了
+  const via = (lp.steers || lp.followups)
+    ? `，插话 steer ${lp.steers ?? 0} 次 / 排队 ${lp.followups ?? 0} 次`
+    : '';
+  return `在跑（叫醒 ${lp.wakes} 次${fail}${last}${speech}${wait}${via}，会话 ${lp.session ?? '未知'}）`;
 }
 
 /** 快到临界才提醒 —— 超了之后插件根本跑不起来，只能趁现在说。 */
