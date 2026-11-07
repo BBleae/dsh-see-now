@@ -98,7 +98,8 @@ class DanmakuLayer:
     def __init__(self, root: tk.Tk, *, screen_w: int, screen_h: int,
                  edge: str = "top", lanes: int = 2, speed: float = SPEED,
                  inset: int = 0, font_family: str = FONT_FAMILY,
-                 font_size: int = FONT_SIZE, fg: str = FG, shadow: str = SHADOW):
+                 font_size: int = FONT_SIZE, fg: str = FG, shadow: str = SHADOW,
+                 weight: str = "normal"):
         self.root = root
         self.screen_w = max(320, int(screen_w))
         self.screen_h = max(240, int(screen_h))
@@ -108,6 +109,7 @@ class DanmakuLayer:
         self.inset = max(0, int(inset))
         self.font_family = str(font_family or "").strip() or FONT_FAMILY
         self.font_size = _clamp_size(font_size)
+        self.weight = "bold" if str(weight).lower() == "bold" else "normal"
         self.fg = _color(fg, FG)
         self.shadow = _color(shadow, SHADOW)
         # 轨道高度跟着字号长，不然大字号会压到下一轨（13px 时 = 原 LANE_H 26）
@@ -137,7 +139,8 @@ class DanmakuLayer:
         self.canvas.pack(fill="both", expand=True)
         # 自己量宽度而不是问 `canvas.bbox()`：刚 create_text 出来的 item 还没排过版，
         # bbox 可能给 None / 旧值，那样 GAP 会算小、同轨两条直接叠上。
-        self._font = tkfont.Font(root=root, family=self.font_family, size=self.font_size)
+        self._font = tkfont.Font(root=root, family=self.font_family,
+                                 size=self.font_size, weight=self.weight)
         self._resize()
         self._apply_ex_style()
 
@@ -170,11 +173,12 @@ class DanmakuLayer:
             print("danmaku exstyle failed", repr(exc), flush=True)
 
     def set_options(self, *, edge=None, lanes=None, speed=None, inset=None,
-                    font_family=None, font_size=None, fg=None, shadow=None) -> None:
+                    font_family=None, font_size=None, fg=None, shadow=None,
+                    weight=None) -> None:
         """配置改了就地生效：不清屏、不重开窗口（用户的观感是"字变快了"）。
 
-        颜色能原地 `itemconfigure`；字体/字号不行 —— 已经飞出去的 item 用的是旧字体，
-        量出来的宽度也是旧的，硬改会让同轨间距算错。所以这两种情况清掉在飞的几条
+        颜色能原地 `itemconfigure`；字体/字号/字重不行 —— 已经飞出去的 item 用的是旧字体，
+        量出来的宽度也是旧的，硬改会让同轨间距算错。所以这几种情况清掉在飞的几条
         （下一次 push 用新样式），配置改动本来就是低频操作。
         """
         if edge is not None:
@@ -189,12 +193,12 @@ class DanmakuLayer:
             self.fg = _color(fg, self.fg)
         if shadow is not None:
             self.shadow = _color(shadow, self.shadow)
-        family = str(font_family).strip() if font_family is not None else self.font_family
+        family = (str(font_family).strip() or self.font_family) if font_family is not None else self.font_family
         size = _clamp_size(font_size) if font_size is not None else self.font_size
-        if (family or self.font_family) != self.font_family or size != self.font_size:
-            self.font_family = family or self.font_family
-            self.font_size = size
-            self._font.configure(family=self.font_family, size=self.font_size)
+        want_weight = ("bold" if str(weight).lower() == "bold" else "normal") if weight is not None else self.weight
+        if (family, size, want_weight) != (self.font_family, self.font_size, self.weight):
+            self.font_family, self.font_size, self.weight = family, size, want_weight
+            self._font.configure(family=self.font_family, size=self.font_size, weight=self.weight)
             self.lane_h = max(LANE_H, self.font_size + 13)
             for it in list(self._items):
                 self.canvas.delete(it["main"])
@@ -243,7 +247,7 @@ class DanmakuLayer:
             return
         text = self._pending.pop(0)
         y = PAD_Y + lane * self.lane_h
-        kwargs = dict(text=text, anchor="nw", font=(self.font_family, self.font_size))
+        kwargs = dict(text=text, anchor="nw", font=self._font)
         shadow = self.canvas.create_text(self.screen_w + 1, y + 1, fill=self.shadow, **kwargs)
         main = self.canvas.create_text(self.screen_w, y, fill=self.fg, **kwargs)
         width = self._font.measure(text)

@@ -428,6 +428,7 @@ def danmaku_options(cfg=None) -> dict:
             "speed": max(40, min(400, speed)),
             "font_family": str(cfg.get("danmakuFont") or "").strip() or None,
             "font_size": font_size,
+            "weight": str(cfg.get("danmakuFontWeight") or "").strip() or None,
             "fg": str(cfg.get("danmakuFg") or "").strip() or None,
             "shadow": str(cfg.get("danmakuShadow") or "").strip() or None}
 
