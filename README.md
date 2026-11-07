@@ -173,6 +173,20 @@ node scripts/install-dev.mjs      # 拷进本机 DSH 的 desktop profile
 > Retina 上窗口坐标是逻辑像素、和 mss 的物理像素会差一个缩放倍数，**背景可能对不齐** ——
 > 那类机器在设置里选 `frost`（静态磨砂）或 `solid`（纯色），这两档都不抓屏，不吃这个亏。
 
+**悬浮窗对解释器的要求**（这块最容易踩成"窗口起不来但没日志"）：
+
+- **Python ≥ 3.8，且带 `_tkinter`**。插件会自己跑一遍探针找解释器，一个都不合格就把
+  每个候选为什么不合格、以及最后一次启动的 stderr 尾巴一起报出来 —— 先看那段再动手。
+- **macOS**：`/usr/bin/python3`（Xcode CLT 自带）就够用。homebrew 的 python **默认不带
+  tkinter**，要单独 `brew install python-tk@3.13`，否则探针会报 `tkinter 不可用`。
+- **Linux**：`apt install python3-tk`；另外要 `python3-pil python3-mss python3-numpy`
+  （缺哪个探针/启动报错里会点名）。
+- 指定解释器：`~/.dsh/see-window.json` 的 `{"python": "…"}` 或环境变量 `DSH_SEE_PYTHON`
+  （`py -0p` 能列出 Windows 上装了哪些）。
+- 窗口自己的 stderr 落在 `~/.dsh/see-now-window.log`。**如果那个文件是 0 字节而你用的是
+  `pythonw.exe`**，说明 stderr 被 GUI 子系统吞了 —— 改用 `python.exe` 复现一次就能看到
+  Traceback。
+
 ffmpeg 不用进 PATH：插件会按 `DSH_FFMPEG_PATH` / `FFMPEG_PATH` / `DSH_FFMPEG_DIR` /
 `~/.dsh/tools/ffmpeg/bin` / `~/.dsh/bin` 的顺序自己找（DSH 桌面版把 ffmpeg 装在第四个位置）。
 

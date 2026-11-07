@@ -23,8 +23,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { createInterface } from 'node:readline';
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -359,8 +358,47 @@ export function resolveScript({ env = process.env } = {}) {
  * **不带 tkinter**，spawn 之后立刻退（日志里刷了一排 "No module named 'tkinter'"）。
  * 真正能用的是商店版（`WindowsApps/PythonSoftwareFoundation.Python.3.13_.../python.exe`）。
  * 所以这里不能只按名字排，得**真跑一次 import** 验。
+ *
+ * ## 版本闸要和脚本要求对齐（#45）
+ *
+ * 原先探针只 `import tkinter`，而脚本里用了 `dataclass(slots=True)` 与 `X | Y` 注解
+ * （都是 3.10+）—— 于是 3.9 的解释器**通过了探针、然后崩在 import 里**，用户看到的
+ * 是 `code=1`，被引导去装 python，而真因是版本。
+ *
+ * 现在两头都收到 3.8：脚本侧去掉了 `slots=True`、给带注解的文件加了
+ * `from __future__ import annotations`，探针这边也把 3.8 作为地板。**两边改一边就要改另一边**。
  */
-const TK_PROBE = 'import tkinter';
+const PY_MIN = '3.8';
+const TK_PROBE = [
+  'import sys',
+  `if sys.version_info < (${PY_MIN.split('.').join(', ')}):`,
+  '    raise SystemExit(3)',
+  'import tkinter',
+].join('\n');
+
+/** 取最后 n 行，每行截到 300 字符 —— reason 要能贴进工具返回，不能无限长。 */
+function lastLines(text, n = 8, width = 300) {
+  const lines = String(text ?? '').replace(/\r/g, '').split('\n').filter((l) => l.trim() !== '');
+  return lines.slice(-n).map((l) => (l.length > width ? `${l.slice(0, width)}…` : l)).join('\n');
+}
+
+/**
+ * 这个解释器能不能跑这颗窗？返回 `{ ok, detail }`。
+ *
+ * 退出码分工：0 = 能用，3 = 版本太低，其它 = `import tkinter` 没成。
+ * `detail` 会原样进 `reason`（`python3（tkinter 不可用：No module named '_tkinter'）`），
+ * 比一句"没有能用的解释器"有用得多。
+ */
+export function pythonProbe(python) {
+  const r = spawnSync(python, ['-c', TK_PROBE], {
+    timeout: 8000, windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  if (r?.error) return { ok: false, detail: `跑不起来：${r.error.code ?? r.error.message}` };
+  if (r?.status === 0) return { ok: true, detail: null };
+  if (r?.status === 3) return { ok: false, detail: `版本太低（要 ≥ ${PY_MIN}）` };
+  const tail = lastLines(r?.stderr, 2);
+  return { ok: false, detail: tail ? `tkinter 不可用：${tail}` : 'tkinter 不可用' };
+}
 
 /**
  * 这个解释器能不能 `import tkinter`？
@@ -369,10 +407,7 @@ const TK_PROBE = 'import tkinter';
  * 光看路径判断不出来，只能真跑一次。
  */
 export function hasTkinter(python) {
-  const r = spawnSync(python, ['-c', TK_PROBE], {
-    timeout: 8000, windowsHide: true, stdio: 'ignore',
-  });
-  return r?.status === 0;
+  return pythonProbe(python).ok;
 }
 
 /**
@@ -522,17 +557,19 @@ export async function openWindow({ force = false, log = () => {}, settleMs = 700
   const tried = [];
   /** 所有候选解释器上缺的包（去重后一次性报出来）—— 必须声明在循环外，否则末尾拼 reason 时看不到 */
   const missing = new Set();
+  /** 最后一次启动的 stderr 尾巴。`code=1` 什么都说明不了，死因只在这条通道上（#45）。 */
+  let errTail = '';
   for (const python of pythonCandidates()) {
-    if (!hasTkinter(python)) { tried.push(`${python}（无 tkinter）`); continue; }
-
-    let errFd = 'ignore';
-    try { errFd = openSync(logPath(), 'a'); } catch { /* 打不开日志就丢掉 */ }
+    const probe = pythonProbe(python);
+    if (!probe.ok) { tried.push(`${python}（${probe.detail}）`); continue; }
 
     const useProtocol = Boolean(onCommand || signal);
     let child;
     try {
       child = spawn(python, [script], {
-        stdio: useProtocol ? ['pipe', 'pipe', errFd] : ['ignore', errFd, errFd],
+        // stderr 一律自己 pipe：既要照旧落进日志文件，也要留一份尾巴给 `reason`。
+        // 只给一个 log fd 的话，Node 侧永远拿不到那句 Traceback。
+        stdio: useProtocol ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'ignore', 'pipe'],
         detached: true,
         windowsHide: true,
         env: {
@@ -547,9 +584,23 @@ export async function openWindow({ force = false, log = () => {}, settleMs = 700
       });
     } catch (e) {
       tried.push(`${python}（spawn 失败：${e?.message ?? e}）`);
-      if (typeof errFd === 'number') { try { closeSync(errFd); } catch { /* 已关 */ } }
       continue;
     }
+
+    errTail = '';
+    child.stderr?.on('data', (chunk) => {
+      const text = String(chunk);
+      errTail = (errTail + text).slice(-4000);
+      try { appendFileSync(logPath(), text); } catch { /* 打不开日志就只留内存里这份 */ }
+    });
+    // 进程退出到 stderr 的 'end' 之间有一点延迟：不等它，"最后一句 Traceback" 会漏。
+    // 正常路径（窗口起来了）不受影响，只有失败路径会多等最多 200ms。
+    const errClosed = new Promise((resolve) => {
+      if (!child.stderr) { resolve(); return; }
+      child.stderr.once('end', resolve);
+      child.stderr.once('close', resolve);
+      setTimeout(resolve, 200).unref?.();
+    });
 
     let record = null;
     if (useProtocol) {
@@ -566,8 +617,8 @@ export async function openWindow({ force = false, log = () => {}, settleMs = 700
       if (signal) signal.addEventListener('abort', () => closeWindow(), { once: true });
     }
     const dead = record ? await Promise.race([waitExit(child, settleMs), new Promise((resolve) => { record.ready = resolve; })]) : await waitExit(child, settleMs);
-    if (typeof errFd === 'number') { try { closeSync(errFd); } catch { /* 已关 */ } }
     if (dead) {
+      await errClosed;
       // code=1 且是"立刻退出"：八成是缺包。探测一次，把包名带进错误信息。
       const miss = dead.code === 1 ? missingPkgs(python) : [];
       for (const m of miss) missing.add(m);
@@ -589,6 +640,10 @@ export async function openWindow({ force = false, log = () => {}, settleMs = 700
       + `python -m pip install ${pkgs}`
       + `（用上面那句报错里的那个 python；装完把窗关掉重开）。`;
   }
+  // 只报 `code=1` 会把人往"装 python"的方向带，而真因常常是平台专有属性 / 缺 _tkinter。
+  // 最后几行 Traceback 比任何一句概括都准（#45）。
+  const tail = lastLines(errTail, 8);
+  if (tail) reason += `\n最后一次启动的 stderr（最后几行）：\n${tail}`;
   return { ok: false, reason, script, missing: [...missing] };
 }
 

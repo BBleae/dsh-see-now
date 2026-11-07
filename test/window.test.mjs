@@ -114,6 +114,36 @@ test('不存在的解释器一定过不了 tkinter 验证', () => {
   assert.equal(hasTkinter(join(home, 'not-python-2.exe')), false);
 });
 
+test('启动失败时把 stderr 尾巴带进 reason（#45）', async (t) => {
+  // 只报 `code=1` 会把人往"装 python"的方向带，而真因常常是平台专有属性或缺 _tkinter。
+  // 这条守的是"死因必须可见"：脚本往 stderr 吐一句，reason 里就得有那句。
+  const { pythonCandidates, pythonProbe } = await import('../src/window.js');
+  // 候选里只有 PATH 上那两个（本机都是没 tkinter 的 managed 版）。带 tkinter 的解释器
+  // 通常要在 `DSH_TEST_PYTHON` 里显式给一个，否则这条只能 skip（CI 就是这样）。
+  const probeList = [process.env.DSH_TEST_PYTHON, ...pythonCandidates()].filter(Boolean);
+  const usable = probeList.find((p) => pythonProbe(p).ok);
+  if (!usable) { t.skip('本机没有带 tkinter 的解释器'); return; }
+
+  process.env.DSH_SEE_PYTHON = usable;
+  rmSync(pidPath(), { force: true });
+  const fake = join(home, 'boom.py');
+  writeFileSync(fake, [
+    'import sys',
+    'sys.stderr.write("Traceback (most recent call last):\\n")',
+    'sys.stderr.write("_tkinter.TclError: bad attribute \\"-transparentcolor\\"\\n")',
+    'sys.exit(1)',
+  ].join('\n'), 'utf8');
+  try {
+    const st = await openWindow({ script: fake, settleMs: 1500 });
+    assert.equal(st.ok, false, `脚本退 1 不该算成功：${JSON.stringify(st)}`);
+    assert.match(st.reason, /bad attribute/, `reason 里要有 stderr 尾巴：${st.reason}`);
+  } finally {
+    delete process.env.DSH_SEE_PYTHON;
+    rmSync(fake, { force: true });
+    rmSync(pidPath(), { force: true });
+  }
+});
+
 test('心跳过期时 windowAlive 判死 —— 进程还在也不行', async () => {
   // 场景就是 issue #2 第 3 条：进程活着、pid 文件也在，但窗口其实已经卡死/是张空窗。
   // 老逻辑只看 pid，于是永远"还活着"，用户点 × 之后再叫也开不出来。

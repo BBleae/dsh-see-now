@@ -28,6 +28,25 @@
 
 ## [Unreleased]
 
+### Fixed — 悬浮窗起不来时只报 `code=1`：现在带版本闸和 stderr 尾巴（#45）
+
+macOS 上 `see_now({action:"watch"})` 能截到画面，窗口却始终起不来，工具只回
+`没有能用的解释器（要带 tkinter）：python3（启动后 700ms 内退出，code=1）` ——
+这句话把人往"装 python"的方向带，而真因是 `window.py` 里那行 `-transparentcolor`
+（Tk 的 Windows 专有属性，上游已修，这次随 `sync:window` 一起进来）。
+
+- **探针加版本闸**：`import tkinter` 之前先查 `sys.version_info >= (3, 8)`。原先探针只验
+  tkinter，而脚本里有 `dataclass(slots=True)` / `X | Y` 注解（3.10+），于是 3.9
+  **通过了探针、崩在 import 里**，这边只看得到 `code=1`；
+- **探针报具体原因**：`python3（版本太低（要 ≥ 3.8））` / `python（tkinter 不可用：No module
+  named '_tkinter'）` / `…（跑不起来：ENOENT）`，不再是清一色"无 tkinter"；
+- **stderr 不再只写进日志文件**：spawn 时 pipe 出来，照旧追加到 `~/.dsh/see-now-window.log`，
+  同时留最后 8 行进失败的 `reason`。等 `stderr` 的 `end` 才拼 reason，否则最后那句
+  Traceback 会漏（`code=1` 什么都说明不了，死因只在这条通道上）；
+- README 补「悬浮窗对解释器的要求」：3.8+ 且带 `_tkinter`、mac 上 homebrew 的 python
+  要另装 `python-tk`、Linux 的包名、以及 `pythonw.exe` 吞掉 stderr 时怎么复现；
+- 测试 +1：脚本往 stderr 吐一句，`reason` 里必须有那句（本机没有带 tkinter 的解释器时 skip）。
+
 ### Fixed — 设置页改什么都不给存：补丁里混进两个幽灵字段（#43）
 
 `draftOf()` 给表单种子时漏了 `tierStyle` / `tierMap` / `wakeBatch` 三项，而 `patchOf()`
