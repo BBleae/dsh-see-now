@@ -1184,6 +1184,17 @@ async function registerAll(ctx) {
         return await attachAndReturn(ctx, s, { looping: Boolean(lp) && !lp.stopped() });
       }
 
+      if (action === 'pause' || action === 'resume' || action === 'seek' || action === 'configure') {
+        // 本地视频回放控制。屏幕和摄像头源会被明确拒绝（不假装成功）。
+        const r = action === 'seek' ? await runner.seek(args.position)
+          : action === 'configure' ? await runner.configure({ quality: args.quality })
+            : await runner[action]();
+        return {
+          text: r.ok ? (r.text ?? `文件操作完成：${action}`) : (r.text ?? `文件操作未完成：${r.reason}`),
+          meta: { ok: r.ok !== false, reason: r.reason ?? null, playback: r.playback ?? null },
+        };
+      }
+
       if (action === 'start') {
         const built = srcOf(args);
         if (built.error) return { text: built.error, meta: { ok: false, reason: 'bad-region' } };

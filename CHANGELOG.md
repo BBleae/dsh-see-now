@@ -28,6 +28,29 @@
 
 ## [Unreleased]
 
+### Added — 本地视频回放控制：`pause` / `resume` / `seek` / `configure`（合 PR #42）
+
+`see_now` 接进本地视频文件之后，既不能暂停也不能跳。这个 PR 补齐四个动作，并且**真的
+接到采集层**（上一版 #31 的三个坑：`run?.pause()` 抛异常、`seek` 被 `running` 短路、
+`position` 不在 schema 里被宿主丢掉）：
+
+- `spawnFrames()` 新增 `pause()` / `resume()`：暂停时不再读 stdout，ffmpeg 写满管道后
+  自然背压、进程保持存活；继续时先消费缓冲的字节再恢复流；
+- `seek(position)` / `configure({quality})`：先 teardown 再按新起点 / 新档位重开，
+  不再"回 ok: true 但什么都没变"；
+- `baseSec` 接线：seek 之后每帧时间戳从起点起算（`t = baseSec + i / fps`）。原先参数加了
+  却没用，清单时间和台词的 `wallTo` 会整体差一个偏移 —— 正是"字幕和画面对不上"那种难查的错；
+- 工具契约补 `pause | resume | seek | configure` 与 `position` —— 不补的话宿主按 schema
+  过滤参数，模型传的 `position` 会被**静默丢掉**（`schema-audit` 就是为这类问题建的）；
+- `configure()` 不带 `quality` 时保持当前档位，不打回默认档。
+
+顺带把常驻文案预算收回来：新增的 `position` 加上 `quality` 里那串 token 数字一起重排，
+`head + params` = 6450（预算 6500）。token 口径在 `help.js` 里本来就有完整一份，
+契约里不必再抄一遍。
+
+测试 +5（`test/file-playback.test.mjs`）：暂停后 4 秒内帧数不增长、resume 恢复出帧、
+seek 后首帧 `t >= 10`、非文件源明确拒绝、非法位置拒绝。
+
 ### Fixed — 悬浮窗起不来时只报 `code=1`：现在带版本闸和 stderr 尾巴（#45）
 
 macOS 上 `see_now({action:"watch"})` 能截到画面，窗口却始终起不来，工具只回

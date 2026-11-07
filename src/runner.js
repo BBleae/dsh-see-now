@@ -22,7 +22,7 @@ import { createPipeline } from './pipeline.js';
 import { cellSize } from './layout.js';
 import { chatWatcherShared, enterChatWait } from './chat.js';
 import { noteInterjected } from './interject.js';
-import { openWindow, pidStamp, windowAlive, setWindowHidden } from './window.js';
+import { openWindow, pidStamp, windowAlive, setWindowHidden, sendWindowState } from './window.js';
 import { createListener } from './listen.js';
 
 /**
@@ -539,8 +539,18 @@ export function createRunner({
     return true;
   }
 
-  async function start({ src = { kind: 'screen' }, opts = {}, quality: q = null } = {}) {
-    if (running) return { already: true, source };
+  // 播放状态：只有文件源会变。窗口通过它显示"暂停中 / 第几秒"。
+  let playbackState = 'stopped';
+  let playbackPosition = 0;
+  /** 把播放状态推给悬浮窗；旧窗口没有这条通道，是空操作。 */
+  function publishPlayback() {
+    try { sendWindowState({ playback: playbackState, positionSec: playbackPosition }); } catch { /* 窗口没开 */ }
+  }
+
+  async function start({ src = { kind: 'screen' }, opts = {}, quality: q = null, restart = false } = {}) {
+    // `restart` 只给 seek / configure 用：换源或换档位必须真的重开采集，
+    // 否则 `running` 直接短路返回 already，动作等于没做却回 ok。
+    if (running && !restart) return { already: true, source };
     // 走到这里就是"明确要开始看"（watch 的自动重启已经在前面被硬闸挡住了）。
     hungUp = false;
     endedSource = null;
@@ -630,6 +640,7 @@ export function createRunner({
       fps: p.constants.fps,
       ffmpegPath,
       engine,
+      baseSec: s.seek ?? s.startSec ?? 0,
       onFrame: (f) => {
         frames += 1;
         // 一帧解码就抛 = 整条管线停摆，这里必须兜住：宁可少一帧，不能让采集线程炸掉
@@ -667,6 +678,60 @@ export function createRunner({
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  // ---- 本地视频回放控制（只对文件源有效） --------------------------------
+  // 屏幕源和摄像头没有"暂停/跳转"这回事，一律明确拒绝，不假装成功。
+  const PLAYBACK_REASONS = {
+    'not-file': '当前不是文件源，暂停、跳转和改清晰度都不适用。',
+    'invalid-position': '跳转位置必须是非负秒数。',
+    'busy': '正在取图，等这一轮结束再操作。',
+  };
+  function playback() {
+    return { state: playbackState, positionSec: playbackPosition, canSeek: source?.kind === 'file' };
+  }
+
+  async function pause() {
+    if (source?.kind !== 'file') return { ok: false, reason: 'not-file', text: PLAYBACK_REASONS['not-file'], playback: playback() };
+    if (!run) return { ok: false, reason: 'not-file', text: PLAYBACK_REASONS['not-file'], playback: playback() };
+    run.pause();
+    playbackState = 'paused';
+    publishPlayback();
+    return { ok: true, text: '已暂停。', playback: playback() };
+  }
+
+  async function resume() {
+    if (source?.kind !== 'file') return { ok: false, reason: 'not-file', text: PLAYBACK_REASONS['not-file'], playback: playback() };
+    if (!run) return { ok: false, reason: 'not-file', text: PLAYBACK_REASONS['not-file'], playback: playback() };
+    run.resume();
+    playbackState = 'playing';
+    publishPlayback();
+    return { ok: true, text: '继续播放。', playback: playback() };
+  }
+
+  async function seek(position) {
+    // 位置合法性先判：不管当前是什么源，非法位置都是非法。
+    if (!Number.isFinite(position) || position < 0) {
+      return { ok: false, reason: 'invalid-position', text: PLAYBACK_REASONS['invalid-position'], playback: playback() };
+    }
+    if (source?.kind !== 'file') return { ok: false, reason: 'not-file', text: PLAYBACK_REASONS['not-file'], playback: playback() };
+    // 跳转要**真的重开采集**：ffmpeg 已经按旧起点在解码，光改状态不会让画面变。
+    await teardown('seek');
+    playbackPosition = position;
+    playbackState = 'playing';
+    await start({ src: { ...source, seek: position }, quality, restart: true });
+    publishPlayback();
+    return { ok: true, text: `已跳转到 ${position}s。`, playback: playback() };
+  }
+
+  async function configure(options = {}) {
+    if (source?.kind !== 'file') return { ok: false, reason: 'not-file', text: PLAYBACK_REASONS['not-file'], playback: playback() };
+    // 「不改档位」= 保持当前档位，而不是打回默认档。
+    const next = options.quality ?? quality;
+    await teardown('configure');
+    await start({ src: source, quality: next, restart: true });
+    publishPlayback();
+    return { ok: true, text: `清晰度已切到 ${next}。`, playback: playback() };
+  }
+
   /**
    * 把悬浮窗支起来（幂等）。**只在真要阻塞的时候调** —— 没在等就没必要弹窗。
    * 开不起来不算失败：模型照样能 watch，只是用户只能等下一轮。
@@ -700,6 +765,7 @@ export function createRunner({
 
   return {
     start,
+    pause, resume, seek, configure,
     stop() { teardown('手动'); return { stopped: true }; },
     /**
      * 用户关掉了悬浮窗 = 明确表示"不看了"。

@@ -57,6 +57,10 @@ export function seeNowToolSpec() {
       + '- `see_now({action:"window", show:true|false})` — **whenever a result or `status` says the window '
       + 'is hidden, the user sees nothing you say**; show it again before you say anything else.\n'
       + '- `see_now({action:"stop"})`.\n\n'
+      + '**Local video playback** (only when source:"file"): `pause` / `resume` / '
+      + '`seek` with `position` (seconds) / `configure` with `quality`. Screen and camera capture have '
+      + 'no notion of pausing or seeking, so those actions are refused explicitly instead of pretending '
+      + 'to work.\n\n'
       + 'Safety net: if you stop calling `watch`, the plugin keeps capturing and wakes you with a short '
       + 'note when a sheet fills up (then `peek`). It stops the moment the user closes the floating '
       + 'window and tells you — when that note appears, do NOT call `see_now` again until the user asks.\n\n'
@@ -82,18 +86,21 @@ export function seeNowToolSpec() {
     parameters: {
       action: {
         type: 'string',
-        description: 'watch (default) | peek | start | stop | status | window | region | offload | help',
+        description: 'watch (default) | peek | start | stop | status | window | region | offload | help '
+          + '| pause | resume | seek | configure',
       },
       trigger: {
         type: 'number',
-        description: 'With action:"offload": 历史里涨到多少张图才动手省（默认取设置里的 imageTrigger，'
-          + '出厂 300；0 = 关闭）。**必须大于 `keep`**。涨到线才一次省到 `keep` —— 不这么拆的话'
-          + '每出一张图都要改历史，前缀缓存每轮全废。',
+        description: 'With action:"offload": 涨到多少张图才动手省（默认 imageTrigger，出厂 300；0 = 关闭）。'
+          + '必须大于 `keep`。',
       },
       keep: {
         type: 'number',
-        description: 'With action:"offload": 省完保留最近几张（默认取设置里的 imageKeep，出厂 100）。'
-          + '更早的标记成"图已省略"，换成占位文本 —— 之后不再进请求，文件也能从磁盘删。',
+        description: 'With action:"offload": 省完留最近几张（默认 imageKeep，100）。',
+      },
+      position: {
+        type: 'number',
+        description: 'With action:"seek": 第几秒（非负，0 = 从头）。只对 source:"file" 有效。',
       },
       region: {
         type: 'string',
@@ -176,12 +183,11 @@ export function seeNowToolSpec() {
       },
       quality: {
         type: 'string',
-        description: '"low" (default, 798×462 ≈222 tokens — 4 frames, faces/scenes fine but small text '
-          + 'unreadable) | "standard" (1050×630 ≈392, medium text) | "high" (1260×756 ≈560, filenames) | '
-          + '"ultra" (1596×924 ≈860, one frame ≈ the real screen — only when "high" is still not enough).\n'
+        description: '"low" (default, 798×462 — 4 frames, faces/scenes fine but small text '
+          + 'unreadable) | "standard" (1050×630, medium text) | "high" (1260×756, filenames) | '
+          + '"ultra" (1596×924, one frame ≈ the real screen — only when "high" is still not enough).\n'
           + 'Switch it UP as soon as you cannot read something — do not guess from a blurry image. '
-          + 'Changing it restarts the capture (~0.6s) and immediately returns one sharp frame of the '
-          + 'current screen; the following calls stay at that quality.',
+          + 'Changing it restarts capture (~0.6s) and returns one sharp frame now; later calls stay.',
       },
     },
     output: {
