@@ -39,7 +39,7 @@ import {
   existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { LISTEN_DEFAULTS, PREFER_KEYS } from './tuning.js';
@@ -387,19 +387,43 @@ export async function probeService(baseUrl, { timeoutMs = 2000 } = {}) {
  *
  * **只管拉、不管关**：服务自己有 idleMs，用完自己走。我们只保证"要用的时候它在"。
  */
+/** `python.exe` → 同目录的 `pythonw.exe`。
+
+ * `asr.json` 的 `manage.start` 里写的是 `python.exe`（console app）。`windowsHide`
+ * 对**大多数**情况够用，但商店版/某些包装器仍会闪一个黑框 —— 用户看到的就是
+ * "用着用着弹一个 ASR 窗口"。`pythonw.exe` 从根上不开控制台；`stdio:'ignore'`
+ * 会把它的 stdout 接到 NUL，服务里的 `print` 不会因为 `sys.stdout is None` 炸。
+ */
+function withoutConsole(exe) {
+  try {
+    if (process.platform !== 'win32') return exe;
+    if (basename(String(exe)).toLowerCase() !== 'python.exe') return exe;
+    const guess = join(dirname(String(exe)), 'pythonw.exe');
+    return existsSync(guess) ? guess : exe;
+  } catch {
+    return exe;
+  }
+}
+
 export async function ensureService(cfg, { log = () => {}, waitMs = 60_000 } = {}) {
   const start = cfg?.manage?.start;
   if (!start) return { ok: false, reason: 'asr.json 里没写 manage.start' };
   if (await probeService(cfg.baseUrl)) return { ok: true, already: true };
 
   const cmd = Array.isArray(start) ? start.map(String) : [String(start)];
-  const [exe, ...args] = cmd;
-  log(`转写服务没在跑，拉起：${cmd.join(' ')}`);
+  const [rawExe, ...args] = cmd;
+  const exe = withoutConsole(rawExe);
+  log(`转写服务没在跑，拉起：${[exe, ...args].join(' ')}`);
+  // `asr.json` 的 `idleMs` 是**毫秒**，而服务读的是环境变量 `ASR_IDLE_EXIT_S`（秒）。
+  // 不传的话它用自带的 300 秒 —— 用户看到的就是"see 已经关了，ASR 还在跑五分钟"。
+  const env = { ...process.env };
+  const idleMs = Number(cfg?.manage?.idleMs);
+  if (Number.isFinite(idleMs) && idleMs > 0) env.ASR_IDLE_EXIT_S = String(idleMs / 1000);
   try {
     // 脚本目录当 cwd：很多服务按相对路径找模型
     const cwd = args[0] ? dirname(args[0]) : undefined;
     const child = spawn(exe, args, {
-      detached: true, stdio: 'ignore', windowsHide: true, ...(cwd ? { cwd } : {}),
+      detached: true, stdio: 'ignore', windowsHide: true, env, ...(cwd ? { cwd } : {}),
     });
     child.unref();
   } catch (e) {
