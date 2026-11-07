@@ -257,16 +257,21 @@ export function linesText(sheet) {
  * 为什么要有：用户看到"格子变了"时，原因可能是**节奏**（帧变稀 → 密度档位变小）、
  * **映射**（strategy/tierMap）、或者**锁定**。三者都改尺寸，只报节奏那一行分不出来。
  */
-function tierLine(hist, tuning) {
+function tierLine(hist, src) {
   const entries = Object.entries(hist ?? {}).filter(([, n]) => Number(n) > 0);
   if (!entries.length) return '';
   const total = entries.reduce((sum, [, n]) => sum + Number(n), 0);
   const parts = entries
     .sort((a, b) => Number(a[0]) - Number(b[0]))
     .map(([k, n]) => `${k}档×${n}`);
-  // 三种来源分开报：跟随密度 / 整体挪一档 / 逐档自定义
-  const head = `档位：${tuning?.tierStyle ?? 'native'}`;
-  return `\n${head}（${parts.join(' ')}，共 ${total} 帧）`;
+  /**
+   * 尺寸有**四个来源**：判据（密度/变化）→ 密度 → 阈值表 → 映射。只报最后一个，
+   * 用户看到格子变了却查不出是哪一层 —— 所以非默认的都跟一句，默认的不占地方。
+   */
+  const bits = [src?.style ?? 'native'];
+  if (src?.mode && src.mode !== 'density') bits.push(`判据 ${src.mode}`);
+  if (src?.curve && src.curve !== 'docx') bits.push(`阈值 ${src.curve}`);
+  return `\n档位：${bits.join(' · ')}（${parts.join(' ')}，共 ${total} 帧）`;
 }
 
 function loopLine(lp) {
@@ -1409,7 +1414,9 @@ async function registerAll(ctx) {
              * 档位分布：**"格子怎么变了"有两级原因**（节奏 → 密度 → 档位，再由映射偏移），
              * 只报"节奏"看不清。这一行能分出"帧太少所以格子大"和"映射被改了"。
              */
-            + tierLine(s.stats?.tierHist, { tierStyle: tierMode })
+            + tierLine(s.stats?.tierHist, {
+              style: tierMode, mode: tuning.tierMode, curve: tuning.tierCurve,
+            })
             // 收工线：用户改过 see-now.json 时要能看出来，否则"怎么陪我一会儿就停了"查不到
             + `\n收工线：连续 ${tuning.maxAutonomousWakes} 次叫醒没人理`
             + ` · ${tuning.idleStopMin > 0 ? `没开窗时 ${tuning.idleStopMin} 分钟没说话` : '空闲线已关闭'}`

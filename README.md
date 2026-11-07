@@ -469,6 +469,11 @@ see_now({ scene: true, say: "好，接下来每换一个画面我就说一句" }
 | `defaultPace` | `normal` | 新会话/重开采集时的默认节奏：`calm` / `normal` / `dense` / `game-economic`。调用里显式传 `pace` 仍然优先 |
 | `speechPacing` | `true` | 按上一句的估计时长排下一轮（中文约 5 字/秒）。`"guard"` = 只在长句时推迟、不比旧节奏密；`false` = 退回固定间隔 |
 | `changeLog` | `false` | 交付时在图下面附一段「这期间屏幕怎么动的」（每张图一行：时刻 / 变化分 / 方位 / 占屏）。`queueDepth` 挤掉的画面只有这里能看到。每次交付约 +100 token，默认关 |
+| `tierMode` | `density` | 格子大小按什么算：`density` 看过去 1 秒平均每秒几帧；`weight` 按每帧变化分切面积（同图内会出现大小对比，省 28~45% token，但一张图覆盖的时长变长、出图变慢） |
+| `tierCurve` | `docx` | 七道阈值取哪一套：`docx` 原始 / `perceptual` 按人眼瞬时记忆定标（一格 3 s ~ 0.3 s）/ `custom` 走 `tierThresholds` |
+| `tierThresholds` | `[0.26,0.6,0.9,1.2,1.8,2.4,3.0]` | `tierCurve:"custom"` 时生效：7 个**帧/秒**的数，**必须严格递增**（不递增会整份退回默认 —— 滞回带互相盖住会让档位卡死） |
+| `tierStyle` | `standard` | 映射：`standard`（1 档压成 1/2）/ `native` 原样 / `full` 整体降一档 / `compact` 升一档 / `custom` 走 `tierMap` |
+| `tierMap` | `[1,2,3,4,5,6,7,8]` | `tierStyle:"custom"` 时生效：第 i 个数 = "档位 i+1 映射到哪一档" |
 
 **为什么要 `changeLog`**：出图队列只留最新一张（"宁可丢老画面，不给模型看十几秒前的事"）。
 这在陪看视频时是对的，但**配合操作电脑时不够** —— 模型点完一下、或者上一轮思考的十几秒里
