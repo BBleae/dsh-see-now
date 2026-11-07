@@ -335,6 +335,9 @@ macOS 自带一个：`examples/voice-say-mac.mjs`，走系统的 `say`，音色�
   { "listen": { "source": "process", "targetProcess": "chrome.exe" } }
   ```
   实现在 `examples/floating-chat/procloopback.py`（纯 ctypes，不新增任何依赖）。
+  进程回环生效时**不再读 `quiet-until.json`** —— 那个窗口是给整机回环保命用的，
+  分声源之后它挡不掉任何 AI 声音，只会把窗口期间真实存在的台词整段误杀
+  （实测：TTS 连念 128 秒，视频里的话一直在说，却一条定稿句都没有）。回退设备回环时照旧。
 
 **开销**（i9-12900HX / Win11，实测）：抓回环 0.3% 单核，转写 3 秒段 130–160ms。
 跟画面采集（0.18–0.43 核）比是零头。

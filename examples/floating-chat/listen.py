@@ -29,6 +29,11 @@ ffmpeg 的 dshow 也走不通：这台机器 dshow 枚举不到"立体声混音"
 3. **它听得见自己**。AI 用 TTS 念台词 → 音箱出声音 → 回环收回去 → 转成"视频里的台词"。
    所以每段落盘前查一次 `quiet-until.json`（`say` / `cue` 念之前会占住这个窗口）。
 
+   **分声源之后这条不适用**（`--source process`）：TTS 从别的进程出来，根本进不了这条流；
+   再按窗口丢段只会把**真实台词**误杀 —— 实测踩过：TTS 连着念的 128 秒里，视频里的话
+   一直在说、也一直在断句，但每句的起点都落在 quiet-until 里 → 全被丢掉 → "连续人声
+   128 秒没有一条定稿句"。所以进程回环下 `tts_busy()` 直接不生效；回退到设备回环时照旧。
+
 ## 两种声音来源（`--source`，Windows）
 
   · `device`（老行为）：整机回环 —— 什么都收，包括 AI 自己的 TTS（靠 quiet-until 装聋补）；
@@ -647,10 +652,19 @@ def main():
             carry = cat[n:]
             return out
 
+        def quiet_blocked(at_ms):
+            """这条流要不要按 quiet-until 装聋。
+
+            设备回环：要 —— 整机混音里有 TTS，不挡就是"听见自己"。
+            进程回环：**不要** —— TTS 根本不在目标进程树里，窗口挡不掉任何 AI 声音，
+            只会把窗口期间真实存在的台词按"起点落在窗口内"整段误杀（实测 128 秒零定稿）。
+            """
+            return feed.kind != "process" and tts_busy(at_ms)
+
         def land(pieces):
             nonlocal dropped, written
             for t0, audio in pieces:
-                if tts_busy(t0 * 1000):
+                if quiet_blocked(t0 * 1000):
                     dropped += 1
                     emit({"event": "skip", "reason": "tts", "at": round(t0, 3)})
                     continue
@@ -668,7 +682,7 @@ def main():
         def land_live(pieces):
             """临时快照：**同名覆盖**（一句话只有一个 live 文件），Node 侧按 size/mtime 判新。"""
             for t0, audio in pieces:
-                if tts_busy(t0 * 1000):
+                if quiet_blocked(t0 * 1000):
                     continue
                 name = f"live-{int(t0 * 1000)}.wav"
                 write_wav(os.path.join(args.out, name), audio)
