@@ -111,6 +111,31 @@ macOS 上 `see_now({action:"watch"})` 能截到画面，窗口却始终起不来
 非 Windows 上按"抓到自己就填掉"处理，不再递归拍到自己。启动失败时的弹窗标题
 也会显示 `dsh-see-now`（`DSH_WINDOW_BRAND`）。
 
+### Added — Linux 屏幕采集（xdg-desktop-portal ScreenCast）
+
+Wayland 下 ffmpeg 没有正路（`x11grab` 只抓到 XWayland 根窗口，`kmsgrab` 要 root），
+所以走 portal：`握手 → PipeWire → gst → rgb24`。帧契约与 ffmpeg 那条完全一致
+（`{done, stop}` + `onFrame({i,t,buf})`），判帧 / 拼图 / 工具契约一行没改。
+断流（退出码 3/4）自动重连最多 3 次；0 帧超过 12 秒重开，3 次仍 0 帧给出可照做的报错。
+
+- GNOME 的 screencast 节点在 portal 私有 pipewire 实例里，要 `OpenPipeWireRemote` 拿 fd；
+- Mutter/KWin 按 damage 发帧，静止桌面要 `keepalive-time=250`；
+- 会话常驻：换 `region` / 清晰度只重起 gst，不重新握手（帧协议带 4 字节长度头，尺寸可变）；
+- **父进程消失时先 `Session.Close` 再退**：以前的 EOF 路径是 `os._exit(0)`，会话留在 portal 表里，
+  反复几次后 GNOME 的 `CreateSession` 直接不返回（实测必现，只能重启机器）。
+
+### Added — 指示框 / `region`
+
+- 指示框：四边 26px 光晕 + 顶部状态条（PySide6，可选；没装就只少这一层，采集照旧）。
+- `region`：坐标统一成采集流坐标（portal 的 `Start` 会报 `size`），在流上直接 `videocrop`，
+  越界报错；取框窗把 Tk 的物理像素按比例换算过去（实测 ×1.0 / ×1.25 / ×1.5）。
+
+### Fixed — 唤醒在会话里排队
+
+宿主把每条叫醒渲染成一轮对话；模型只回文本时，循环以前会继续投递。现在一次只允许一条在飞，
+45 秒没人接就整个收工。另外 `quality` 不传时保持当前档、显式 `region` 会落盘
+（这两个以前都会导致每次 watch 重开采集）。
+
 ## [0.1.4] - 2026-11-06
 
 ### Added — 设置页能换悬浮窗外观（新增「静态磨砂」不吃性能）

@@ -150,6 +150,8 @@ export const HANGUP_NOTE = '[看屏幕·挂断] 悬浮窗被关掉了 —— 用
 export function startLoop({
   ctx, sessionId = null, getSessionId = () => null, runner,
   log = () => {}, onStop = () => {}, wakeMinGapSec = WAKE_MIN_GAP_MS / 1000,
+  /** 一条叫醒多久没人接（没有任何工具调用）就收工；测试里可以调小 */
+  unackedStopMs = 45_000,
   // 逐帧模式：唤醒文案要说"换画面了，说一句这是什么"，而不是"有新画面了"。
   scene = false,
   // `~/.dsh/see-now.json` 的节奏参数（readTuning()）；不传就用写死的默认值。
@@ -157,6 +159,17 @@ export function startLoop({
 } = {}) {
   let disposed = false;
   let lastWakeAt = 0;
+  /**
+   * 最近一次「模型真的碰了这个工具」的时刻。
+   *
+   * 为什么需要它：叫醒是往会话里**投递一条消息**，宿主会把它排进队列等模型回应。
+   * 模型正忙着（一轮跑几十秒）时不回应，循环却按 `wakeMinGapSec` 继续投递 ——
+   * 实测积出过十几条「有新画面了」，用户一条条点掉。
+   *
+   * 所以规则很简单：**上一条叫醒还没被接住（没有新的工具调用），就不叫下一条。**
+   * 一次只允许一条在飞。
+   */
+  let lastAckAt = Date.now();
   let wakeFailures = 0;
   let consecutiveFails = 0;
   let wakeCount = 0;
@@ -269,6 +282,10 @@ export function startLoop({
     // 自动收工要在窗口里留一行灰字，不然用户只会觉得"它突然哑了"
     if (reason === 'idle') {
       try { appendSpoken('meta', '（有一阵没人说话了，我先停一停；要看再说一声。）', { speak: false }); } catch { /* 写不进不影响停 */ }
+    } else if (reason === 'wake-unacked') {
+      // 叫醒了但模型没调工具（只回了文本）→ 停。**也得留一行灰字**：
+      // 不然用户看到的是"它突然哑了"，而这恰恰是最难自己想到原因的一种停法。
+      try { appendSpoken('meta', '（叫了几声没人接，我先停一停；要看再说一声。）', { speak: false }); } catch { /* 写不进不影响停 */ }
     }
     try { onStop(reason); } catch { /* 停不下来也要停 */ }
     dispose();
@@ -451,6 +468,15 @@ export function startLoop({
         mode: pacingMode,
       });
       if (Date.now() < nextAt) return;   // 下一拍再来
+      // ⑤.1.6 上一条叫醒还没被接住就不要再叫 —— 宿主会把这些叫醒排队，
+      //        模型没来得及回应时，用户屏幕上会积一串「有新画面了」。
+      if (lastWakeOk && lastWakeAt > lastAckAt) {
+        // 只拦**成功**的那一条：叫醒失败还要按原来的重试/连续失败逻辑走。
+        // 超过 unackedStopMs 还没接住 → 模型那一轮压根没用这个工具（只回了文本），
+        // 再叫只会继续刷屏。整个收工。
+        if (Date.now() - lastWakeAt > unackedStopMs) { stop('wake-unacked'); return; }
+        return;
+      }
 
       // 叫醒了才算"这张已经叫过"。**失败不能记账**：记了的话下一拍看到 key 没变
       // 就不再重试，连续失败计数永远到不了上限 —— 于是"叫不醒"既不会重试也不会停。
@@ -500,6 +526,8 @@ export function startLoop({
 
   return {
     dispose,
+    /** 任何一次 `see_now` 调用都算"接住了上一条叫醒"。 */
+    noteActivity() { lastAckAt = Date.now(); },
     stopped: () => stopReason !== null,
     state: () => ({
       stopped: stopReason !== null,
@@ -510,6 +538,8 @@ export function startLoop({
       wakes: wakeCount,
       wakeFailures,
       lastWakeAt: lastWakeAt || null,
+      lastAckAt: lastAckAt || null,
+      awaitingAck: lastWakeAt > lastAckAt,
       lastWakeOk,
       lastSheet: lastKey,
       // 节奏诊断：下一次主动唤醒最早落在什么时候、为什么被推迟

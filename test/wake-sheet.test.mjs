@@ -236,6 +236,12 @@ test('整条链：每次唤醒之后的 peek 都有图', { skip, timeout: 90_000
   const runner = createRunner({ ffmpegPath: FFMPEG });
   const wakes = [];
   const peeks = [];
+  /**
+   * 循环现在要求"上一条叫醒被接住（有一次工具调用）才叫下一条"，
+   * 真实链路上那一步是 index.js 的 `execute()` 调 `loop.noteActivity()`。
+   * 这里用一个迟到的 peek 同时模拟那两件事：模型被叫醒 → 先 peek，再回到工具里。
+   */
+  let loop = null;
   const services = {
     sessionController: {
       async resolveAgent() {
@@ -245,7 +251,10 @@ test('整条链：每次唤醒之后的 peek 都有图', { skip, timeout: 90_000
               wakes.push(m.content?.[0]?.text ?? '');
               // 模拟"模型被叫醒 → 想一想 → 才 peek"：**必须晚于 wake 返回**，
               // 那个间隔正是线上图被抢走的地方
-              setTimeout(() => { peeks.push(runner.peek()); }, 120);
+              setTimeout(() => {
+                peeks.push(runner.peek());
+                loop?.noteActivity?.();
+              }, 120);
             },
           },
           session: { id: 's1' },
@@ -261,7 +270,7 @@ test('整条链：每次唤醒之后的 peek 都有图', { skip, timeout: 90_000
       // 逐场景那套：一张图一个画面，出图最密 —— 社区实报就是在这个组合下复现的
       opts: { maxFrames: 1, strategy: 'single', integralSeconds: 1, markMinGap: 0.2 },
     });
-    const loop = startLoop({
+    loop = startLoop({
       ctx: { get: (n) => services[n] ?? undefined },
       sessionId: 's1', runner, scene: true, wakeMinGapSec: 0, tuning: quietTuning,
     });

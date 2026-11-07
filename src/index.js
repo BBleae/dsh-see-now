@@ -22,7 +22,7 @@ import { planOffload, planOffloadWithTrigger, applyOffload } from './offload.js'
 import { defineToolCompat } from './define-tool.js';
 import { createSettingsApi, ROUTE_PREFIX } from './settings-api.mjs';
 import { windowAlive, windowHidden, setWindowHidden, hiddenForShow, windowReport, windowLine } from './window.js';
-import { pickRegion, loadRegion, clearRegion, regionText } from './region.js';
+import { pickRegion, loadRegion, saveRegion, clearRegion, regionText } from './region.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -43,6 +43,9 @@ const nodeRequire = createRequire(import.meta.url);
  */
 function srcOf(args) {
   const kind = args.source ? String(args.source).toLowerCase() : null;
+  // `source:"portal"` 是 Linux 采集的调试别名（不写进工具说明，省常驻 token）：
+  // 语义和 `source:"screen"` 完全一样，只是把引擎钉死在 portal、不再自动探测。
+  if (kind === 'portal') return { src: { kind: 'screen', engine: 'portal' } };
   const src = kind ? { kind } : null;
   if (src && kind === 'file') {
     src.path = args.path;
@@ -64,7 +67,15 @@ function srcOf(args) {
   }
   const out = src ?? { kind: 'screen' };
   out.region = region;
-  out.engine = 'gdigrab';
+  /**
+   * Linux：portal 交出来的是整块屏幕的流，**region 坐标就用这条流的坐标系**
+   * （KDE 上是逻辑像素，例如 2048×1280；`status` 会报当前流的尺寸）。
+   * 裁切由 worker 按 portal 报的 size 做 `videocrop`，越界会明确报错。
+   *
+   * 不钉 `engine: 'gdigrab'` —— 那是 Windows 的抓屏引擎，Linux 上要让 runner
+   * 继续走 portal。
+   */
+  if (process.platform !== 'linux') out.engine = 'gdigrab';
   return { src: out };
 }
 
@@ -894,6 +905,9 @@ async function registerAll(ctx) {
   const toolObj = {
     ...seeNowToolSpec(),
     async execute(args = {}, run = {}) {
+      // 任何一次调用都算"接住了上一条叫醒"：循环据此避免在模型没回应时继续投递唤醒
+      // （以前的毛病：一轮跑几十秒，叫醒照发不误，用户屏幕上积一串「有新画面了」）。
+      loop?.noteActivity?.();
       // 第二个参数是宿主的 `ToolRunContext`：`signal` 是"这一轮被取消了"的唯一通知。
       // 它只交给**阻塞等待**（watch）；常驻循环不挂它，理由见 ensureLoop。
       const out = await toolObj.route(args, run);
@@ -1019,14 +1033,24 @@ async function registerAll(ctx) {
         if (built.error) return { text: built.error, meta: { ok: false, reason: 'bad-region' } };
         const src = built.src;
         const stickyRegion = regionOff ? null : (rawRegion ? undefined : loadRegion());
-        if (regionOff) clearRegion();
+        if (regionOff) {
+          clearRegion();
+        } else if (rawRegion) {
+          // 显式传的 region 也要落盘，否则下一轮 watch 不带 region 就回到整屏
+          const parsed = parseRegion(rawRegion);
+          if (parsed) {
+            try { saveRegion(parsed); } catch { /* 写不了盘不影响这一次 */ }
+          }
+        }
         // 变了一次说一次：模型要知道自己现在只看这一块，也得知道已经回到整屏
         const regionKey = regionText(stickyRegion ?? src?.region ?? null);
         if (regionKey !== lastRegionKey) {
           lastRegionKey = regionKey;
           pendingModeNote = [
             regionKey
-              ? `现在只抓屏幕上的 **${regionKey}** 这一块（屏幕物理像素）—— 画面之外的东西你看不到，`
+              ? `现在只抓屏幕上的 **${regionKey}** 这一块`
+                + `${process.platform === 'linux' ? '（采集流坐标）' : '（屏幕物理像素）'}`
+                + '—— 画面之外的东西你看不到，'
                 + '也不要假设整屏发生过什么。'
               : '已经回到**整屏**，不再只抓那一块。',
             pendingModeNote,
@@ -1328,7 +1352,7 @@ async function registerAll(ctx) {
         const estMB = Math.round(sheets * 130 / 1024);
         return {
           text: (s.running
-            ? `在看 ${s.source?.kind} @${s.size?.[0]}×${s.size?.[1]}（${s.quality}，${s.since}s，收到 ${s.frames} 帧，留帧 ${s.stats?.kept ?? 0}，出图 ${s.stats?.sheets ?? 0}）`
+            ? `在看 ${s.source?.kind}${s.source?.engine === 'portal' ? '/portal' : ''} @${s.size?.[0]}×${s.size?.[1]}（${s.quality}，${s.since}s，收到 ${s.frames} 帧，留帧 ${s.stats?.kept ?? 0}，出图 ${s.stats?.sheets ?? 0}）`
               + `${s.lastError ? `\n⚠ ${s.lastError}` : ''}`
             : `没在采集（${s.idleSec}s 前停的）${s.lastError ? `\n⚠ ${s.lastError}` : ''}`)
             // 循环状态单独一行：**"模型答一句就停"时第一个要看的就是它**
@@ -1350,6 +1374,11 @@ async function registerAll(ctx) {
             // 窗口：**"它在看但我什么都没看到"时第一个要看的就是这一行**
             + `\n${windowLine()}`
             + (s.window?.ok === false && s.window?.reason ? `\n  ↳ 开窗失败：${s.window.reason}` : '')
+            // 指示框：用户屏幕上的"有人在看"。采集时被裁掉，所以模型看到的结果里没有它
+            + (s.indicator?.running
+              ? `\n指示框：在（逻辑 ${s.indicator.logicalWidth}×${s.indicator.logicalHeight}；`
+                + '采集流里不含它，所以不裁）'
+              : '')
             // 模式：逐帧时一张图只有一帧、铺满；常规是多帧拼格
             + `\n模式：${sceneMode ? '逐帧（一张图 = 一个场景，铺满）' : '常规（多帧拼一张）'}`
             + ` · 节奏：${sceneMode ? 'dense（跟逐帧走）' : paceMode}`
@@ -1370,6 +1399,8 @@ async function registerAll(ctx) {
             + `${tuning.path && tuning.maxAutonomousWakes === 8 && tuning.idleStopMin === 3 ? '（默认）' : `（${tuning.path}）`}`
             // 区域：只看一小块时，模型得知道自己看到的不是整屏
             + `\n区域：${regionText(s.lastSource?.region ?? loadRegion()) ?? '整屏'}`
+            // 采集流的坐标系：Linux 上 region 的 x,y,w,h 就是按这个尺寸量的
+            + (s.stream?.width ? `（采集流 ${s.stream.width}×${s.stream.height}，region 坐标用这个空间）` : '')
             // 声音单独一行：听不到声音时第一个要看的就是这里
             + `\n声音：${voice.speakers > 0
               ? `已接上 ${voice.adapters.join(', ') || '适配器'}（${voice.speakers} 个会出声的订阅者）`

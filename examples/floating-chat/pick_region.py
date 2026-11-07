@@ -43,10 +43,53 @@ _dpi_aware()
 import tkinter as tk  # noqa: E402  —— 必须在 _dpi_aware() 之后
 
 MIN_SIDE = 24          # 小于这个边长当作误触，不确认
+
+
+def scale_rect(rect, screen, stream):
+    """把 Tk 屏幕坐标换算成**采集流坐标**。
+
+    Linux 上 Tk 走 XWayland，报的是设备像素（例 2560×1600），而 portal 的流是
+    逻辑像素（例 2048×1280）。不换算的话，框出来的区域会整体偏大 —— 用户以为
+    框住了窗口，模型看到的却是窗口右下角那一块。
+
+    实测三组（同一台 2560×1600 屏）：
+
+        缩放 125%：Tk 2560×1600 → 流 2048×1280（×1.25）
+        缩放 150%：Tk 2560×1600 → 流 1707×1067（×1.5）
+        GNOME/X11 100%（1280×800）：两者相同（×1.0）
+
+    所以比例是 `stream / screen`，**不假设它是整数**；x/y 各自换算，算完再夹回
+    `[0, 流尺寸]`（缩放变化后旧坐标可能越界）。
+
+    两边都缺、或者比例是 1，就原样返回（Windows 上就是这样：Tk 已经按
+    物理像素工作，stream 参数也不会传进来）。
+    """
+    if not rect or not screen or not stream:
+        return rect
+    sw, sh = screen
+    tw, th = stream
+    if not sw or not sh or not tw or not th:
+        return rect
+    x, y, w, h = rect
+    sx, sy = tw / sw, th / sh
+    return (
+        max(0, min(tw - 1, round(x * sx))),
+        max(0, min(th - 1, round(y * sy))),
+        max(1, min(tw, round(w * sx))),
+        max(1, min(th, round(h * sy))),
+    )
 ACCENT = "#4da3ff"
 
 
 def main() -> int:
+    stream_wh = None
+    if "--stream-width" in sys.argv and "--stream-height" in sys.argv:
+        try:
+            stream_wh = (int(sys.argv[sys.argv.index("--stream-width") + 1]),
+                         int(sys.argv[sys.argv.index("--stream-height") + 1]))
+        except (ValueError, IndexError):
+            stream_wh = None
+
     root = tk.Tk()
     root.withdraw()
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -100,7 +143,11 @@ def main() -> int:
         x, y, w, h = rect
         if w < MIN_SIDE or h < MIN_SIDE:
             return                     # 误触：留着让用户接着拖
-        print(json.dumps({"x": x, "y": y, "w": w, "h": h}), flush=True)
+        # 先把 Tk 屏幕坐标换算到采集流坐标（Linux 上两者不是 1:1）
+        x, y, w, h = scale_rect((x, y, w, h), (sw, sh), stream_wh)
+        print(json.dumps({"x": x, "y": y, "w": w, "h": h,
+                          "screen": [sw, sh], "stream": list(stream_wh) if stream_wh else None}),
+              flush=True)
         root.destroy()
 
     def cancel(_e=None) -> None:
