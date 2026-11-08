@@ -427,7 +427,14 @@ def main():
             p_now = dict(params)
             CTRL["restart"] = False
         width, height = int(p_now["width"]), int(p_now["height"])
-        frame_bytes = width * height * 3
+        # gst 的 RGB 行按 4 字节对齐：width*3 不是 4 的倍数时，每行尾部会多出
+        # padding（实测 798→每行多 2 字节，整帧 1078200 而不是 1077300）。
+        # 按紧凑大小切帧会让每一行错位累积 —— 画面是**斜切**的，不是旋转。
+        # 所以：从 gst 按 stride 读，**剥掉 padding** 再按紧凑大小写给宿主。
+        row_bytes = width * 3
+        stride = (row_bytes + 3) & ~3
+        frame_bytes = row_bytes * height
+        frame_raw = stride * height
         pipeline = build_pipeline(p_now)
         log(f"[gst] {pipeline}")
         gst = subprocess.Popen(
@@ -472,9 +479,16 @@ def main():
             # 长度头是给"尺寸会变"用的：换清晰度/region 时帧长变了，宿主靠它切帧，
             # 不需要再去追"我上次告诉它多大的"这种状态（异步管道里对齐不可靠）。
             try:
-                while len(pending) >= frame_bytes:
-                    frame = pending[:frame_bytes]
-                    pending = pending[frame_bytes:]
+                while len(pending) >= frame_raw:
+                    raw = pending[:frame_raw]
+                    pending = pending[frame_raw:]
+                    if stride == row_bytes:
+                        frame = raw
+                    else:
+                        # 逐行剥 padding（只在 stride 不紧凑时才走这条，热点路径不受影响）
+                        frame = b"".join(
+                            raw[y * stride:y * stride + row_bytes] for y in range(height)
+                        )
                     out.write(struct.pack(">I", frame_bytes))
                     out.write(frame)
                 out.flush()
