@@ -58,3 +58,35 @@ test('重开窗解除挂断：必须看 pid 文件有没有被重写，不能只
   // 空参数不抛
   assert.equal(resumeFromReopen({}), false);
 });
+
+// ---- 关窗之后要有一条明确的出路（issue #59）----
+
+test('用户要求重新显示 → 解除挂断，下一次 watch 不再被拦', async () => {
+  process.env.DSH_SEE_NO_WINDOW = '1';
+  process.env.DSH_SEE_NOW_INDICATOR = '0';
+  // ffmpeg 指向不存在的路径：这里只验"闸开了没有"，不该真的抓到画面
+  const r = createRunner({ graceSec: 0, ffmpegPath: 'no-such-ffmpeg-xyz' });
+  r.hangUp();
+  assert.equal(r.isHungUp(), true);
+
+  assert.deepEqual(r.resumeByUser(), { wasHungUp: true }, '要告诉调用方"刚才确实是挂断状态"');
+  assert.equal(r.isHungUp(), false);
+
+  const out = await r.watch({ seconds: 0.2 });
+  assert.notEqual(out.reason, 'hung-up', '解除之后不许再被硬闸拦');
+  assert.equal(r.isHungUp(), false, '放行之后也不许被重新置回挂断');
+
+  // 幂等：没挂断时再调一次不会误报
+  assert.deepEqual(r.resumeByUser(), { wasHungUp: false });
+  r.stop?.();
+});
+
+test('watch 本身**不会**自动解除挂断（那条门必须由显式动作打开）', async () => {
+  process.env.DSH_SEE_NO_WINDOW = '1';
+  const r = createRunner({ graceSec: 0, ffmpegPath: 'no-such-ffmpeg-xyz' });
+  r.hangUp();
+  const out = await r.watch({ seconds: 0.2 });
+  assert.equal(out.reason, 'hung-up', '不带显式来源的 watch 仍要被拦 —— 否则就是"关掉又弹出来"');
+  assert.equal(r.isHungUp(), true);
+  r.stop?.();
+});

@@ -933,6 +933,30 @@ export function createRunner({
     },
     /** 挂断状态（测试和状态页用） */
     isHungUp() { return hungUp; },
+    /**
+     * **用户（经由助手）明确"把窗开回来"** —— 解除挂断。
+     *
+     * 挂断是"用户关掉了窗 = 这一轮不看了"的单向门，唯一的历史出口是"窗被重新打开过"
+     * （`resumeFromReopen` 看 pid 文件有没有被重写）。但那条路要求用户自己去点托盘，
+     * 社区实报是：随手关一下窗之后，助手在本轮里就**再也没有第二次机会**了 ——
+     * 用户试了 watch / peek / region:"off" / `window show:true` 全都不管用（issue #59）。
+     *
+     * 所以多开一扇门：`window` + `show:true` 是"我要看见它"的显式动作（模型只会在
+     * 用户明确说要看时调），把它当成"用户又想看了"，把门开开。
+     * **`watch` 本身不自动解除**：这条门必须由一次显式动作打开，否则就是
+     * "关掉又弹出来"那个老毛病。
+     *
+     * @returns {{wasHungUp:boolean}} 之前是不是挂断状态（给文案用）
+     */
+    resumeByUser() {
+      const was = hungUp;
+      if (hungUp) {
+        hungUp = false;
+        hungUpStamp = 0;
+        log('用户要求重新显示窗口 —— 解除挂断。');
+      }
+      return { wasHungUp: was };
+    },
     /** 有没有一个"已经放完、不能自动重播"的文件源 */
     endedFile() { return endedSource ? { ...endedSource } : null; },
     /** 这一轮开过窗没有（循环判"用户关窗"用） */

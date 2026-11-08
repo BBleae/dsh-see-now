@@ -1193,7 +1193,13 @@ async function registerAll(ctx) {
           if (r.reason === 'hung-up') {
             return {
               text: '用户已经关掉了悬浮窗，这一轮看屏幕结束了。\n'
-                + '**不要再调 `see_now`**。等用户明确说要看（或者重新打开窗口）再开始。',
+                + '**别再自己重试 `watch`**（重试也不会开窗）。\n'
+                + '怎么重新开始，按用户的说法选一条：\n'
+                + '- 用户说"接着看 / 再看一眼"：先 `see_now({action:"window", show:true})`，'
+                + '它会解除这条挂断，然后正常 `watch` 即可；\n'
+                + '- 用户自己点了托盘图标或 `Ctrl+Alt+W` 把窗拉回来：直接 `watch` 就行（会自动解除）；\n'
+                + '- 用户只是要看一个本地视频：`watch` 时显式传 `source:"file"` + `path`，'
+                + '显式来源一律放行。',
               meta: { ok: false, reason: 'hung-up' },
             };
           }
@@ -1347,10 +1353,22 @@ async function registerAll(ctx) {
         const wantsDanmaku = typeof args.danmaku === 'boolean' ? args.danmaku : null;
         let changed = null;
         let dm = null;
+        let resumed = null;
         if (wants !== null) {
           // `show` 和 `hidden` 方向相反，换算只在 hiddenForShow 一处
           changed = setWindowHidden(hiddenForShow(wants), { log });
           log(`悬浮窗${wants ? '显示' : '最小化'}${changed.changed ? '' : '（本来就是）'}`);
+        }
+        /**
+         * `show:true` = 用户明确说"我要看见它" → 顺带解除挂断（issue #59）。
+         *
+         * 以前关窗之后本轮就再也调不动 `watch`（只认"窗被用户自己重新打开"），
+         * 而拒绝语里又没说怎么出来 —— 社区用户试了六种写法才放弃。
+         * 这里是那条明确的门：模型只会在用户要求时才调 `show:true`。
+         */
+        if (wants === true) {
+          resumed = runner.resumeByUser();
+          if (resumed.wasHungUp) log('挂断已解除，下一次 watch 会重新开窗。');
         }
         if (wantsDanmaku !== null) {
           dm = setWindowDanmaku(wantsDanmaku, { log });
@@ -1371,6 +1389,9 @@ async function registerAll(ctx) {
             : (changed?.error ? `没改成隐藏（${changed.error}），现状：` : '已把悬浮窗藏起来（采集照常，只是看不见）。');
         return {
           text: `${head}\n${windowLine(r)}`
+            + (resumed?.wasHungUp
+              ? '\n**之前的"用户关窗"已解除** —— 下一次 `watch` 会重新开一个窗（采集也会重开）。'
+              : '')
             + (dm ? `\n弹幕已${dm.danmaku ? '打开（台词会从屏幕顶部飘过）' : '关掉'}。` : '')
             + (lagging ? '\n（这一行还是上一秒的状态，最多 1 秒后刷新。）' : '')
             + (r.alive ? '' : '\n窗没开着 —— 下一次 `watch` 会重新开一个。')

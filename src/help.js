@@ -105,6 +105,9 @@ export const SEE_NOW_HELP = [
   '- 打游戏嫌挡视野：`window` + `show:false`（真的离开屏幕、挂到托盘），'
   + '想边玩边看就再加 `danmaku:true` —— 台词从屏幕顶部飘过，只有 assistant 的台词会飘。'
   + '叫回来：托盘图标 / `Ctrl+Alt+W` / `show:true`。',
-  '- 用户关了窗：插件会告诉你，别再调 `watch`。',
+  '- 用户关了窗：插件会告诉你，别再自己重试 `watch`。要重新开始只有两条明路：'
+  + '用户说要看 → 先 `window` + `show:true` 解除挂断，再 `watch`；'
+  + '或者用户自己点托盘 / `Ctrl+Alt+W` 把窗拉回来（那次 `watch` 会自动解除）。'
+  + '看本地视频不受影响：`watch` 显式传 `source:"file"` + `path` 一律放行。',
   '- 用 `source:"file"` 回放本地视频调试时，`realtime:true` 才是 1 倍速。',
 ].join('\n');
