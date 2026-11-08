@@ -624,8 +624,34 @@ async function registerAll(ctx) {
    *
    * 必须有它才能叫醒模型 —— 没有就退化成"看完一张就停"，那正是要修的病。
    * 用**函数**而不是快照：会话 id 由钩子随时更新，闭包里存值会让第一次之后全用旧的。
+   *
+   * ⚠️ **它是"这个进程里最后说过话的会话"，不是"正在跟你看屏幕的会话"**。
+   * 多开对话时，任何一个会话冒一条事件（心跳、排队消息、后台压缩）都会把它顶掉 ——
+   * 拿它当循环 owner，就会出现"在 A 里开的窗，话却投给了 B"。所以真正的归属要优先用
+   * **工具调用本身带的 agent**（`run.agent`，见 `callerSessionOf`），`lastSessionId` 只做兜底。
    */
   let lastSessionId = null;
+
+  /**
+   * **这一次调用**是从哪个会话发起的（`run.agent.session.header.id`）。
+   *
+   * 这是宿主给的、不参与竞争的身份：谁调的工具，图就叫醒谁。
+   * 只在最近一次调用之后保留，给没带 `run` 的路径（自动省略那一条）当兜底。
+   *
+   * `delegationDepth > 0` 的是子会话（subagent）：它没有能给用户看的窗口，
+   * 把循环绑过去等于把话投进黑洞 —— 那种情况退回 `lastSessionId`。
+   */
+  let lastCallerSessionId = null;
+
+  /** 从宿主给的执行上下文里取"发起这次调用的会话 id"（取不到就是 null）。 */
+  function callerSessionOf(run) {
+    const session = run?.agent?.session;
+    const id = session?.header?.id ?? session?.id ?? null;
+    if (!id) return null;
+    const depth = session?.header?.delegationDepth;
+    if (typeof depth === 'number' && depth > 0) return null;
+    return id;
+  }
 
   /**
    * 省略历史里较早的图（写好 `image/offload` 事件）。手动 action 和自动触发共用。
@@ -659,7 +685,9 @@ async function registerAll(ctx) {
     if (!sc?.resolveAgent) {
       return { ok: false, text: '宿主没有 sessionController，没法写会话事件。', meta: { ok: false, offload: { reason: 'no-session-controller' } } };
     }
-    const sid = lastSessionId;
+    // 省略是**会话级**动作：优先用"这一次调用的会话"，`lastSessionId` 只兜底。
+    // 以前只认 `lastSessionId`，多开时会把图从**别的会话**的历史里省掉。
+    const sid = lastCallerSessionId ?? lastSessionId;
     if (!sid) {
       return { ok: false, text: '还不知道是哪个会话（这个进程还没收到过 session/event）。先 `watch` 一次再来。', meta: { ok: false, offload: { reason: 'no-session' } } };
     }
@@ -918,6 +946,13 @@ async function registerAll(ctx) {
       // 任何一次调用都算"接住了上一条叫醒"：循环据此避免在模型没回应时继续投递唤醒
       // （以前的毛病：一轮跑几十秒，叫醒照发不误，用户屏幕上积一串「有新画面了」）。
       loop?.noteActivity?.();
+      /**
+       * **归属优先取"这一次调用"的身份**（`run.agent`）：谁调的工具，后续唤醒就投给谁。
+       * 不再依赖 `lastSessionId` 那个"最后说过话的会话"——多开对话时它会被别的会话顶掉，
+       * 于是出现"在 A 里开窗、话投给了 B"（issue #1 只修了等待期的时序，没换数据源）。
+       */
+      const callerId = callerSessionOf(run);
+      if (callerId) lastCallerSessionId = callerId;
       // 第二个参数是宿主的 `ToolRunContext`：`signal` 是"这一轮被取消了"的唯一通知。
       // 它只交给**阻塞等待**（watch）；常驻循环不挂它，理由见 ensureLoop。
       const out = await toolObj.route(args, run);
@@ -1027,7 +1062,13 @@ async function registerAll(ctx) {
         // 这期间任何会话的 `session/event` 都会改写 `lastSessionId`；等它返回再
         // `ensureLoop()` 现取，就会把后续唤醒投到"等待期间最后说话的那个会话"去
         // （issue #1 的复现：watch 在 A 会话发起，结束后循环绑到了 B）。
-        const ownerAtStart = lastSessionId;
+        // **owner 必须在等待开始前锁定**，而且**优先取"这一次调用"的会话**。
+        // `runner.watch()` 会阻塞 15~40 秒，这期间任何会话的 `session/event` 都会改写
+        // `lastSessionId`；更根本的是：`lastSessionId` 是"最后说过话的会话"，
+        // 多开对话时它天然会被别的会话顶掉 —— 那才是"在 A 里开窗、话投给 B"的根因。
+        // 宿主在 `execute(args, exec)` 里本来就给了 `exec.agent`，直接用它。
+        // `lastSessionId` 只在拿不到调用身份时兜底（issue #1 的时序修复保持原样）。
+        const ownerAtStart = lastCallerSessionId ?? lastSessionId;
         /**
          * region 的三个入口，优先级从高到低：
          *   1. `region:"off"` —— 取消（存的那块一起删掉）
@@ -1207,7 +1248,7 @@ async function registerAll(ctx) {
         // 走 peek 路线的会话也要有循环：不然模型摘完这一张就结束，没人再叫它。
         // **但采集都停了就别起** —— 起一个下一拍就自杀的钟只是噪音。
         // 注意 `s` 现在是**数组**：空数组是 truthy，不能直接 `!s`
-        const lp = (s?.length || st.running || st.pending) ? ensureLoop() : null;
+        const lp = (s?.length || st.running || st.pending) ? ensureLoop(lastCallerSessionId) : null;
         if (!s?.length) {
           return {
             text: '手上还没有画面（刚开或刚发完，下一张还在攒）。\n'
