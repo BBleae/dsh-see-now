@@ -44,8 +44,8 @@ export function controllerOf(ctx) {
   return serviceOf(ctx, 'sessionController');
 }
 
-/** 唤醒用的消息：DSH 的 `followup()` 要的是一条 user 角色的消息（`MessageBase`） */
-function followupMessage(text) {
+/** 唤醒用的消息：DSH 的 `followup()` / `steer()` 要的都是 user 角色的消息（`MessageBase`） */
+function userMessage(text) {
   return {
     id: randomUUID(),
     role: 'user',
@@ -53,6 +53,38 @@ function followupMessage(text) {
     // 自定义 source.kind 是 DSH 文档里给插件用的形状
     source: { kind: 'see-now' },
   };
+}
+
+/**
+ * 把一条 user 消息投给**指定的 agent**（命令里用：手上已经有 agent，不需要按 id 反查）。
+ *
+ * 两种投递的差别是这一版的重点（见下面 `wakeSession`）：
+ *   - `steer` → `send(msg,'next-step',true)`：**下一个 step 就交给模型**，正在跑的轮次也立刻看得见
+ *   - `followup` → `send(msg,'next-turn',true)`：排到**下一轮**，当前轮次不结束就永远在队列里
+ *
+ * @param {object} agent - 宿主的 Agent（`invocation.agent`）
+ * @param {string} text
+ * @param {{mode?:'steer'|'followup'}} [o]
+ */
+export function deliverToAgent(agent, text, { mode = 'steer' } = {}) {
+  if (!agent) return { ok: false, reason: 'no-agent' };
+  const message = userMessage(text);
+  try {
+    if (mode === 'steer' && typeof agent.steer === 'function') {
+      agent.steer(message);
+      return { ok: true, via: 'steer' };
+    }
+    agent.followup(message);
+    return { ok: true, via: 'followup' };
+  } catch (e) {
+    // steer 抛了（宿主版本老 / 轮次边界冲突）就退回排队那条路 —— 投不到才是真丢话
+    try {
+      agent.followup(message);
+      return { ok: true, via: 'followup', fallback: String(e?.message ?? e) };
+    } catch (e2) {
+      return { ok: false, reason: String(e2?.message ?? e2) };
+    }
+  }
 }
 
 /**
@@ -95,8 +127,23 @@ export function startTicker({ everyMs = 2000, tick, immediate = true } = {}) {
  *   1. `sessionController.resolveAgent(sessionId)` → `{ agent }`
  *   2. `agent.followup(message)` 排队下一轮并唤醒驱动器
  *   3. `sessions.flush(agent.session)` 确认真的落进会话（followup 只进收件箱）
+ *
+ * ## `mode`：`followup` 还是 `steer`
+ *
+ * DSH 的 agent 有两个收件箱：`next-turn` 和 `next-step`。
+ *   - `followup()` = 投 `next-turn`：**等这一轮跑完才看得到**。会话正忙的时候，
+ *     人打进来的字就全堆在队列里 —— 用户侧表现是"我在悬浮窗说话，那边一点动静都没有，
+ *     过好一阵才冒出来一条排队消息"（实测就是这个）。
+ *   - `steer()` = 投 `next-step`：**下一个 step 就交给模型**，正在跑的轮次也立刻看得见；
+ *     会话空闲时它同样会开一轮（wakeup=true）。这就是 Web 端"边跑边插话"走的那条路。
+ *
+ * 所以"用户打在窗口里的话"走 `steer`，"机器自己叫（有新画面了）"仍走 `followup`：
+ * 前者是人，即时性就是全部；后者是噪音源，插断一轮任务反而更糟。
+ *
+ * @param {object} ctx
+ * @param {{sessionId?:string, text?:string, mode?:'steer'|'followup'}} [o]
  */
-export async function wakeSession(ctx, { sessionId, text } = {}) {
+export async function wakeSession(ctx, { sessionId, text, mode = 'followup' } = {}) {
   const sc = controllerOf(ctx);
   if (!sc?.resolveAgent) return { ok: false, reason: 'no-session-controller' };
   if (!sessionId) return { ok: false, reason: 'no-session-id' };
@@ -107,13 +154,25 @@ export async function wakeSession(ctx, { sessionId, text } = {}) {
       const reason = resolved?.error?.message ?? resolved?.error ?? 'resolve-failed';
       return { ok: false, reason: String(reason).slice(0, 160) };
     }
-    resolved.agent.followup(followupMessage(text));
+    const agent = resolved.agent;
+    let via = 'followup';
+    if (mode === 'steer' && typeof agent.steer === 'function') {
+      try {
+        agent.steer(userMessage(text));
+        via = 'steer';
+      } catch {
+        // 老宿主 / 边界冲突：退回排队那条，别把话丢了
+        agent.followup(userMessage(text));
+      }
+    } else {
+      agent.followup(userMessage(text));
+    }
     let flushed = null;
     try {
       const sessions = serviceOf(ctx, 'sessions');
-      if (sessions?.flush) flushed = await sessions.flush(resolved.agent.session);
+      if (sessions?.flush) flushed = await sessions.flush(agent.session);
     } catch { flushed = false; }
-    return { ok: true, via: 'followup', flushed };
+    return { ok: true, via, flushed, agentStatus: typeof agent.status === 'string' ? agent.status : null };
   } catch (e) {
     return { ok: false, reason: String(e?.message ?? e).slice(0, 160) };
   }
@@ -125,10 +184,10 @@ export async function wakeSession(ctx, { sessionId, text } = {}) {
  * 以前这里是 `void wakeSession(...)`，返回 `{ok:false}` 也没人看 ——
  * 用户看到的现象就是"突然不理我了"（陪看那边实报过）。
  */
-export async function wakeWithRetry({ ctx, sessionId, text, note = () => {}, appendMeta = null }) {
+export async function wakeWithRetry({ ctx, sessionId, text, mode = 'followup', note = () => {}, appendMeta = null }) {
   let r = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    try { r = await wakeSession(ctx, { sessionId, text }); } catch (e) { r = { ok: false, reason: String(e?.message ?? e) }; }
+    try { r = await wakeSession(ctx, { sessionId, text, mode }); } catch (e) { r = { ok: false, reason: String(e?.message ?? e) }; }
     if (r?.ok) return r;
     if (attempt === 0) await new Promise((res) => setTimeout(res, 800));
   }
