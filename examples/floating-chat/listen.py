@@ -48,6 +48,7 @@ import json
 import os
 import queue
 import signal
+import subprocess
 import sys
 import time
 import wave
@@ -64,11 +65,13 @@ except ImportError:
     sys.stderr.write("缺 numpy：pip install numpy\n")
     raise SystemExit(2)
 
+# pyaudiowpatch 只有 Windows 有（它包着 WASAPI loopback）；Linux 走 ffmpeg 读 monitor 源。
 try:
     import pyaudiowpatch as pa
 except ImportError:
-    sys.stderr.write("缺 pyaudiowpatch：pip install pyaudiowpatch\n")
-    raise SystemExit(2)
+    pa = None
+
+LINUX = sys.platform.startswith("linux")
 
 
 # 目标格式。16k 单声道是 ASR（paraformer / SenseVoice）的标准输入。
@@ -358,32 +361,94 @@ def write_levels(path, meter):
         pass
 
 
-def main():
-    ap = argparse.ArgumentParser(description="抓系统回环声音，按静音断句落成 16k wav")
-    ap.add_argument("--out", required=False, help="wav 输出目录（seg-<epochMs>.wav）")
-    ap.add_argument("--device", default=None, help="回环设备名的一部分（默认：系统默认输出的回环）")
-    ap.add_argument("--silence", type=float, default=0.35, help="静音多久算一句说完（秒）")
-    ap.add_argument("--max-seg", type=float, default=3.0, help="一句话最长多少秒，超了强切")
-    ap.add_argument("--pre", type=float, default=0.25, help="预卷：开口前多收多少秒")
-    ap.add_argument("--min-seg", type=float, default=0.5, help="短于这个长度的段不发")
-    ap.add_argument("--thr", type=float, default=0.0035, help="能量阈值（0~1，默认约 -49dB）")
-    ap.add_argument("--live", type=float, default=1.0, help="长句边说边出字幕：1 开 / 0 关")
-    ap.add_argument("--live-min", type=float, default=1.8, help="说满这么多秒才给第一版临时字幕")
-    ap.add_argument("--live-step", type=float, default=1.2, help="之后每这么多秒刷新一版")
-    ap.add_argument("--list-devices", action="store_true", help="列出回环设备后退出")
-    args = ap.parse_args()
+class Recorder:
+    """「一段音频进来 → 断句 → 落盘 → 音量条」的公共部分。
 
-    if args.list_devices:
-        list_devices()
-        return
-    if not args.out:
-        raise SystemExit("要 --out DIR（或者 --list-devices）")
-    os.makedirs(args.out, exist_ok=True)
+    Windows（WASAPI 回调）和 Linux（ffmpeg 读 PCM）只是**取音频的方式**不同；
+    断句、音量、静音窗口、落盘必须只有一份，否则两边慢慢漂移。
+    """
 
-    # 上层是 SIGTERM 收工的：不接这个信号的话 finally 不会跑，正在说的那半句就丢了
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    def __init__(self, out_dir, args):
+        self.out = out_dir
+        self.seg = Segmenter(silence=args.silence, max_seg=args.max_seg,
+                             pre=args.pre, min_seg=args.min_seg, thr=args.thr,
+                             live_min=(args.live_min if args.live else 0.0),
+                             live_step=(args.live_step if args.live else 0.0))
+        self.meter = LevelMeter()
+        self.levels_path = os.path.join(out_dir, "levels.json")
+        self.written = 0
+        self.dropped = 0
+        self._last_levels = 0.0
+        self._last_beat = time.time()
+
+    def land(self, pieces):
+        for t0, audio in pieces:
+            if tts_busy(t0 * 1000):
+                self.dropped += 1
+                emit({"event": "skip", "reason": "tts", "at": round(t0, 3)})
+                continue
+            name = f"seg-{int(t0 * 1000)}.wav"
+            write_wav(os.path.join(self.out, name), audio)
+            # 这句已经有整句了，临时快照作废（Node 侧不必再转一次）
+            try:
+                os.remove(os.path.join(self.out, f"live-{int(t0 * 1000)}.wav"))
+            except OSError:
+                pass
+            self.written += 1
+            emit({"event": "seg", "name": name, "at": round(t0, 3),
+                  "dur": round(len(audio) / SR, 2)})
+
+    def land_live(self, pieces):
+        """临时快照：**同名覆盖**（一句话只有一个 live 文件），Node 侧按 size/mtime 判新。"""
+        for t0, audio in pieces:
+            if tts_busy(t0 * 1000):
+                continue
+            name = f"live-{int(t0 * 1000)}.wav"
+            write_wav(os.path.join(self.out, name), audio)
+            emit({"event": "live", "at": round(t0, 3), "dur": round(len(audio) / SR, 2)})
+
+    def push(self, wall, block):
+        """一块 16k 单声道音频：顺手记音量、喂断句器、长句先给一版临时字幕。"""
+        if not len(block):
+            return
+        self.meter.push(wall, block)          # 音量条：顺手记，不额外解码
+        self.land(self.seg.push(wall, block))
+        self.land_live(self.seg.snapshot())   # 长句：不等断句，先给一版
+
+    def tick(self):
+        """静音期没有数据块时，靠这个把「说完了」判出来。"""
+        self.land(self.seg.tick(time.time()))
+
+    def maybe_levels(self):
+        if time.time() - self._last_levels > 1.0:
+            self._last_levels = time.time()
+            write_levels(self.levels_path, self.meter)
+
+    def maybe_beat(self):
+        if time.time() - self._last_beat > 30:
+            self._last_beat = time.time()
+            emit({"event": "beat", "written": self.written, "skipped": self.dropped})
+
+    def close(self):
+        try:
+            self.land(self.seg.flush())      # 退出时把没说完的半句也交出去（够长才要）
+        except Exception:
+            pass
+        try:
+            write_levels(self.levels_path, self.meter)
+        except Exception:
+            pass
+
+
+# ------------------------------------------------------------------ Windows
+
+def run_windows(args, rec):
+    if pa is None:
+        sys.stderr.write("缺 pyaudiowpatch：pip install pyaudiowpatch\n")
+        raise SystemExit(2)
 
     p = pa.PyAudio()
+    stream = None
     try:
         dev = pick_device(p, args.device)
         sr = int(dev["defaultSampleRate"])
@@ -406,18 +471,8 @@ def main():
         stream = p.open(format=pa.paFloat32, channels=ch, rate=sr, input=True,
                         input_device_index=dev["index"], frames_per_buffer=1024,
                         stream_callback=on_audio)
-        seg = Segmenter(silence=args.silence, max_seg=args.max_seg,
-                        pre=args.pre, min_seg=args.min_seg, thr=args.thr,
-                        live_min=(args.live_min if args.live else 0.0),
-                        live_step=(args.live_step if args.live else 0.0))
 
         carry = np.zeros(0, dtype=np.float32)   # 48k → 16k 的余数（3 个凑 1 个）
-        meter = LevelMeter()
-        levels_path = os.path.join(args.out, "levels.json")
-        last_beat = time.time()
-        last_levels = 0.0
-        dropped = 0
-        written = 0
 
         def drop_ratio(x):
             nonlocal carry
@@ -430,33 +485,6 @@ def main():
             carry = cat[n:]
             return out
 
-        def land(pieces):
-            nonlocal dropped, written
-            for t0, audio in pieces:
-                if tts_busy(t0 * 1000):
-                    dropped += 1
-                    emit({"event": "skip", "reason": "tts", "at": round(t0, 3)})
-                    continue
-                name = f"seg-{int(t0 * 1000)}.wav"
-                write_wav(os.path.join(args.out, name), audio)
-                # 这句已经有整句了，临时快照作废（Node 侧不必再转一次）
-                try:
-                    os.remove(os.path.join(args.out, f"live-{int(t0 * 1000)}.wav"))
-                except OSError:
-                    pass
-                written += 1
-                emit({"event": "seg", "name": name, "at": round(t0, 3),
-                      "dur": round(len(audio) / SR, 2)})
-
-        def land_live(pieces):
-            """临时快照：**同名覆盖**（一句话只有一个 live 文件），Node 侧按 size/mtime 判新。"""
-            for t0, audio in pieces:
-                if tts_busy(t0 * 1000):
-                    continue
-                name = f"live-{int(t0 * 1000)}.wav"
-                write_wav(os.path.join(args.out, name), audio)
-                emit({"event": "live", "at": round(t0, 3), "dur": round(len(audio) / SR, 2)})
-
         stream.start_stream()
         while True:
             try:
@@ -467,34 +495,138 @@ def main():
                 wall, raw = None, None
             if raw is not None:
                 x = raw.reshape(-1, ch).mean(axis=1) if ch > 1 else raw
-                block = drop_ratio(x)
-                meter.push(wall, block)          # 音量条：顺手记，不额外解码
-                land(seg.push(wall, block))
-                land_live(seg.snapshot())        # 长句：不等断句，先给一版
-            # 静音期没有数据，靠这里把"说完了"判出来
-            land(seg.tick(time.time()))
-            if time.time() - last_levels > 1.0:
-                last_levels = time.time()
-                write_levels(levels_path, meter)
-            if time.time() - last_beat > 30:
-                last_beat = time.time()
-                emit({"event": "beat", "written": written, "skipped": dropped})
+                rec.push(wall, drop_ratio(x))
+            rec.tick()
+            rec.maybe_levels()
+            rec.maybe_beat()
     except KeyboardInterrupt:
         pass
     finally:
+        rec.close()
         try:
-            land(seg.flush())      # 退出时把没说完的半句也交出去（够长才要）
-        except Exception:
-            pass
-        try:
-            write_levels(levels_path, meter)   # 最后一帧音量条也要落下去
-        except Exception:
-            pass
-        try:
-            stream.stop_stream(); stream.close()
+            if stream is not None:
+                stream.stop_stream(); stream.close()
         except Exception:
             pass
         p.terminate()
+
+
+# ------------------------------------------------------------------ Linux
+
+def linux_list_sources():
+    """PulseAudio/PipeWire 的输入源（含 `*.monitor` = 系统输出的回环）。"""
+    rows = []
+    try:
+        r = subprocess.run(["pactl", "list", "short", "sources"], capture_output=True,
+                           text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return rows
+    for line in (r.stdout or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            rows.append({"name": parts[1], "monitor": parts[1].endswith(".monitor")})
+    return rows
+
+
+def linux_default_source():
+    """默认输出的 monitor 源 —— 也就是"扬声器里正在放的声音"。"""
+    try:
+        r = subprocess.run(["pactl", "get-default-sink"], capture_output=True,
+                           text=True, timeout=3)
+        sink = (r.stdout or "").strip()
+        if sink:
+            return f"{sink}.monitor"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for row in linux_list_sources():
+        if row["monitor"]:
+            return row["name"]
+    raise SystemExit(
+        "找不到 monitor 源：需要 PulseAudio，或者装有 pipewire-pulse 的 PipeWire"
+        "（pactl 来自 pulseaudio-utils；纯 PipeWire 没有 pulse 兼容层的话这条走不通）"
+    )
+
+
+def run_linux(args, rec):
+    src = args.device or linux_default_source()
+    emit({"event": "device", "name": src, "rate": SR, "channels": 1})
+
+    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error",
+           "-f", "pulse", "-i", src,
+           "-ac", "1", "-ar", str(SR), "-f", "s16le", "-"]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    except OSError as e:
+        raise SystemExit(f"起不了 ffmpeg（{e}）；Linux 采集需要 ffmpeg")
+
+    block_bytes = int(SR * 0.1) * 2      # 100ms 一块：够短，断句延迟可控
+    t_base = time.time()
+    samples = 0
+    try:
+        while True:
+            chunk = proc.stdout.read(block_bytes)
+            if not chunk:
+                err = (proc.stderr.read() or b"").decode("utf-8", "replace").strip()
+                if err:
+                    log(f"[ffmpeg] {err[-400:]}")
+                break
+            raw = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+            # ffmpeg 是**连续**出 PCM（静音也出），所以按样本累加时间不会漂
+            wall = t_base + samples / SR
+            samples += len(raw)
+            rec.push(wall, raw)
+            rec.tick()
+            rec.maybe_levels()
+            rec.maybe_beat()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        rec.close()
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+# ------------------------------------------------------------------ 入口
+
+def main():
+    ap = argparse.ArgumentParser(description="抓系统回环声音，按静音断句落成 16k wav")
+    ap.add_argument("--out", required=False, help="wav 输出目录（seg-<epochMs>.wav）")
+    ap.add_argument("--device", default=None, help="回环设备名的一部分（默认：系统默认输出的回环）")
+    ap.add_argument("--silence", type=float, default=0.35, help="静音多久算一句说完（秒）")
+    ap.add_argument("--max-seg", type=float, default=3.0, help="一句话最长多少秒，超了强切")
+    ap.add_argument("--pre", type=float, default=0.25, help="预卷：开口前多收多少秒")
+    ap.add_argument("--min-seg", type=float, default=0.5, help="短于这个长度的段不发")
+    ap.add_argument("--thr", type=float, default=0.0035, help="能量阈值（0~1，默认约 -49dB）")
+    ap.add_argument("--live", type=float, default=1.0, help="长句边说边出字幕：1 开 / 0 关")
+    ap.add_argument("--live-min", type=float, default=1.8, help="说满这么多秒才给第一版临时字幕")
+    ap.add_argument("--live-step", type=float, default=1.2, help="之后每这么多秒刷新一版")
+    ap.add_argument("--list-devices", action="store_true", help="列出回环设备后退出")
+    args = ap.parse_args()
+
+    if args.list_devices:
+        if LINUX:
+            print(json.dumps(linux_list_sources(), ensure_ascii=False, indent=1))
+        else:
+            list_devices()
+        return
+    if not args.out:
+        raise SystemExit("要 --out DIR（或者 --list-devices）")
+    os.makedirs(args.out, exist_ok=True)
+
+    # 上层是 SIGTERM 收工的：不接这个信号的话 finally 不会跑，正在说的那半句就丢了
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    rec = Recorder(args.out, args)
+    if LINUX:
+        run_linux(args, rec)
+    else:
+        run_windows(args, rec)
 
 
 if __name__ == "__main__":
