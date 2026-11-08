@@ -1,6 +1,98 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.1] - 2026-11-08
+
+> 这一版把社区 13 个 PR 合完、5 个 issue 修掉。三件最值得看的：
+> **Windows 按进程分声源**（不再听见自己的 TTS）、**`/seenow` 命令**（`/` 菜单直达）、
+> **关窗之后真的能重新开始**。另外 Linux 也能听声音了。
+
+### Added — Windows 按进程分声源：`listen.source`（#34，PR #50）
+
+默认 `auto`：先试 WASAPI **进程回环**，只收目标进程那棵树的声音 —— TTS 从别的进程出来，
+根本进不了这条流。起不来（Win10 2004 以下 / 没有目标进程 / 激活失败）**自动回落整机回环**，
+行为与以前一致。
+
+- 实现在 `examples/floating-chat/procloopback.py`：纯 ctypes 搓 `ActivateAudioInterfaceAsync`
+  + 4 槽 vtable 当完成回调（必须同时答 `IAgileObject`，否则 `E_ILLEGAL_METHOD_CALL`），
+  **不新增任何运行时依赖**；激活后直接要 16k / 单声道 / s16，热路径免重采样；
+- 目标进程退出会按名字重解析（浏览器重启很常见），等不到才回退；
+- **进程回环生效时不读 `quiet-until.json`** —— TTS 不在目标进程树里，那个窗口挡不掉任何
+  AI 声音，只会把窗口期间真实存在的台词整段误杀（实测 TTS 连念 128 秒、视频里的话一条
+  定稿都没有）；
+- 新配置：`listen.source`（`auto` / `device` / `process`）、`listen.targetProcess`（进程名，
+  留空 = 自动挑「正在出声、且不是播放器」的那个），设置页可写。
+
+### Added — `/seenow` 斜杠命令（PR #57）
+
+命令是宿主侧执行的一段代码，不等模型：开窗（幂等）→ 起采集 → 把常驻循环绑到**发命令的这个
+会话** → 投一句话告诉模型「眼睛已经开了」。全程不提交用户消息、不消耗一轮模型。
+`/seenow off|status|show|hide`。拿不到 `commands` 服务就安静跳过（headless / 老宿主照常加载）。
+
+### Added — Linux 也能听声音（PR #58）
+
+`listen.py` 按平台分叉：Linux 用 `ffmpeg -f pulse` 读默认输出的 `.monitor` 源（`pactl` 找
+默认 sink）。断句、音量条、静音窗口、落盘抽成 `Recorder` 复用 —— 两边只差「怎么取音频」。
+依赖分开报：Linux 只要 numpy + ffmpeg，不需要 pyaudiowpatch。
+
+### Added — 弹幕外观可配（PR #51）
+
+`danmakuFontSize` / `danmakuFont` / `danmakuFontWeight` / `danmakuFg` / `danmakuShadow`。
+顺带修一个真 bug：轨道高度原来按 `max(26, 字号+13)` 估，30 磅字实测行高 52px，第二轨会被
+窗口底边裁掉下半截 —— 改成问字体要 `metrics("linespace")`。
+
+### Fixed — 关窗之后本轮再也调不动 `see_now`（#59）
+
+「用户关窗 = 不看了」是单向门，历史上唯一的出口是「窗被用户自己重新打开过」。随手关一下窗，
+助手在这一轮里就再没有第二次机会，而拒绝语还在说「不要再调 see_now」——用户试了六种写法才放弃。
+
+- **`window` + `show:true` 现在会解除挂断**（用户明确说「我要看见它」时才调），返回里明说
+  「下一次 watch 会重新开窗」；
+- 拒绝语改成列出三条路：`window show:true` 再 `watch` / 用户自己点托盘或 `Ctrl+Alt+W` /
+  本地视频直接 `source:"file"`；
+- **没有**放宽那条闸：不带显式来源的 `watch` 仍返回 hung-up（否则就是「关掉又弹出来」）。
+
+### Fixed — 采集进程只杀 venv launcher，`listen.py` 变孤儿继续录音（#61 #62）
+
+Windows 上 `child.kill()` 只杀 launcher，基座解释器活着 —— 关窗后麦克风灯一直亮。
+
+- 改成按**进程树**结束；杀之前先确认该 pid 的映像名含 python（pid 会被复用），对不上就跳过；
+- `listen.py` 启动时把 `{pid, script, at}` 写进 `<audioDir>/listen.pid`，`stop()` 把内存 pid 和
+  pid 文件**并起来各杀一次** —— `hangUp()` 那条路上引用丢了也能清干净；
+- `start()` 开工前先扫 pid 文件清孤儿（否则两根管道同时录音、同一句话转两遍）。
+
+### Fixed — `start` 的 meta 不是无损 JSON（#60）
+
+`meta` 整个塞了 `runner.start()` 的返回对象，里面有 `params.audio.levels`（函数），宿主序列化
+直接报 `value is not lossless JSON`。改成白名单纯量，和 `stop` 的 `{ok:true}` 对齐。
+
+### Fixed — 悬浮窗里用户输入走 `steer`，不再排队等这一轮跑完（PR #56）
+
+DSH 的 agent 有两个收件箱：`followup` → `next-turn`（这一轮跑完才看得到）、
+`steer` → `next-step`（下一个 step 就交给模型）。人在窗口里说的话改走 `steer`，
+机器自己叫的「有新画面了」仍走 `followup`。`status` 增加 `steers` / `followups` / `lastVia`。
+
+### Fixed — 循环 owner 取「发起调用的会话」（PR #55）
+
+`lastSessionId` 是「这个进程里最后说过话的会话」，多开对话时会被别的会话顶掉 —— 表现是
+「在 A 里开窗，话却投给了 B」。改用工具调用自带的 `run.agent`；子会话（`delegationDepth > 0`）
+除外，它没有能给用户看的窗口。
+
+### Fixed — Linux：悬浮窗默认静态磨砂 / worker 用系统 python / 边距不再填黑（PR #49）
+
+- 非 Windows 默认 `DSH_GLASS_FROST=1`：`live` 要抓窗口背后的像素，Wayland 拿不到、macOS 没
+  授权就是整窗发黑。用户显式选过样式的仍尊重他的选择；
+- 采集 worker 不再吃 `DSH_SEE_PYTHON`（那是给 PySide6 venv 的指示框用的，venv 里没有系统
+  `gi`），新增 `DSH_SEE_WORKER_PYTHON`；
+- 非 Windows 的圆角/阴影边距填面板底色：那边没有 `-transparentcolor`，填 KEY 就是一圈黑框。
+
+### Fixed — `tierStyle` 坏值被历史坏值遮住（PR #47）
+
+`writeTuning` 靠「警告是否变多」判断本次提交合法与否；两个不同的坏值产生同一句警告时，
+用户看到「保存成功」而值被静默换回默认。警告里带上提交值即可。
+
+### Docs — 本地化元数据与详情页（PR #48）
+
+`locale/{zh,en}.json` + `docs/plugin*.md`。
 
 ### Added — Linux 也能「听声音」了
 
@@ -14,32 +106,6 @@
 - 实测：KDE Wayland 上播 8 秒音频，收到 2 段 `seg-*.wav`（各 3.05 秒，按 `maxSeg` 切），
   Node 侧正常转写进台词缓冲。
 
-
-## [0.1.5] - 2026-11-06
-
-### Fixed — 有些机器上装完一个工具都不出现（社区实报）
-
-`import('@deepseek-ai/dsh-tools')` 拿 `defineTool`，而宿主的这份**被打进 `app.asar`**，
-插件从自己的 `node_modules` 往上解析不到 → 抛 → `apply()` 的 catch 吞掉 →
-**整个插件静默不注册任何工具**（日志里只留一行 `failed to load`）。
-
-- 新增 `src/define-tool.js`：内置一份 `defineTool` 兼容实现（author spec → JSON Schema，
-  规则照抄宿主 `runSchemaCompiler` 的语义；只少了运行时参数校验）。
-- `loadDefineTool()` 改成三跳：`import` → `DSH_TOOLS_PATH`（包了 try，路径写错也不会崩）→ 内置兜底。
-- 走兜底的情况下工具照常注册，`schema-audit` 那套静态审计仍然是第一道防线。
-- 测试 +6：`type:'json'` 退化成注解、`required:true` 提升到父级、真实 spec 全部能编译出来。
-
-### Added — 会话里的截图不再无限累积
-
-涨到 `imageTrigger`（默认 300）张就把更早的一次省到 `imageKeep`（默认 100）张，
-走宿主的 `image/offload`。`status` 里也会报"本次采集出了几张"，
-逼近触发线时会提示新开会话。
-
-### Changed — `status` 多一行"图库"
-
-`图库：本次采集出 N 张（≈Xk token、Y MB）`。换算按 798×450 的实测口径（222 token 一张），
-只当量级参考。
-本文件从 `0.0.4` 起记录；更早的版本见 GitHub Releases。
 
 ## [0.2.0] - 2026-11-07
 
@@ -258,6 +324,32 @@ Wayland 下 ffmpeg 没有正路（`x11grab` 只抓到 XWayland 根窗口，`kmsg
 宿主把每条叫醒渲染成一轮对话；模型只回文本时，循环以前会继续投递。现在一次只允许一条在飞，
 45 秒没人接就整个收工。另外 `quality` 不传时保持当前档、显式 `region` 会落盘
 （这两个以前都会导致每次 watch 重开采集）。
+
+## [0.1.5] - 2026-11-06
+
+### Fixed — 有些机器上装完一个工具都不出现（社区实报）
+
+`import('@deepseek-ai/dsh-tools')` 拿 `defineTool`，而宿主的这份**被打进 `app.asar`**，
+插件从自己的 `node_modules` 往上解析不到 → 抛 → `apply()` 的 catch 吞掉 →
+**整个插件静默不注册任何工具**（日志里只留一行 `failed to load`）。
+
+- 新增 `src/define-tool.js`：内置一份 `defineTool` 兼容实现（author spec → JSON Schema，
+  规则照抄宿主 `runSchemaCompiler` 的语义；只少了运行时参数校验）。
+- `loadDefineTool()` 改成三跳：`import` → `DSH_TOOLS_PATH`（包了 try，路径写错也不会崩）→ 内置兜底。
+- 走兜底的情况下工具照常注册，`schema-audit` 那套静态审计仍然是第一道防线。
+- 测试 +6：`type:'json'` 退化成注解、`required:true` 提升到父级、真实 spec 全部能编译出来。
+
+### Added — 会话里的截图不再无限累积
+
+涨到 `imageTrigger`（默认 300）张就把更早的一次省到 `imageKeep`（默认 100）张，
+走宿主的 `image/offload`。`status` 里也会报"本次采集出了几张"，
+逼近触发线时会提示新开会话。
+
+### Changed — `status` 多一行"图库"
+
+`图库：本次采集出 N 张（≈Xk token、Y MB）`。换算按 798×450 的实测口径（222 token 一张），
+只当量级参考。
+本文件从 `0.0.4` 起记录；更早的版本见 GitHub Releases。
 
 ## [0.1.4] - 2026-11-06
 
