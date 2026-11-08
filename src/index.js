@@ -1305,10 +1305,25 @@ async function registerAll(ctx) {
         const built = srcOf(args);
         if (built.error) return { text: built.error, meta: { ok: false, reason: 'bad-region' } };
         const r = await runner.start({ src: built.src ?? { kind: 'screen' } });
+        /**
+         * `meta` **只能回纯量**。
+         *
+         * 以前这里直接 `meta: r`，而 `r.params` 是管道的内部参数对象（含 undefined / 函数位），
+         * 宿主序列化时报 `value is not lossless JSON`，整个工具调用失败 —— 用户看到的是
+         * "第一次 `start` 就报错，`watch`/`peek` 却正常"（issue #60）。
+         * `stop` 一直是 `{ok:true}`，只有这里漏了，所以按白名单挑字段。
+         */
         return {
           text: r.already ? '已经在看了。'
             : `开始看 ${r.source.kind}（引擎 ${r.engine}）${r.warning ? `。⚠️ ${r.warning}` : '。'}`,
-          meta: r,
+          meta: {
+            ok: true,
+            already: Boolean(r.already),
+            engine: r.engine ?? null,
+            sourceKind: r.source?.kind ?? null,
+            quality: r.quality ?? null,
+            warning: r.warning ?? null,
+          },
         };
       }
 
