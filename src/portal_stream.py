@@ -192,6 +192,28 @@ def check_deps():
     return Gio, GLib
 
 
+def frame_layout(width: int, height: int):
+    """gst RGB 帧的**行布局**：(紧凑行字节, 对齐后步长, 紧凑整帧, gst 实际整帧)。
+
+    GStreamer 的 RGB 行按 4 字节对齐（`gst_video_info_align` 对 RGB 的默认对齐）：
+    `width*3` 不是 4 的倍数时，每行尾部多出 1~3 字节 padding。
+    798 宽 → 每行 2394 紧凑 / 2396 实际（整帧 1077300 vs 1078200），
+    1050 → 3150/3152，1066（region 长边）→ 3198/3200；1260 与 1596 本来就是 4 的倍数。
+
+    按紧凑大小切帧 = 每行错位 2 字节、逐行累积 —— 画面是**斜切**的，不是旋转。
+    """
+    row_bytes = width * 3
+    stride = (row_bytes + 3) & ~3
+    return row_bytes, stride, row_bytes * height, stride * height
+
+
+def strip_padding(raw: bytes, row_bytes: int, stride: int, height: int) -> bytes:
+    """把 gst 的 padded 整帧剥成紧凑 RGB（`stride == row_bytes` 时原样返回）。"""
+    if stride == row_bytes:
+        return raw
+    return b"".join(raw[y * stride:y * stride + row_bytes] for y in range(height))
+
+
 def main():
     die_with_parent()
     ap = argparse.ArgumentParser()
@@ -427,7 +449,11 @@ def main():
             p_now = dict(params)
             CTRL["restart"] = False
         width, height = int(p_now["width"]), int(p_now["height"])
-        frame_bytes = width * height * 3
+        # gst 的 RGB 行按 4 字节对齐：width*3 不是 4 的倍数时，每行尾部会多出
+        # padding（实测 798→每行多 2 字节，整帧 1078200 而不是 1077300）。
+        # 按紧凑大小切帧会让每一行错位累积 —— 画面是**斜切**的，不是旋转。
+        # 所以：从 gst 按 stride 读，**剥掉 padding** 再按紧凑大小写给宿主。
+        row_bytes, stride, frame_bytes, frame_raw = frame_layout(width, height)
         pipeline = build_pipeline(p_now)
         log(f"[gst] {pipeline}")
         gst = subprocess.Popen(
@@ -472,9 +498,10 @@ def main():
             # 长度头是给"尺寸会变"用的：换清晰度/region 时帧长变了，宿主靠它切帧，
             # 不需要再去追"我上次告诉它多大的"这种状态（异步管道里对齐不可靠）。
             try:
-                while len(pending) >= frame_bytes:
-                    frame = pending[:frame_bytes]
-                    pending = pending[frame_bytes:]
+                while len(pending) >= frame_raw:
+                    raw = pending[:frame_raw]
+                    pending = pending[frame_raw:]
+                    frame = strip_padding(raw, row_bytes, stride, height)
                     out.write(struct.pack(">I", frame_bytes))
                     out.write(frame)
                 out.flush()
