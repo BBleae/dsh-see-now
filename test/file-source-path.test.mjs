@@ -51,8 +51,9 @@ test('没给 path、相对路径、不存在、是目录：都明确报错', () 
   rejected({ source: 'file' }, '没给 path');
   rejected({ source: 'file', path: '' }, '空串');
   rejected({ source: 'file', path: 'clip.mp4' }, '相对路径');
-  rejected({ source: 'file', path: join(dir, 'missing.mp4') }, '不存在');
-  rejected({ source: 'file', path: sub }, '目录');
+  // stat 失败和「不是普通文件」分开说：前者带错误码，后者不说成「不存在」
+  assert.match(rejected({ source: 'file', path: join(dir, 'missing.mp4') }, '不存在').error, /不存在或无法访问（ENOENT）/);
+  assert.match(rejected({ source: 'file', path: sub }, '目录').error, /不是普通文件/);
 });
 
 test('Windows：UNC 网络路径 / 设备路径在 stat 之前就拒掉', { skip: process.platform !== 'win32' && '只在 Windows 上有这类路径' }, () => {

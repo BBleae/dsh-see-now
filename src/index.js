@@ -48,9 +48,12 @@ function filePathError(path) {
   if (!isAbsolute(path) || (process.platform === 'win32' && /^[\\/]{2}/.test(path))) {
     return `path 要是本机视频文件的绝对路径，现在是「${shown}」。`;
   }
-  let st = null;
-  try { st = statSync(path); } catch { /* 不存在 / 没权限 */ }
-  if (!st?.isFile()) return `path 指向的不是一个存在的文件：「${shown}」。`;
+  // stat 失败（不存在 / 没权限 / …）和「存在但不是普通文件」分开说，前者带上错误码
+  let st;
+  try { st = statSync(path); } catch (e) {
+    return `path 不存在或无法访问（${e?.code ?? 'stat 失败'}）：「${shown}」。`;
+  }
+  if (!st.isFile()) return `path 指向的不是普通文件（比如是个目录）：「${shown}」。`;
   return null;
 }
 
