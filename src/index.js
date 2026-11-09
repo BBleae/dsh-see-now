@@ -675,9 +675,11 @@ async function registerAll(ctx) {
    * 判成 ATTACHMENT_CORRUPT（那比删掉更糟：删掉至少能看出是"文件没了"）。
    * 事件一落地，投影就把那些图换成占位文本，之后既不发出去、也能从磁盘删。
    *
-   * @param {number} keep - 保留最近几张不省略
-   * @param {{silent?: boolean, sessionId?: string|null}} [opts] - 自动触发时静默：出错只记日志，不打扰模型；
-   *   `sessionId` 是要省略的会话（调用方知道图交给了谁时必须传）
+   * @param {{trigger?: number, keep?: number}} [limits] - `trigger`：历史里超过几张才省略（0 = 关）；
+   *   `keep`：保留最近几张不省略。缺省或不合法时用 `tuning.imageTrigger` / `tuning.imageKeep`
+   * @param {{silent?: boolean, sessionId?: string|null}} [opts] - `silent`：自动触发时静默，出错只记日志，不打扰模型；
+   *   `sessionId`：要省略的会话（调用方知道图交给了谁时必须传），不传时依次退到
+   *   `lastCallerSessionId`、`lastSessionId`
    * @returns {Promise<{ok:boolean, text:string, meta:object}>}
    */
   async function runOffload(limits, { silent = false, sessionId = null } = {}) {
@@ -766,13 +768,19 @@ async function registerAll(ctx) {
    *
    * **节流按会话记**：只有一个全局时间戳的话，A 刚交完图，30 秒内 B 交的图就不检查了。
    * 会话 id 在这里**同步**定下来，不留到 `setTimeout` 里现取。
+   * 写新时间戳时顺手清掉过了节流窗口的条目 —— 它们已经挡不住任何检查，
+   * 留着只会让这张表跟着见过的会话数一直长（进程常驻，会话来来去去）。
    */
+  const OFFLOAD_THROTTLE_MS = 30_000;
   const lastOffloadCheck = new Map();
   function maybeAutoOffload(sessionId = null) {
     if (!tuning.imageTrigger) return;
     const sid = sessionId ?? lastCallerSessionId ?? lastSessionId;
     const now = Date.now();
-    if (now - (lastOffloadCheck.get(sid) ?? 0) < 30_000) return;
+    if (now - (lastOffloadCheck.get(sid) ?? 0) < OFFLOAD_THROTTLE_MS) return;
+    for (const [k, at] of lastOffloadCheck) {
+      if (now - at >= OFFLOAD_THROTTLE_MS) lastOffloadCheck.delete(k);
+    }
     lastOffloadCheck.set(sid, now);
     setTimeout(() => {
       void runOffload({ trigger: tuning.imageTrigger, keep: tuning.imageKeep }, { silent: true, sessionId: sid });
